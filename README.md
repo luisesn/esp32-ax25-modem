@@ -1,93 +1,143 @@
 # esp32-aprs-modem
 
-Módem APRS (AX.25 sobre AFSK Bell-202, 1200 bps) para **ESP32**, basado en ESP-IDF v5.x.
+Módem APRS / KISS TNC (AX.25 sobre AFSK Bell-202, 1200 bps) para **ESP32**, basado en ESP-IDF v5.x.
 
-> ⚠️ **Estado: no funcional.** El proyecto compila y arranca, pero la recepción y la transmisión no operan de forma fiable. Los detalles técnicos y el plan de arreglos están en [report.md](report.md).
+> ✅ **Estado: compila limpio. KISS TNC con WiFi TCP operativo. Pendiente verificación en hardware real.**
 
-Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) — a su vez fork de [LibAPRS](https://github.com/markqvist/LibAPRS) de markqvist — para funcionar bajo ESP-IDF (no Arduino). Usa el periférico I2S en modo PDM para la salida de audio y ADC one-shot para la entrada.
+El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
+
+Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) — fork de [LibAPRS](https://github.com/markqvist/LibAPRS) de markqvist — para funcionar bajo ESP-IDF usando el DAC interno y ADC continuo por DMA.
 
 ## Hardware objetivo
 
 - **MCU**: ESP32 (clásico, Xtensa LX6 dual-core).
-- **Salida de audio (TX)**: I2S PDM en GPIO 25 (DOUT) y GPIO 26 (CLK).
-  Requiere un filtro paso-bajo externo para convertir el PDM en audio analógico hacia la entrada MIC del transceptor.
-- **Entrada de audio (RX)**: ADC one-shot en `ADC2_CH0` (GPIO 4 en el código actual — la documentación interna sugiere GPIO 35 / ADC1_CH7; ver [report.md](report.md)).
-  Entrada AC-acoplada y polarizada a ~1,65 V desde la salida de altavoz del transceptor.
-- **PTT**: GPIO 33, activo en nivel bajo (0 = transmitir).
+- **Salida de audio (TX)**: DAC1 en GPIO 25 (`dac_continuous`, muestras 8-bit directas). Sin filtro externo necesario para la mayoría de transceptores.
+- **Entrada de audio (RX)**: GPIO 35 / ADC1_CH7 (`adc_continuous` DMA a 48 kHz, atenuación 12 dB → rango 0–3,1 V). Entrada AC-acoplada desde la salida de altavoz del transceptor.
+- **PTT**: GPIO 26, activo en nivel bajo (0 = transmitir). Configurable en `config.h`.
+
+## Modos de operación
+
+Seleccionado en `config.h` con `TNC_MODE` (requiere recompilación):
+
+| Modo | `TNC_MODE` | Descripción |
+|---|---|---|
+| **KISS TNC** (por defecto) | `TNC_MODE_KISS` | Protocolo KISS sobre WiFi TCP (port 8001). Compatible con `tncattach` y `direwolf`. |
+| **APRS consola** | `TNC_MODE_APRS` | Imprime paquetes AX.25 decodificados por el monitor serie. Modo debug. |
 
 ## Estructura del repositorio
 
 ```
 esp32-aprs-modem/
-├── CMakeLists.txt              proyecto ESP-IDF raíz
-├── sdkconfig                   configuración IDF (target = esp32)
+├── CMakeLists.txt                     proyecto ESP-IDF raíz
+├── sdkconfig                          configuración IDF (target = esp32)
 ├── main/
-│   ├── main.c                  app_main — ejemplo mínimo de recepción
-│   ├── idf_component.yml       dependencia esp-dsp
-│   └── LibAPRS-esp32-i2s/      librería de modulación/demodulación AFSK + AX.25
-├── managed_components/         dependencias gestionadas (esp-dsp)
-├── CLAUDE.md                   guía de contexto para Claude Code
-└── report.md                   informe de problemas y mejoras
+│   ├── CMakeLists.txt                 fuentes y dependencias de componentes
+│   ├── config.h                       TNC_MODE, KISS_TRANSPORT, WiFi SSID/pass, TCP port
+│   ├── main.c                         app_main — bifurca según TNC_MODE
+│   ├── kiss.h / kiss.c                framing KISS (encode/decode), independiente del transporte
+│   ├── transport.h / transport.c      interfaz abstracta { init, write } para transportes
+│   ├── transport_wifi.h / .c          WiFi STA + servidor TCP KISS (transporte activo)
+│   ├── ptt.h / ptt.c                  control GPIO del PTT
+│   ├── idf_component.yml              declaración de dependencias (esp-dsp sin uso activo)
+│   └── LibAPRS-esp32-i2s/src/
+│       ├── LibAPRS.{h,cpp}            API de alto nivel (APRS_init, set_raw_hook, send_raw_frame…)
+│       ├── AFSK.{h,cpp}               modulador/demodulador AFSK, DAC TX, ADC RX
+│       ├── AX25.{h,cpp}               codificación/decodificación AX.25 + raw_hook para KISS
+│       ├── CRC-CCIT.{h,c}             CRC-CCITT para tramas AX.25
+│       ├── HDLC.h                     flags HDLC (0x7E, 0x7F, AX25_ESC)
+│       ├── FIFO.h                     cola circular inline
+│       └── FakeArduino.{h,cpp}        stubs de Serial, F(), _BV(), cli/sei
+├── managed_components/                dependencias gestionadas por IDF
+├── CLAUDE.md                          guía de contexto para Claude Code
+├── report.md                          informe técnico de problemas y soluciones
+└── PROGRESS.md                        seguimiento de arreglos
 ```
 
 ## Dependencias
 
-- ESP-IDF **≥ v5.1** (usa las nuevas APIs `driver/i2s_pdm.h` y `esp_adc/adc_oneshot.h`; las antiguas `driver/i2s.h` y `driver/adc.h` están deprecated).
-- `espressif/esp-dsp` (se resuelve automáticamente vía `idf_component.yml`).
+- **ESP-IDF ≥ v5.1** (usa `dac_continuous`, `adc_continuous`, `esp_wifi`, `esp_netif`).
+- Componentes IDF requeridos (declarados en `main/CMakeLists.txt`):
+  `esp_wifi`, `nvs_flash`, `esp_netif`, `lwip`, `driver`, `esp_driver_dac`, `esp_driver_gpio`, `esp_adc`.
 
 ## Compilación y flasheo
 
 ```bash
-# Exportar el entorno de ESP-IDF previamente (. ./export.sh o export.bat)
+# Antes: editar main/config.h con tus credenciales WiFi
 idf.py set-target esp32
 idf.py build
 idf.py -p <PUERTO_SERIE> flash monitor
 ```
 
-En Windows con el PowerShell/CMD de ESP-IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, etc.
+En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, etc.
 
-## Qué hace el firmware actualmente
+## Qué hace el firmware (modo KISS TNC)
 
-1. `APRS_init()` configura I2S PDM para TX y ADC one-shot para RX y arranca la tarea `receive_audio_task`.
-2. `APRS_setCallsign("NO0CALL", 1)` fija el indicativo (editar en [main/main.c](main/main.c) para tu propia licencia).
-3. `receive_audio_task` muestrea el ADC en bucle, aplica una "squelch" por energía y pasa las muestras al demodulador AFSK; cada vez que llega una trama AX.25 válida se llama a `aprs_msg_callback`.
-4. La tarea `processPacket` sondea un flag y *imprimiría* la cabecera del paquete (el volcado del cuerpo está comentado — ver [main.c:59-61](main/main.c#L59-L61)).
-5. La transmisión (no ejercitada en `main.c`) está disponible vía `APRS_sendLoc()`, `APRS_sendMsg()`, `APRS_sendPkt()`.
+1. `PTT_Init()` configura el GPIO de PTT.
+2. `transport_init(&transport_wifi_ops)` conecta a la red WiFi configurada en `config.h` e imprime la IP asignada.
+3. `kiss_init(on_kiss_frame)` registra el callback que transmite por radio las tramas recibidas del host.
+4. `APRS_init()` + `APRS_set_raw_hook(on_ax25_raw_frame)` arranca el demodulador AFSK y registra el callback que envía al host las tramas recibidas por radio.
+5. Cuando el host envía una trama KISS → `on_kiss_frame` → `APRS_send_raw_frame()` → DAC → radio.
+6. Cuando llega una trama AX.25 por radio → `on_ax25_raw_frame` → `kiss_send_frame()` → socket TCP → host.
 
-## Uso mínimo
+## Conectar al host
 
-```c
-#include "LibAPRS-esp32-i2s/src/LibAPRS.h"
+### Con tncattach (IP sobre AX.25)
 
-#define ADC_REFERENCE REF_3V3
-#define OPEN_SQUELCH  false
+```bash
+# Instalar tncattach
+git clone https://github.com/markqvist/tncattach && cd tncattach && make && sudo make install
 
-void app_main(void) {
-    APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
-    APRS_setCallsign("NO0CALL", 1);
+# Crear interfaz de red AX.25
+sudo tncattach --tcp <ip_del_esp32> 8001 --nosmall --ipv4 44.168.1.2/24
 
-    // Ejemplo: enviar una baliza de posición
-    APRS_setLat("4024.00N");
-    APRS_setLon("00342.00W");
-    APRS_setSymbol('n');
-    APRS_sendLoc("Test beacon", 11);
-}
+# Verificar
+ip link show tnc0
+sudo tcpdump -i tnc0 -n    # capturar tramas AX.25 recibidas por radio
 ```
 
-## Limitaciones y problemas abiertos
+### Con direwolf (iGate / gateway APRS)
 
-Ver [report.md](report.md). Los principales son:
+```
+# direwolf.conf:
+ADEVICE tcp:<ip_del_esp32> 8001
+ACHANNEL 0 1200
+MYCALL NO0CALL-1
+```
 
-- Sample rate del ADC **no controlado** (se usa `adc_oneshot_read` en un bucle tight), por lo que la demodulación pierde temporización.
-- El RX procesa audio **por ráfagas** en lugar de continuamente → se rompe la sincronización HDLC.
-- La salida I2S **PDM** requiere un filtro paso-bajo bien dimensionado; el escalado actual de la muestra (`(sample << 7) + (1<<15)`) genera amplitudes asimétricas.
-- Offset DC hardcodeado a **30523** en `process_audio` — era válido para I2S-ADC de 16 bits, pero ahora con `adc_oneshot_read` (12 bits, 0–4095) es incorrecto.
-- Se reserva ~**96 KB de RAM** en buffers FFT que solo se usan como telemetría de depuración.
-- `freeMemory()` devuelve una constante ficticia; `FakeArduino::Serial` es un stub vacío.
+```bash
+direwolf -c direwolf.conf
+```
 
-## Indicativo y licencia
+## Configuración mínima antes de flashear
 
-Edita [main/main.c:75](main/main.c#L75) con tu propio indicativo antes de transmitir. **Transmitir APRS en la banda amateur requiere licencia de radioaficionado** válida para la región del usuario. El callsign por defecto `NO0CALL` no debe emitirse sin autorización expresa del titular.
+Editar `main/config.h`:
+
+```c
+// Credenciales WiFi
+#define WIFI_SSID     "TU_SSID_AQUI"
+#define WIFI_PASSWORD "TU_PASSWORD_AQUI"
+
+// Puerto TCP donde escucha el ESP32
+#define KISS_TCP_PORT 8001
+```
+
+Para modo APRS consola (debug sin WiFi):
+
+```c
+#define TNC_MODE TNC_MODE_APRS
+// En app_main se puede llamar APRS_setCallsign("TU_INDICATIVO", 1)
+```
+
+## Limitaciones actuales
+
+- **Credenciales WiFi en código fuente** — para producción, usar menuconfig (Kconfig) en lugar de `config.h`.
+- **Pendiente verificación en hardware real** — el código compila y la arquitectura es correcta, pero no se ha podido probar con un transceptor real en este entorno.
+- **FIFOs internos sin protección `portMUX_TYPE`** (report.md §2.6) — riesgo teórico de corrupción si TX y el callback de RX coinciden en el tiempo.
+- **Un solo cliente TCP a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
+
+## Indicativo y licencia de radioaficionado
+
+Editar `config.h` / `main.c` con tu propio indicativo antes de transmitir. **Transmitir en la banda amateur requiere licencia válida**. El indicativo de ejemplo `NO0CALL` no debe emitirse sin autorización expresa del titular.
 
 ## Licencia
 
