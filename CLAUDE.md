@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v5.x**. Estado actual (2026-04-27): **compila limpio, arquitectura de capa física correcta, pendiente verificación en hardware real**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v5.x**. Estado actual (2026-04-28): **compila limpio, arquitectura de capa física correcta, pendiente verificación en hardware real**.
 
 Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino), reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -17,14 +17,24 @@ Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handi
 esp32-aprs-modem/
 ├── CMakeLists.txt              # Proyecto ESP-IDF de nivel superior
 ├── sdkconfig                   # Configuración IDF (target: esp32)
+├── partitions.csv              # Tabla de particiones (NVS + OTA×2 + SPIFFS 704 KB)
 ├── main/
-│   ├── CMakeLists.txt          # Registra .c/.cpp y carpetas de include
+│   ├── CMakeLists.txt          # Registra .c/.cpp, REQUIRES y crea imagen SPIFFS
+│   ├── config.h                # TNC_MODE, KISS_TRANSPORT, WiFi SSID/pass, TCP port
 │   ├── idf_component.yml       # Dependencia esp-dsp declarada pero sin uso activo (pendiente quitar)
-│   ├── main.c                  # app_main — inicializa APRS y crea tarea processPacket
+│   ├── main.c                  # app_main — bifurca según TNC_MODE (KISS o APRS)
+│   ├── kiss.h / kiss.c         # Framing KISS encode/decode, máquina de estados
+│   ├── transport.h / .c        # Interfaz abstracta { init, write } para transportes
+│   ├── transport_wifi.h / .c   # WiFi STA + servidor TCP KISS (transporte activo)
+│   ├── ptt.h / ptt.c           # Control GPIO del PTT (activo alto)
+│   ├── aux_config.h / .c       # Carga/guarda config JSON desde SPIFFS
+│   ├── aux_file_management.h/.c# Utilidades de sistema de ficheros SPIFFS
+│   ├── spiffs_data/
+│   │   └── config.json         # Config inicial (callsign, WiFi, AP) flasheada en SPIFFS
 │   └── LibAPRS-esp32-i2s/src/
-│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (callsign, sendLoc, sendMsg…)
+│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (APRS_init, set_raw_hook, send_raw_frame…)
 │       ├── AFSK.{h,cpp}        # Modulador/demodulador AFSK, DAC TX, ADC RX
-│       ├── AX25.{h,cpp}        # Codificación/decodificación AX.25 sobre HDLC
+│       ├── AX25.{h,cpp}        # Codificación/decodificación AX.25 + raw_hook para KISS
 │       ├── CRC-CCIT.{h,c}      # CRC-CCITT para tramas AX.25
 │       ├── HDLC.h              # Flags HDLC (0x7E, 0x7F, AX25_ESC)
 │       ├── FIFO.h              # Cola circular inline
@@ -41,7 +51,7 @@ esp32-aprs-modem/
 |--------------------|-----------------------------------------|
 | Audio TX (DAC1)    | GPIO 25 (`dac_continuous`, DAC_CHAN_0)  |
 | Audio RX (ADC)     | GPIO 35 (ADC1_CH7, `adc_continuous`)   |
-| PTT salida         | GPIO 33 (activo bajo: 0 = TX)           |
+| PTT salida         | GPIO 26 (activo alto: 1 = TX, 0 = reposo) — restricción HW; también = DAC2 |
 | Trigger audio      | GPIO 37 (sin uso activo)                |
 
 **Parámetros de modulación:**
@@ -63,12 +73,20 @@ idf.py -p <PUERTO> flash monitor
 
 ```
 app_main (main.c)
-  ├── APRS_init  → malloc(Afsk) → AFSK_init → AFSK_hw_init
-  │                  ├── gpio_config PTT (GPIO33, salida, reposo alto)
-  │                  ├── adc_peripheral_start()   ← ADC continuo DMA a 48 kHz
-  │                  └── xTaskCreate(receive_audio_task, prio 10)
-  ├── APRS_setCallsign("NO0CALL", 1)
-  └── xTaskCreate(processPacket, prio 5)   # poll gotPacket cada 100 ms
+  ├── PTT_Init()         ← gpio_config GPIO26 como salida, reposo bajo (0)
+  ├── config_load()      ← lee /spiffs/config.json (callsign, WiFi, AP)
+  ├── [si TNC_MODE_KISS]
+  │     ├── transport_init(&transport_wifi_ops)   ← WiFi STA + TCP server port 8001
+  │     ├── kiss_init(on_kiss_frame)
+  │     ├── APRS_init → AFSK_init → AFSK_hw_init
+  │     │     ├── gpio_config PTT (GPIO26, salida, reposo bajo)
+  │     │     ├── adc_peripheral_start()   ← ADC continuo DMA a 48 kHz
+  │     │     └── xTaskCreate(receive_audio_task, prio 10)
+  │     └── APRS_set_raw_hook(on_ax25_raw_frame)
+  ├── [si TNC_MODE_APRS]
+  │     ├── APRS_init + APRS_setCallsign + APRS_set_msg_hook
+  │     └── xTaskCreate(processPacket, prio 5)
+  └── xTaskCreate(audio_level_task, prio 3)   # imprime nivel cada 250 ms
 
 receive_audio_task (bucle infinito, CPU libre):
   1) Si tx_mode==true → vTaskDelay(10ms) y repetir   [pausa durante TX]
@@ -115,9 +133,18 @@ TX (llamado desde processPacket vía AFSK_transmit / afsk_putchar):
 
 - **`esp-dsp`** sigue declarado en `idf_component.yml` aunque los buffers FFT fueron eliminados. Alarga el build innecesariamente.
 
+- **SPIFFS y `config.json`**: `aux_config.c` lee `/spiffs/config.json` en el arranque. Los campos `wifi.ssid`/`wifi.password` del JSON son los que deberían usarse para la conexión WiFi (aún no están cableados a `transport_wifi.c` — este sigue usando las constantes de `config.h`). El fichero se flashea automáticamente con `idf.py build` gracias a `spiffs_create_partition_image` en `CMakeLists.txt`. Para modificar la config sin recompilar: editar `main/spiffs_data/config.json` y volver a flashear.
+
+- **`config_load()` devuelve copia**: `aux_config.c` devuelve `cJSON_Duplicate(root, 1)` — el llamador es responsable de liberar el objeto con `config_free_json()`. No usar el puntero después de liberar.
+
+- **GPIO 26 = PTT = DAC2 (conflicto de recurso)**: GPIO 26 es simultáneamente el pin de PTT y DAC2 del ESP32. `DAC_CHANNEL_MODE_SIMUL` en `switch_to_tx()` puede reconfigurarlo como salida analógica DAC, dejando el GPIO en modo analógico y sacando el PTT del control digital. Mitigación aplicada: llamar `gpio_set_direction(GPIO_PTT_OUT, GPIO_MODE_OUTPUT)` después de `dac_continuous_new_channels()` en `switch_to_tx()` para restaurar el modo digital.
+
+- **Polaridad PTT**: El hardware usa PTT **activo alto** (1 = transmitiendo, 0 = reposo). Tanto `ptt.c` como `AFSK.cpp` usan esta convención. **No invertir** las llamadas a `gpio_set_level` en ninguno de los dos ficheros.
+
 ## Al editar este proyecto
 
 - **No reintroducir** `adc_oneshot`, PDM, ni el esquema "grabar→procesar": los problemas que causaban están documentados en `report.md` secciones 1.1–1.6.
+- **No cambiar GPIO_PTT_OUT a otro pin** — GPIO 26 es restricción de hardware del diseño físico. Definido en `config.h`.
 - **No activar DAC y ADC simultáneamente** — ver trampa de I2S0 arriba.
 - **Evitar** tocar `AX25.cpp`, `AX25.h`, `HDLC.h`, `CRC-CCIT.c`: código maduro del LibAPRS original que funciona.
 - **Al cambiar GPIOs**, actualizar `device.h` y marcar el comentario anterior como obsoleto.

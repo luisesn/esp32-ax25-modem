@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-04-27
+Última actualización: 2026-04-28
 
 ---
 
@@ -35,7 +35,7 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | 2.4 | Macros deprecated I2S/ADC en `device.h` | ⬜ pendiente |
 | 2.5 | Pausar RX durante TX | ✅ resuelto 2026-04-27 (ver bitácora) |
 | 2.6 | FIFOs sin protección de concurrencia | ⬜ pendiente |
-| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ⬜ pendiente en modo APRS; en modo KISS el callback es `kiss_send_frame` (operación rápida) |
+| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ⬜ pendiente en modo APRS; en modo KISS el callback es `kiss_send_frame` (send() sobre socket, rápido en práctica) |
 | 2.8 | `FakeArduino::Serial` stub sin implementación | ⬜ pendiente |
 | 3.1-3.6 | Limpieza restos AVR, `src.ino`, logs, etc. | ⬜ pendiente |
 | 3.3 | `aprs_msg_callback` como global implícita | ✅ `main.c` reescrito con hooks explícitos; ya no aplica |
@@ -177,3 +177,38 @@ Test de RX sin radio: reproducir un archivo de audio APRS estándar en el GPIO 3
 - [main/transport_wifi.c](main/transport_wifi.c) — `IP2STR(&client_addr.sin_addr)` usaba macro de ESP-IDF (`esp_ip4_addr_t*` / campo `.addr`) con POSIX `struct in_addr` (campo `.s_addr`) → error de compilación. Corregido con `inet_ntop()` para la IP del socket y `esp_ip4addr_ntoa()` para la IP WiFi.
 
 Archivos no tocados (intencionadamente): `AFSK.cpp` (capa física estable), `AX25.cpp` (lógica AX.25 madura), `CRC-CCIT.c`, `FIFO.h`, `HDLC.h`.
+
+### Ronda 2026-04-28
+- [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) — inversión polaridad PTT (3 llamadas `gpio_set_level`).
+- [main/CLAUDE.md](CLAUDE.md) — documentada polaridad PTT activo-alto; conflicto GPIO26/DAC2; estructura actualizada.
+- [main/aux_config.h](main/aux_config.h) / [main/aux_config.c](main/aux_config.c) — nuevo: carga JSON desde SPIFFS.
+- [main/aux_file_management.h](main/aux_file_management.h) / [main/aux_file_management.c](main/aux_file_management.c) — nuevo: utilidades SPIFFS.
+- [main/spiffs_data/config.json](main/spiffs_data/config.json) — nuevo: config inicial.
+- [partitions.csv](partitions.csv) — nuevo: tabla de particiones con SPIFFS.
+- [main/CMakeLists.txt](main/CMakeLists.txt) — añadido `spiffs` + `spiffs_create_partition_image`.
+- [main/main.c](main/main.c) — añadida llamada `config_load()` en `app_main`.
+
+---
+
+### 2026-04-28 — polaridad PTT + infraestructura SPIFFS/config
+
+**Fix polaridad PTT en AFSK.cpp:**
+
+Las tres llamadas directas a `gpio_set_level(GPIO_PTT_OUT, ...)` en `AFSK.cpp` tenían la polaridad invertida respecto al hardware activo-alto (1 = TX, 0 = reposo). Resultado: el GPIO 26 se quedaba en HIGH desde el arranque (radio en TX permanente) y bajaba a LOW durante los eventos de TX reales (radio silenciosa cuando debería estar transmitiendo).
+
+Correcciones ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)):
+- `AFSK_hw_init` (init): `gpio_set_level(0)` ← antes 1 → reposo correcto al arranque.
+- `transmit_audio_i2s` (inicio TX): `gpio_set_level(1)` ← antes 0 → PTT pulsado durante TX.
+- `finish_transmission` (fin TX): `gpio_set_level(0)` ← antes 1 → PTT liberado tras TX.
+
+`ptt.c` no fue tocado — su lógica era correcta.
+
+**Nuevos ficheros de infraestructura SPIFFS:**
+
+1. `aux_config.h / aux_config.c` — carga/guarda `config.json` desde SPIFFS usando cJSON. API: `config_load()` (singleton con copia profunda), `config_reload()`, `config_get()`, `save_config()`.
+2. `aux_file_management.h / aux_file_management.c` — utilidades SPIFFS: listar ficheros, comprobar existencia, leer/escribir strings.
+3. `main/spiffs_data/config.json` — configuración inicial flasheada en la partición SPIFFS: `aprs.callsign`, `wifi.ssid/password`, `ap.enabled/ssid/password`.
+4. `partitions.csv` — tabla de particiones personalizada: NVS (20 KB) + OTAdata + app0 + app1 (OTA×2, 1664 KB cada una) + SPIFFS (704 KB).
+5. `main/CMakeLists.txt` — añadido `spiffs` a `REQUIRES` y `spiffs_create_partition_image(spiffs spiffs_data FLASH_IN_PROJECT)`.
+
+`main.c` llama `config_load()` en el arranque. Los valores del JSON aún no están cableados a `transport_wifi.c` (que sigue usando las constantes de `config.h`); es infraestructura preparatoria para configuración dinámica.

@@ -1,0 +1,17 @@
+{
+    "version": "1",
+    "aprs": {
+        "callsign": "NO0CALL",
+        "symbol_table": "/",
+        "symbol_code": ">"
+    },
+    "wifi": {
+        "ssid": "YOUR_SSID",
+        "password": "YOUR_PASSWORD"
+    },
+    "ap": {
+        "enabled": true,
+        "ssid": "APRS_AP",
+        "password": "12345678"
+    }
+}

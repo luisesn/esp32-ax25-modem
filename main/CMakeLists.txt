@@ -9,6 +9,8 @@ idf_component_register(
         "LibAPRS-esp32-i2s/src/AX25.cpp"
         "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
         "ptt.c"
+        "aux_file_management.c"
+        "aux_config.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"
@@ -22,4 +24,10 @@ idf_component_register(
         esp_driver_dac
         esp_driver_gpio
         esp_adc
+        spiffs
+)
+spiffs_create_partition_image(
+    spiffs
+    spiffs_data
+    FLASH_IN_PROJECT
 )

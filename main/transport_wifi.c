@@ -1,6 +1,7 @@
 #include "transport_wifi.h"
 #include "kiss.h"
 #include "config.h"
+#include "aux_config.h"
 
 #include <string.h>
 #include <errno.h>
@@ -73,15 +74,41 @@ static void wifi_connect(void) {
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         wifi_event_handler, NULL, NULL);
 
+    cJSON *config = config_load();
+    if (config == NULL) {
+        ESP_LOGE(TAG, "No config available for WiFi connection");
+        return;
+    }
+
+    cJSON *wifi_config = cJSON_GetObjectItem(config, "wifi");
+    if (wifi_config == NULL) {
+        ESP_LOGE(TAG, "No WiFi config in config file");
+        config_free_json(config);
+        return;
+    }
+
+    cJSON *ssid_item = cJSON_GetObjectItem(wifi_config, "ssid");
+    cJSON *password_item = cJSON_GetObjectItem(wifi_config, "password");
+
+    if (ssid_item == NULL || !cJSON_IsString(ssid_item) ||
+        password_item == NULL || !cJSON_IsString(password_item)) {
+        ESP_LOGE(TAG, "Invalid WiFi config: missing or invalid ssid/password");
+        config_free_json(config);
+        return;
+    }
+
+    const char* ssid = ssid_item->valuestring;
+    const char* password = password_item->valuestring;
+
     wifi_config_t wifi_cfg = {};
-    memcpy(wifi_cfg.sta.ssid,     WIFI_SSID,     strlen(WIFI_SSID));
-    memcpy(wifi_cfg.sta.password, WIFI_PASSWORD, strlen(WIFI_PASSWORD));
+    memcpy(wifi_cfg.sta.ssid,     ssid,     strlen(ssid));
+    memcpy(wifi_cfg.sta.password, password, strlen(password));
 
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     esp_wifi_start();
 
-    ESP_LOGI(TAG, "Conectando a '%s'...", WIFI_SSID);
+    ESP_LOGI(TAG, "Conectando a '%s'...", ssid);
     xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
                         pdFALSE, pdTRUE, portMAX_DELAY);
 }

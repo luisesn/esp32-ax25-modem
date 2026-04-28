@@ -1,3 +1,5 @@
 dependencies:
+  espressif/cjson:
+    version: ^1.7.19
   espressif/esp-dsp:
     version: "*"

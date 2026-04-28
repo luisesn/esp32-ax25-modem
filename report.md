@@ -334,7 +334,7 @@ No produce salida (ver 2.8). Reescribir con `ESP_LOGI` o `printf` si se quiere c
 - **`idf.py size-components`**: auditar RAM consumida por los buffers FFT (punto 2.1).
 - **`idf.py app-trace`**: trazar el timing real del loop ADC (punto 1.1) para confirmar el jitter antes y después del arreglo.
 - **`direwolf` o `multimon-ng`** alimentados por una SDR (p. ej. RTL-SDR con Gqrx): decodificar desde el aire el audio generado por el TX para validar la modulación.
-- **Analizador lógico** en el GPIO 25 (salida PDM) o GPIO 33 (PTT) para verificar la temporización.
+- **Analizador lógico** en el GPIO 25 (salida DAC) o GPIO 26 (PTT) para verificar la temporización.
 - **Osciloscopio** en la entrada del ADC para medir DC offset real y ajustar el filtro acoplador.
 
 ---

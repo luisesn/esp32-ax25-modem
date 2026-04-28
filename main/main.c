@@ -4,6 +4,7 @@
 #include <freertos/task.h>
 
 #include "config.h"
+#include "aux_config.h"
 #include "ptt.h"
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
@@ -118,6 +119,7 @@ static void processPacket(void *arg) {
 void app_main(void)
 {
     PTT_Init();
+    config_load();
 
 #if TNC_MODE == TNC_MODE_KISS
 

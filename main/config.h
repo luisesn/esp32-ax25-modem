@@ -2,8 +2,8 @@
 // Hardware
 // ---------------------------------------------------------------------------
 #define GPIO_PTT_OUT          GPIO_NUM_26
-#define CONFIG_PTT_ON_DELAY_MS  100
-#define CONFIG_PTT_OFF_DELAY_MS 100
+#define CONFIG_PTT_ON_DELAY_MS  10
+#define CONFIG_PTT_OFF_DELAY_MS 10
 
 // ---------------------------------------------------------------------------
 // Modo de operación
@@ -25,6 +25,4 @@
 // Para producción usar menuconfig (CONFIG_EXAMPLE_WIFI_SSID / _PASS) en su
 // lugar, para no almacenar credenciales en el código fuente.
 // ---------------------------------------------------------------------------
-#define WIFI_SSID     "TU_SSID_AQUI"
-#define WIFI_PASSWORD "TU_PASSWORD_AQUI"
 #define KISS_TCP_PORT 8001
