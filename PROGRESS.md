@@ -178,7 +178,7 @@ Test de RX sin radio: reproducir un archivo de audio APRS estándar en el GPIO 3
 
 Archivos no tocados (intencionadamente): `AFSK.cpp` (capa física estable), `AX25.cpp` (lógica AX.25 madura), `CRC-CCIT.c`, `FIFO.h`, `HDLC.h`.
 
-### Ronda 2026-04-28
+### Ronda 2026-04-28 — sesión 1
 - [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) — inversión polaridad PTT (3 llamadas `gpio_set_level`).
 - [main/CLAUDE.md](CLAUDE.md) — documentada polaridad PTT activo-alto; conflicto GPIO26/DAC2; estructura actualizada.
 - [main/aux_config.h](main/aux_config.h) / [main/aux_config.c](main/aux_config.c) — nuevo: carga JSON desde SPIFFS.
@@ -187,6 +187,55 @@ Archivos no tocados (intencionadamente): `AFSK.cpp` (capa física estable), `AX2
 - [partitions.csv](partitions.csv) — nuevo: tabla de particiones con SPIFFS.
 - [main/CMakeLists.txt](main/CMakeLists.txt) — añadido `spiffs` + `spiffs_create_partition_image`.
 - [main/main.c](main/main.c) — añadida llamada `config_load()` en `app_main`.
+
+### Ronda 2026-04-28 — sesión 2
+- [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) — reescritura de `switch_to_tx()` (order deinit/delay/enable); `TX_SAMPLE_BUFLEN` 320→2048 y movido antes de `switch_to_tx`; `transmit_audio_i2s` siempre escribe buffer completo con padding de silencio; `finish_transmission` simplificado a una sola escritura; `dac_continuous_write` con timeout 2000 ms y abort-on-error; cola TX `s_tx_queue` para dispatch desde `receive_audio_task`.
+- [main/main.c](main/main.c) — añadida llamada `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` para modo KISS (registra la función de envío en el dispatcher de cola).
+
+---
+
+### 2026-04-28 — sesión 2: TX queue dispatch + correcciones DAC/DMA
+
+**FreeRTOS mutex dispatch (cola TX):**
+
+En modo KISS TNC, `server_task` recibía tramas KISS y llamaba directamente `APRS_send_raw_frame` → `switch_to_tx` → `adc_continuous_stop`. Pero `adc_continuous_stop` solo puede llamarse desde la misma tarea que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). La llamada cruzada fallaba silenciosamente o causaba crash.
+
+**Solución** ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp), [main.c](main/main.c)):
+- `receive_audio_task` comprueba `s_tx_queue` en cada iteración y despacha TX desde su propio contexto.
+- `server_task` encola vía `afsk_queue_tx_frame()` (no bloqueante; descarta si la cola está llena).
+- `afsk_set_tx_fn(APRS_send_raw_frame)` registra la función real de TX. Se llama en `app_main` entre `APRS_init` y `APRS_set_raw_hook`.
+
+**TX hang (PTT pulsado indefinidamente) — bug 1: DAC no arranca:**
+
+`dac_continuous_write` con timeout `-1` bloqueaba indefinidamente. Causas:
+1. `vTaskDelay(20ms)` estaba entre `stop` y `deinit` del ADC, en lugar de después de `deinit` — I2S0 aún ocupado cuando el DAC intentaba tomarlo.
+2. `dac_continuous_enable` se llamaba dentro de `transmit_audio_i2s`, pero la escritura necesita el DAC habilitado antes de intentarla.
+3. Sin priming inicial, el oscilador I2S nunca arrancaba su primer ciclo DMA.
+
+Correcciones en `switch_to_tx()` ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)):
+- `vTaskDelay(20 ms)` movido a después de `adc_continuous_deinit`.
+- `dac_continuous_enable` movido a dentro de `switch_to_tx()`.
+- Silence prime: escritura de `TX_SAMPLE_BUFLEN` bytes de `0x80` tras habilitar.
+- Timeout de `dac_continuous_write` cambiado a `2000 ms` con abort-on-error.
+
+**TX hang — bug 2: hambruna del descriptor DMA por preempción WiFi:**
+
+Con `TX_SAMPLE_BUFLEN=320`, cada descriptor DMA dura 320/48000 s ≈ 6,7 ms. Las tareas WiFi (prioridad 23) pueden preemptar `receive_audio_task` (prioridad 10) durante decenas de ms. Si la tarea no escribe al DMA antes de que el descriptor se consuma, el semáforo interno `s_dac_wait_to_load_dma_data` expira → timeout → cuelgue.
+
+Corrección: `TX_SAMPLE_BUFLEN` subido de **320 a 2048** bytes.
+- Descriptor: 2048/48000 ≈ **42 ms** de audio.
+- Con `desc_num=8`: pool total ≈ **336 ms** — margen suficiente frente a preempciones WiFi.
+
+**TX con duración excesiva (~10 s) — bug 3: DMA se detiene en escritura parcial:**
+
+Cuando `AFSK_dac_isr` pone `sending=false` a mitad del buffer (p.ej. tras 5 muestras), solo se escribían 5 bytes al DMA. El DMA los consumía en <0,1 ms y se paraba. Las 20 escrituras de silencio posteriores expiraban cada una a 500 ms → ≈10 s de bloqueo.
+
+Corrección en `transmit_audio_i2s()` ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)):
+- El buffer se llena con `AFSK_dac_isr` mientras `afsk->sending`, y el resto hasta `TX_SAMPLE_BUFLEN` se rellena con `0x80`.
+- Siempre se escribe el buffer completo (`TX_SAMPLE_BUFLEN` bytes) al DMA.
+- `finish_transmission`: simplificado de 20 iteraciones × 256 bytes a **una sola escritura de `TX_SAMPLE_BUFLEN` bytes**.
+
+**Verificación:** datos transmitidos recibidos y decodificados correctamente por un receptor externo.
 
 ---
 

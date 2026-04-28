@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v5.x**. Estado actual (2026-04-28): **compila limpio, arquitectura de capa física correcta, pendiente verificación en hardware real**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v5.x**. Estado actual (2026-04-28): **compila limpio, KISS TNC bidireccional operativo, TX verificado en hardware (datos decodificados por receptor externo), RX pendiente verificación con señal RF real**.
 
 Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino), reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -80,31 +80,40 @@ app_main (main.c)
   │     ├── kiss_init(on_kiss_frame)
   │     ├── APRS_init → AFSK_init → AFSK_hw_init
   │     │     ├── gpio_config PTT (GPIO26, salida, reposo bajo)
-  │     │     ├── adc_peripheral_start()   ← ADC continuo DMA a 48 kHz
+  │     │     ├── xQueueCreate(s_tx_queue, 4)  ← cola de tramas TX
   │     │     └── xTaskCreate(receive_audio_task, prio 10)
+  │     │           └── [dentro de la tarea] adc_peripheral_start()
+  │     ├── afsk_set_tx_fn(APRS_send_raw_frame) ← registra fn de TX en cola
   │     └── APRS_set_raw_hook(on_ax25_raw_frame)
   ├── [si TNC_MODE_APRS]
   │     ├── APRS_init + APRS_setCallsign + APRS_set_msg_hook
   │     └── xTaskCreate(processPacket, prio 5)
   └── xTaskCreate(audio_level_task, prio 3)   # imprime nivel cada 250 ms
 
-receive_audio_task (bucle infinito, CPU libre):
-  1) Si tx_mode==true → vTaskDelay(10ms) y repetir   [pausa durante TX]
-  2) adc_continuous_read(timeout=20ms)               [DMA ring buffer]
-  3) Para cada muestra: decimar x5 → adc_to_s8 → AFSK_adc_isr
-  4) APRS_poll() cada 4 muestras lógicas (~2,4 ms)
-  5) vTaskDelay(1)                                   [cede CPU a IDLE]
+receive_audio_task (bucle infinito):
+  1) Si s_tx_queue tiene trama pendiente → despacha s_tx_fn(data,len) [TX]
+  2) Si tx_mode==true → vTaskDelay(10ms) y repetir   [pausa durante TX]
+  3) adc_continuous_read(timeout=20ms)               [DMA ring buffer]
+  4) Para cada muestra: decimar x5 → adc_to_s8 → AFSK_adc_isr
+  5) APRS_poll() cada 4 muestras lógicas (~2,4 ms)
+  6) vTaskDelay(1)                                   [cede CPU a IDLE]
 
-TX (llamado desde processPacket vía AFSK_transmit / afsk_putchar):
+server_task (transport_wifi.c, cuando cliente TCP conectado):
+  recibe bytes KISS → kiss_rx_byte() → on_kiss_frame → afsk_queue_tx_frame()
+    ↑ NO llama APRS_send_raw_frame directamente (viola mutex ADC)
+
+TX (despachado por receive_audio_task desde s_tx_queue):
+  s_tx_fn(data, len) = APRS_send_raw_frame → ax25_sendRaw → AFSK_transmit
   switch_to_tx():
     tx_mode=true → adc_continuous_stop → adc_continuous_deinit
-    → dac_continuous_new_channels
-  transmit_audio_i2s() en bucle hasta afsk->sending==false
+    → vTaskDelay(20ms) → dac_continuous_new_channels → dac_continuous_enable
+    → prime silence (TX_SAMPLE_BUFLEN bytes × 0x80)
+  transmit_audio_i2s() en bucle: genera muestras AFSK, padding 0x80, escribe
+    TX_SAMPLE_BUFLEN bytes al DMA (timeout=2000ms) hasta afsk->sending==false
   finish_transmission():
-    escribe 5120 muestras de silencio (128) → PTT alto
+    escribe TX_SAMPLE_BUFLEN bytes de silencio → gpio PTT=0
     switch_to_rx():
-      dac_continuous_del_channels
-      → adc_peripheral_start() → tx_mode=false
+      dac_continuous_del_channels → adc_peripheral_start() → tx_mode=false
 ```
 
 ## Convenciones y trampas conocidas
@@ -137,6 +146,14 @@ TX (llamado desde processPacket vía AFSK_transmit / afsk_putchar):
 
 - **`config_load()` devuelve copia**: `aux_config.c` devuelve `cJSON_Duplicate(root, 1)` — el llamador es responsable de liberar el objeto con `config_free_json()`. No usar el puntero después de liberar.
 
+- **Cola TX entre tareas (`s_tx_queue`)**: en modo KISS TNC, `server_task` **no puede** llamar `APRS_send_raw_frame` directamente porque internamente invoca `adc_continuous_stop`, que debe ejecutarse desde la misma tarea FreeRTOS que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). Solución: `QueueHandle_t s_tx_queue` de capacidad 4 × `afsk_tx_frame_t`. `server_task` encola con `afsk_queue_tx_frame()` (no bloqueante); `receive_audio_task` despacha al inicio de cada iteración. **Es obligatorio llamar `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` antes de `APRS_set_raw_hook`.**
+
+- **`TX_SAMPLE_BUFLEN=2048` — no reducir**: el descriptor DMA del DAC tiene `buf_size=2048` bytes (≈42 ms a 48 kHz). Con `desc_num=8`, el pool total es ≈336 ms. Las tareas WiFi (prioridad 23) pueden preemptar `receive_audio_task` (prioridad 10) durante decenas de ms. Si el descriptor se consume antes de que la tarea recargue el siguiente, el semáforo `s_dac_wait_to_load_dma_data` expira → `dac_continuous_write` cuelga. Con `TX_SAMPLE_BUFLEN<buf_size` cada escritura llena menos de un descriptor y el margen desaparece.
+
+- **Siempre escribir el buffer completo al DMA**: cuando `AFSK_dac_isr` establece `sending=false` a mitad del buffer, `transmit_audio_i2s` rellena el resto con `0x80` (nivel DC = silencio) y siempre escribe `TX_SAMPLE_BUFLEN` bytes. Escribir un buffer parcial agota el descriptor en <1 ms, el DMA se detiene, y las escrituras de silencio posteriores no consiguen cargar porque el ISR ya no dispara → timeout × N = bloqueo prolongado.
+
+- **`dac_continuous_write` con timeout finito (2000 ms)**: **nunca usar `-1` (portMAX_DELAY)** para este write. Si el DAC se detiene inesperadamente, el timeout permite abortar con `afsk->sending = false` y volver al modo RX. Con timeout infinito, el firmware queda bloqueado con el PTT pulsado indefinidamente.
+
 - **GPIO 26 = PTT = DAC2 (conflicto de recurso)**: GPIO 26 es simultáneamente el pin de PTT y DAC2 del ESP32. `DAC_CHANNEL_MODE_SIMUL` en `switch_to_tx()` puede reconfigurarlo como salida analógica DAC, dejando el GPIO en modo analógico y sacando el PTT del control digital. Mitigación aplicada: llamar `gpio_set_direction(GPIO_PTT_OUT, GPIO_MODE_OUTPUT)` después de `dac_continuous_new_channels()` en `switch_to_tx()` para restaurar el modo digital.
 
 - **Polaridad PTT**: El hardware usa PTT **activo alto** (1 = transmitiendo, 0 = reposo). Tanto `ptt.c` como `AFSK.cpp` usan esta convención. **No invertir** las llamadas a `gpio_set_level` en ninguno de los dos ficheros.
@@ -164,9 +181,10 @@ Ver [report.md](report.md) para el detalle completo y [PROGRESS.md](PROGRESS.md)
 
 Resumen rápido:
 - Sección 1 (bloqueantes): todos resueltos en código ✅
-- Sección 2.5 + 2.10 + 2.11: resueltos en código ✅
+- Sección 2.5 + 2.10 + 2.11 + 2.12 + 2.13: resueltos en código ✅
+- TX verificado en hardware: datos recibidos y decodificados por receptor externo ✅
 - Sección 2.2, 2.3, 2.6, 2.7, 2.8: pendientes ⬜
-- Verificación en hardware real: pendiente ⚠️
+- Verificación RX en hardware real con señal RF: pendiente ⚠️
 
 ## Referencias externas
 

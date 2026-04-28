@@ -5,9 +5,16 @@
 
 #include "config.h"
 #include "aux_config.h"
+#include"aux_file_management.h"
+
+#include "driver/gpio.h"
 #include "ptt.h"
+
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
+
+
+#include "device.h"
 
 #if TNC_MODE == TNC_MODE_KISS
 #include "kiss.h"
@@ -58,9 +65,11 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     kiss_send_frame(buf, len);
 }
 
-// Trama KISS completa recibida del host → transmitir por radio.
+// Trama KISS completa recibida del host → encolar para TX en receive_audio_task.
+// No llamar APRS_send_raw_frame directamente desde server_task: adc_continuous_stop
+// requiere ser invocado por la misma tarea que llamó adc_continuous_start.
 static void on_kiss_frame(const uint8_t *buf, size_t len) {
-    APRS_send_raw_frame(buf, len);
+    afsk_queue_tx_frame(buf, len);
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +128,16 @@ static void processPacket(void *arg) {
 void app_main(void)
 {
     PTT_Init();
+    file_management_init();
     config_load();
+    /*
+    // test ptt
+    for (int i = 0; i < 5; i++) {
+        PTT_Press();
+        vTaskDelay(2500 / portTICK_PERIOD_MS);
+        PTT_Release();
+        vTaskDelay(2500 / portTICK_PERIOD_MS);
+    }*/
 
 #if TNC_MODE == TNC_MODE_KISS
 
@@ -134,6 +152,7 @@ void app_main(void)
     kiss_init(on_kiss_frame);
 
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
+    afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
 
 #elif TNC_MODE == TNC_MODE_APRS

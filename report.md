@@ -1,6 +1,6 @@
 # Informe técnico — esp32-aprs-modem
 
-Fecha: 2026-04-27 (actualizado; original 2026-04-17)
+Fecha: 2026-04-28 (actualizado; original 2026-04-17)
 Autor: análisis automático (Claude Code)
 
 Este documento detalla los problemas que impiden el correcto funcionamiento del módem y propone mejoras concretas. Los problemas están ordenados por gravedad (bloqueantes → mejoras).
@@ -241,6 +241,34 @@ Archivo Arduino residual. No está en el `SRCS` del CMakeLists, pero confunde y 
 
 ---
 
+## 2.12 Cola TX entre tareas — violación del mutex `adc_continuous` ✅ resuelto 2026-04-28
+**Archivo**: [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp), [main/main.c](main/main.c)
+
+En modo KISS TNC, `server_task` llamaba directamente a `APRS_send_raw_frame`, que a su vez llama a `switch_to_tx` → `adc_continuous_stop`. El driver `adc_continuous` de ESP-IDF mantiene un mutex interno asociado a la tarea que llamó a `adc_continuous_start`. Invocar `stop` desde una tarea diferente viola ese mutex.
+
+**Solución**: cola FreeRTOS `s_tx_queue` de capacidad 4 × `afsk_tx_frame_t`. `server_task` encola con `afsk_queue_tx_frame()` (no bloqueante). `receive_audio_task` comprueba la cola al inicio de cada iteración y ejecuta `s_tx_fn(data, len)` desde su propio contexto — la misma tarea que llamó a `adc_continuous_start`. `afsk_set_tx_fn(APRS_send_raw_frame)` registra la función real; debe llamarse en `app_main` antes de `APRS_set_raw_hook`.
+
+---
+
+## 2.13 TX hang: DAC no arranca, hambruna de DMA y escritura parcial ✅ resuelto 2026-04-28
+**Archivo**: [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)
+
+Tres bugs independientes causaban que el PTT quedara pulsado indefinidamente o que la transmisión durara ~10 s:
+
+**Bug A — DAC no arranca**: `vTaskDelay` estaba entre `adc_continuous_stop` y `adc_continuous_deinit` (en lugar de después de `deinit`), `dac_continuous_enable` se llamaba dentro de `transmit_audio_i2s` (después de la primera escritura), y no había priming del DMA. Resultado: `dac_continuous_write(-1)` bloqueaba indefinidamente.
+
+**Solución**: en `switch_to_tx()`, (1) delay de 20 ms movido a después de `deinit`; (2) `dac_continuous_enable` movido aquí; (3) se escribe un descriptor completo de silencio (2048 × `0x80`) para cebar el oscilador I2S antes del audio real. Timeout de `dac_continuous_write` cambiado a 2000 ms con `afsk->sending = false` como salida de emergencia.
+
+**Bug B — hambruna de descriptor DMA**: con `TX_SAMPLE_BUFLEN=320`, cada descriptor duraba 320/48000 s ≈ 6,7 ms. Las tareas WiFi (prioridad 23 > 10 de `receive_audio_task`) podían preemptar durante más tiempo, agotando el descriptor antes de que la tarea pudiera recargar. El semáforo interno `s_dac_wait_to_load_dma_data` expiraba → timeout.
+
+**Solución**: `TX_SAMPLE_BUFLEN` subido de 320 a **2048** bytes (≈42 ms/descriptor). Con `desc_num=8`: pool de ~336 ms, suficiente margen frente a preempciones WiFi.
+
+**Bug C — escritura parcial detiene el DMA**: cuando `AFSK_dac_isr` ponía `sending=false` a mitad del buffer (p.ej. 5 muestras), solo se enviaban 5 bytes al DMA. El DMA los consumía en <0,1 ms y se paraba. Las 20 escrituras de silencio posteriores expiraban individualmente a 500 ms → ~10 s de bloqueo.
+
+**Solución**: `transmit_audio_i2s` siempre rellena el resto del buffer hasta `TX_SAMPLE_BUFLEN` con `0x80` y siempre escribe el buffer completo al DMA. `finish_transmission` simplificado de 20 × 256 bytes a una sola escritura de `TX_SAMPLE_BUFLEN` bytes.
+
+---
+
 ## 2.10 Conflicto de hardware I2S0 entre `dac_continuous` y `adc_continuous` ✅ resuelto 2026-04-27
 **Archivo**: [main/LibAPRS-esp32-i2s/src/AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)
 
@@ -316,6 +344,8 @@ No produce salida (ver 2.8). Reescribir con `ESP_LOGI` o `printf` si se quiere c
 8. ~~Resolver conflicto I2S0 DAC/ADC~~ (2.10) — conmutación half-duplex.
 9. ~~Pausar RX durante TX~~ (2.5) — `tx_mode` flag.
 10. ~~Task WDT~~ (2.11) — `vTaskDelay(1)` en `receive_audio_task`.
+11. ~~Cola TX entre tareas~~ (2.12) — `s_tx_queue` + `afsk_set_tx_fn`.
+12. ~~TX hang / DMA starvation / escritura parcial~~ (2.13) — `TX_SAMPLE_BUFLEN=2048`, padding de silencio, timeout finito.
 
 ### Pendiente (orden sugerido)
 1. **Verificación en hardware** — flashear y comprobar con `tncattach` + `tcpdump -i tnc0`. Es el paso más importante.
@@ -343,7 +373,7 @@ No produce salida (ver 2.8). Reescribir con `ESP_LOGI` o `printf` si se quiere c
 
 El proyecto es funcional en el plano de **alto nivel** (API LibAPRS + AX.25 + HDLC + CRC), pero la **capa física de ESP32** está rota:
 
-| Subsistema               | Estado (2026-04-27)                                     |
+| Subsistema               | Estado (2026-04-28)                                     |
 |--------------------------|---------------------------------------------------------|
 | Codificación AX.25       | ✅ Correcto                                              |
 | Modulación AFSK (lógica) | ✅ Correcto                                              |
@@ -351,9 +381,13 @@ El proyecto es funcional en el plano de **alto nivel** (API LibAPRS + AX.25 + HD
 | Salida de audio (DAC)    | ✅ `dac_continuous` sobre DAC1 (GPIO 25), muestras 8-bit directas |
 | Half-duplex TX/RX        | ✅ Conmutación I2S0 entre ADC y DAC; `receive_audio_task` pausa durante TX |
 | Task WDT                 | ✅ `vTaskDelay(1)` evita que `receive_audio_task` sature CPU |
+| Cola TX entre tareas     | ✅ `s_tx_queue` + dispatch en `receive_audio_task`; respeta mutex ADC |
+| Fiabilidad DAC/DMA TX    | ✅ `TX_SAMPLE_BUFLEN=2048` (42 ms/desc × 8 = 336 ms pool); padding silencio; timeout finito |
+| TX verificado en HW      | ✅ Datos recibidos y decodificados por receptor externo |
 | `main.c` / modo firmware  | ✅ KISS TNC con WiFi TCP (modo APRS consola preservado bajo `#if`) |
 | KISS TNC / WiFi TCP       | ✅ Servidor TCP port 8001; compatible con `tncattach` y `direwolf` |
 | Capa de transporte        | ✅ Interfaz abstracta `{ init, write }`; WiFi implementado; UART/BT como stubs futuros |
+| RX verificado en HW      | ⚠️ Pendiente verificación con señal de RF real |
 | Gestión de memoria        | ⚠️ `freeMemory()` sigue siendo constante ficticia (solo afecta modo APRS) |
 | Concurrencia              | ⚠️ FIFOs sin protección `portMUX_TYPE` |
 | Compilación               | ✅ Pasa `-Werror`; corregido error `IP2STR` con tipos POSIX vs ESP |

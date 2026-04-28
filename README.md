@@ -2,7 +2,7 @@
 
 Módem APRS / KISS TNC (AX.25 sobre AFSK Bell-202, 1200 bps) para **ESP32**, basado en ESP-IDF v5.x.
 
-> ✅ **Estado: compila limpio. KISS TNC con WiFi TCP operativo. Pendiente verificación en hardware real.**
+> ✅ **Estado: compila limpio. KISS TNC bidireccional operativo. TX verificado en hardware (datos decodificados por receptor externo). RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -81,7 +81,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 3. `transport_init(&transport_wifi_ops)` conecta a la red WiFi configurada e imprime la IP asignada.
 4. `kiss_init(on_kiss_frame)` registra el callback que transmite por radio las tramas recibidas del host.
 5. `APRS_init()` + `APRS_set_raw_hook(on_ax25_raw_frame)` arranca el demodulador AFSK y registra el callback que envía al host las tramas recibidas por radio.
-6. Cuando el host envía una trama KISS → `on_kiss_frame` → `APRS_send_raw_frame()` → DAC → radio.
+6. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio. (El despacho desde la misma tarea que controla el ADC es necesario para respetar el mutex interno de `adc_continuous`.)
 7. Cuando llega una trama AX.25 por radio → `on_ax25_raw_frame` → `kiss_send_frame()` → socket TCP → host.
 
 ## Conectar al host
@@ -93,7 +93,9 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 git clone https://github.com/markqvist/tncattach && cd tncattach && make && sudo make install
 
 # Crear interfaz de red AX.25
-sudo tncattach --tcp <ip_del_esp32> 8001 --nosmall --ipv4 44.61.3.72/24
+sudo tncattach -T -H 192.168.1.242 -P 8001 --ethernet --mtu 250 --noipv6 --ipv4 44.61.3.72/24
+
+sudo tncattach --tcp 192.168.1.242 8001 --nosmall --ipv4 44.61.3.72/24
 
 # Verificar
 ip link show tnc0
@@ -136,7 +138,7 @@ Para modo APRS consola (debug sin WiFi):
 ## Limitaciones actuales
 
 - **Credenciales WiFi en código fuente** — para producción, usar menuconfig (Kconfig) en lugar de `config.h`.
-- **Pendiente verificación en hardware real** — el código compila y la arquitectura es correcta, pero no se ha podido probar con un transceptor real en este entorno.
+- **RX pendiente verificación con señal RF real** — TX funciona (datos verificados por receptor externo); RX necesita señal de audio desde un transceptor o SDR para confirmar demodulación AFSK.
 - **FIFOs internos sin protección `portMUX_TYPE`** (report.md §2.6) — riesgo teórico de corrupción si TX y el callback de RX coinciden en el tiempo.
 - **Un solo cliente TCP a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 
