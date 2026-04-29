@@ -184,6 +184,15 @@ static esp_err_t index_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// 404 → redirect to / (captive-portal probes from Android/iOS/Windows)
+static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
+    (void)err;
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 // GET /ws → WebSocket upgrade.
 // En ESP-IDF 6.1 este handler se llama cuando el cliente envía un frame
 // (no al conectar). Para streaming unidireccional basta con consumir el frame.
@@ -284,6 +293,7 @@ void audio_stream_init(void) {
     };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
+    httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
     xTaskCreate(audio_stream_task, "audio_stream", 4096, NULL, 3, NULL);

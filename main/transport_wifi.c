@@ -20,7 +20,13 @@
 #define TAG "wifi_transport"
 #define WIFI_CONNECTED_BIT BIT0
 
+#define DEFAULT_CONNECT_TIMEOUT_S 120
+
 static EventGroupHandle_t s_wifi_eg;
+
+// true mientras estamos intentando la conexión STA; false en cuanto
+// expira el timeout o nos pasamos a modo AP.
+static volatile bool s_sta_active = false;
 
 // Acceso al fd del cliente sin mutex: en ESP32 (32-bit) leer/escribir un int
 // alineado es atómico. El peor caso es un send() sobre un fd recién cerrado,
@@ -36,9 +42,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "Desconectado de WiFi, reintentando...");
-        s_client_fd = -1;   // invalidar socket de cliente si lo había
-        esp_wifi_connect();
+        s_client_fd = -1;
+        if (s_sta_active) {
+            ESP_LOGW(TAG, "Desconectado de WiFi, reintentando...");
+            esp_wifi_connect();
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         char ip_str[16];
@@ -49,7 +57,93 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 }
 
 // ---------------------------------------------------------------------------
-// Conexión WiFi STA
+// DNS cautivo: responde a todas las consultas con 192.168.4.1
+// ---------------------------------------------------------------------------
+
+static void captive_dns_task(void *arg) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) { vTaskDelete(NULL); return; }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port        = htons(53),
+    };
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "DNS bind falló: %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "DNS captivo escuchando en puerto 53");
+
+    uint8_t buf[256];
+    uint8_t resp[512];
+
+    for (;;) {
+        struct sockaddr_in client;
+        socklen_t clen = sizeof(client);
+        int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&client, &clen);
+        if (n < 12) continue;
+
+        // Construir respuesta: copiar la consulta y añadir una respuesta A.
+        memcpy(resp, buf, n);
+        resp[2] |= 0x80;    // QR = 1 (respuesta)
+        resp[3]  = 0x80;    // RA = 1, sin errores
+        resp[6]  = 0x00; resp[7]  = 0x01; // ANCOUNT = 1
+        resp[8]  = 0x00; resp[9]  = 0x00; // NSCOUNT = 0
+        resp[10] = 0x00; resp[11] = 0x00; // ARCOUNT = 0
+
+        int pos = n;
+        // Registro A apuntando al nombre de la pregunta (puntero 0xC00C).
+        resp[pos++] = 0xC0; resp[pos++] = 0x0C; // puntero a offset 12
+        resp[pos++] = 0x00; resp[pos++] = 0x01; // TYPE  A
+        resp[pos++] = 0x00; resp[pos++] = 0x01; // CLASS IN
+        resp[pos++] = 0x00; resp[pos++] = 0x00; // TTL (4 bytes)
+        resp[pos++] = 0x00; resp[pos++] = 60;
+        resp[pos++] = 0x00; resp[pos++] = 0x04; // RDLENGTH = 4
+        resp[pos++] = 192;  resp[pos++] = 168;  // 192.168.4.1
+        resp[pos++] = 4;    resp[pos++] = 1;
+
+        sendto(sock, resp, pos, 0, (struct sockaddr *)&client, clen);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inicio de modo AP
+// ---------------------------------------------------------------------------
+
+static void wifi_start_ap(const char *ssid, const char *password) {
+    ESP_LOGI(TAG, "Iniciando AP '%s'...", ssid);
+
+    esp_netif_create_default_wifi_ap();
+
+    wifi_config_t ap_cfg = {};
+    snprintf((char *)ap_cfg.ap.ssid,     sizeof(ap_cfg.ap.ssid),     "%s", ssid);
+    ap_cfg.ap.ssid_len = (uint8_t)strlen(ssid);
+    ap_cfg.ap.max_connection = 4;
+    ap_cfg.ap.beacon_interval = 100;
+
+    if (password && strlen(password) >= 8) {
+        snprintf((char *)ap_cfg.ap.password, sizeof(ap_cfg.ap.password), "%s", password);
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+    }
+
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    esp_wifi_start();
+
+    xTaskCreate(captive_dns_task, "cap_dns", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "AP iniciado. IP: 192.168.4.1  SSID: %s", ssid);
+}
+
+// ---------------------------------------------------------------------------
+// Conexión WiFi: intenta STA con timeout, cae a AP si no conecta
 // ---------------------------------------------------------------------------
 
 static void wifi_connect(void) {
@@ -75,42 +169,83 @@ static void wifi_connect(void) {
                                         wifi_event_handler, NULL, NULL);
 
     cJSON *config = config_load();
-    if (config == NULL) {
-        ESP_LOGE(TAG, "No config available for WiFi connection");
+    if (!config) {
+        ESP_LOGE(TAG, "No hay configuración disponible");
         return;
     }
 
-    cJSON *wifi_config = cJSON_GetObjectItem(config, "wifi");
-    if (wifi_config == NULL) {
-        ESP_LOGE(TAG, "No WiFi config in config file");
-        config_free_json(config);
-        return;
+    // --- Leer sección wifi ---
+    cJSON *wifi_j  = cJSON_GetObjectItem(config, "wifi");
+    cJSON *ap_j    = cJSON_GetObjectItem(config, "ap");
+
+    const char *ssid     = NULL;
+    const char *password = NULL;
+    int timeout_s        = DEFAULT_CONNECT_TIMEOUT_S;
+
+    if (wifi_j) {
+        cJSON *it;
+        it = cJSON_GetObjectItem(wifi_j, "ssid");
+        if (cJSON_IsString(it)) ssid = it->valuestring;
+        it = cJSON_GetObjectItem(wifi_j, "password");
+        if (cJSON_IsString(it)) password = it->valuestring;
+        it = cJSON_GetObjectItem(wifi_j, "connect_timeout_s");
+        if (cJSON_IsNumber(it) && it->valuedouble > 0)
+            timeout_s = (int)it->valuedouble;
     }
 
-    cJSON *ssid_item = cJSON_GetObjectItem(wifi_config, "ssid");
-    cJSON *password_item = cJSON_GetObjectItem(wifi_config, "password");
+    // --- Intentar STA ---
+    bool connected  = false;
+    bool sta_started = false;
 
-    if (ssid_item == NULL || !cJSON_IsString(ssid_item) ||
-        password_item == NULL || !cJSON_IsString(password_item)) {
-        ESP_LOGE(TAG, "Invalid WiFi config: missing or invalid ssid/password");
-        config_free_json(config);
-        return;
+    if (ssid && ssid[0]) {
+        wifi_config_t sta_cfg = {};
+        snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),     "%s", ssid);
+        snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s",
+                 password ? password : "");
+
+        s_sta_active = true;
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        esp_wifi_start();
+        sta_started = true;
+
+        ESP_LOGI(TAG, "Conectando a '%s' (timeout %d s)...", ssid, timeout_s);
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
+                                               pdFALSE, pdTRUE,
+                                               pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
+        connected    = (bits & WIFI_CONNECTED_BIT) != 0;
+        s_sta_active = false;
     }
 
-    const char* ssid = ssid_item->valuestring;
-    const char* password = password_item->valuestring;
+    if (!connected) {
+        if (sta_started) {
+            ESP_LOGW(TAG, "No se pudo conectar a WiFi. Iniciando AP de respaldo...");
+            esp_wifi_stop();
+        }
 
-    wifi_config_t wifi_cfg = {};
-    memcpy(wifi_cfg.sta.ssid,     ssid,     strlen(ssid));
-    memcpy(wifi_cfg.sta.password, password, strlen(password));
+        // --- Leer sección ap ---
+        const char *ap_ssid = "APRS-TNC";
+        const char *ap_pass = "";
+        bool ap_enabled     = true;
 
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
-    esp_wifi_start();
+        if (ap_j) {
+            cJSON *it;
+            it = cJSON_GetObjectItem(ap_j, "enabled");
+            if (cJSON_IsBool(it)) ap_enabled = cJSON_IsTrue(it);
+            it = cJSON_GetObjectItem(ap_j, "ssid");
+            if (cJSON_IsString(it)) ap_ssid = it->valuestring;
+            it = cJSON_GetObjectItem(ap_j, "password");
+            if (cJSON_IsString(it)) ap_pass = it->valuestring;
+        }
 
-    ESP_LOGI(TAG, "Conectando a '%s'...", ssid);
-    xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
-                        pdFALSE, pdTRUE, portMAX_DELAY);
+        if (ap_enabled) {
+            wifi_start_ap(ap_ssid, ap_pass);
+        } else {
+            ESP_LOGW(TAG, "AP de respaldo deshabilitado. Sin red.");
+        }
+    }
+
+    config_free_json(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +294,6 @@ static void server_task(void *arg) {
 
         s_client_fd = fd;
 
-        // Bucle de recepción: bytes del host → decodificador KISS
         uint8_t buf[256];
         int n;
         while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
@@ -185,8 +319,6 @@ static void wifi_transport_init(void) {
 static void wifi_transport_write(const uint8_t *buf, size_t len) {
     int fd = s_client_fd;
     if (fd >= 0) {
-        // send() sin MSG_DONTWAIT: admisible porque las tramas AX.25 a 1200 bps
-        // son pequeñas y el buffer del kernel raramente se llena.
         if (send(fd, buf, len, 0) < 0) {
             ESP_LOGD(TAG, "send() falló (%d), cliente probablemente desconectado", errno);
         }
