@@ -2,6 +2,7 @@
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "esp_system.h"
 
 #include "config.h"
 #include "aux_config.h"
@@ -12,6 +13,7 @@
 
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
+#include "audio_stream.h"
 
 
 #include "device.h"
@@ -86,7 +88,7 @@ void aprs_msg_callback(struct AX25Msg *msg) {
     if (gotPacket) return;
     gotPacket = true;
     memcpy(&incomingPacket, msg, sizeof(AX25Msg));
-    if (freeMemory() > (int)msg->len) {
+    if ((int)esp_get_free_heap_size() > (int)msg->len) {
         packetData = (uint8_t *)malloc(msg->len);
         memcpy(packetData, msg->info, msg->len);
         incomingPacket.info = packetData;
@@ -125,6 +127,13 @@ static void processPacket(void *arg) {
 // app_main
 // ---------------------------------------------------------------------------
 
+// Hook instalado en receive_audio_task: cada muestra decimada (9600 Hz, int8)
+// se encola de forma no bloqueante hacia audio_stream_task.
+static void audio_sample_hook(int8_t sample) {
+    if (audio_stream_q)
+        xQueueSendToBack(audio_stream_q, &sample, 0);
+}
+
 void app_main(void)
 {
     PTT_Init();
@@ -154,6 +163,11 @@ void app_main(void)
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
     afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
+
+    // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
+    // Debe llamarse después de transport_init (WiFi ya conectado).
+    audio_stream_init();
+    afsk_set_audio_hook(audio_sample_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS
 

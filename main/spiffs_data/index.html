@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 APRS Audio</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#e0e0e0;font-family:monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:1.5rem;padding:1rem}
+h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
+#status{font-size:.8rem;color:#888;min-height:1.2em}
+#btn{padding:.7rem 2rem;font-size:1rem;font-family:monospace;background:#1a3a5c;color:#7ecfff;border:1px solid #7ecfff;border-radius:4px;cursor:pointer;transition:background .2s}
+#btn:hover{background:#254f80}
+#btn:disabled{opacity:.4;cursor:default}
+#meter-wrap{width:260px;height:12px;background:#1a1a1a;border:1px solid #333;border-radius:2px;overflow:hidden}
+#meter{height:100%;width:0;background:linear-gradient(90deg,#2a8a2a,#8a8a2a,#8a2a2a);transition:width .05s}
+#info{font-size:.7rem;color:#555;text-align:center;line-height:1.6}
+</style>
+</head>
+<body>
+<h1>&#x1F4FB; ESP32 APRS Monitor</h1>
+<div id="status">Desconectado</div>
+<button id="btn" onclick="toggle()">&#x25B6; Escuchar</button>
+<div id="meter-wrap"><div id="meter"></div></div>
+<div id="info">
+  IMA ADPCM · 9600 Hz · 38.4 kbps<br>
+  VLC/ffplay: <code>http://HOST:8080/audio</code>
+</div>
+
+<script>
+// ── IMA ADPCM decoder ──────────────────────────────────────────────────────
+const STEP = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,
+  60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,
+  408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,
+  2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,
+  8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,
+  29794,32767];
+const IDX = [-1,-1,-1,-1,2,4,6,8];
+
+function decodeBlock(buf) {
+  const v = new DataView(buf);
+  const raw = new Uint8Array(buf);
+  let pred = v.getInt16(0, true);
+  let si   = Math.min(Math.max(raw[2], 0), 88);
+  // 1 sample in header + (512-4)*2 = 1016 nibble samples = 1017 total
+  const out = new Float32Array(1017);
+  out[0] = pred / 32768;
+  let oi = 1;
+  for (let i = 4; i < 512; i++) {
+    const byte = raw[i];
+    for (let h = 0; h < 2; h++) {
+      const n   = h === 0 ? (byte & 0xF) : (byte >> 4);
+      const st  = STEP[si];
+      let delta = st >> 3;
+      if (n & 4) delta += st;
+      if (n & 2) delta += st >> 1;
+      if (n & 1) delta += st >> 2;
+      pred += (n & 8) ? -delta : delta;
+      if (pred >  32767) pred =  32767;
+      if (pred < -32768) pred = -32768;
+      si += IDX[n & 7];
+      if (si < 0) si = 0;
+      if (si > 88) si = 88;
+      out[oi++] = pred / 32768;
+    }
+  }
+  return out;
+}
+
+// ── AudioContext scheduler ─────────────────────────────────────────────────
+const SR = 9600; // sample rate
+let actx = null;
+let nextAt = 0;  // next scheduled play time (AudioContext clock)
+
+function scheduleBlock(samples) {
+  const buf = actx.createBuffer(1, samples.length, SR);
+  buf.copyToChannel(samples, 0);
+  const src = actx.createBufferSource();
+  src.buffer = buf;
+  src.connect(actx.destination);
+  const now = actx.currentTime;
+  if (nextAt < now + 0.05) nextAt = now + 0.05; // bootstrap / gap recovery
+  src.start(nextAt);
+  nextAt += samples.length / SR;
+  // VU meter: RMS of this block
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  const rms = Math.sqrt(sum / samples.length);
+  document.getElementById('meter').style.width = Math.min(rms * 400, 100) + '%';
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let ws = null;
+function setStatus(t) { document.getElementById('status').textContent = t; }
+
+function connect() {
+  const url = 'ws://' + location.host + '/ws';
+  setStatus('Conectando…');
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('Conectado · recibiendo audio…');
+    document.getElementById('btn').textContent = '⏹ Detener';
+    document.getElementById('btn').disabled = false;
+  };
+  ws.onmessage = e => {
+    if (!(e.data instanceof ArrayBuffer) || e.data.byteLength !== 512) return;
+    scheduleBlock(decodeBlock(e.data));
+  };
+  ws.onclose = ws.onerror = () => {
+    setStatus('Desconectado');
+    document.getElementById('btn').textContent = '▶ Escuchar';
+    document.getElementById('btn').disabled = false;
+    document.getElementById('meter').style.width = '0';
+    ws = null; nextAt = 0;
+  };
+}
+
+function toggle() {
+  document.getElementById('btn').disabled = true;
+  if (ws) {
+    ws.close();
+    return;
+  }
+  // AudioContext requires user gesture
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
+  if (actx.state === 'suspended') actx.resume();
+  connect();
+}
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ idf_component_register(
         "ptt.c"
         "aux_file_management.c"
         "aux_config.c"
+        "audio_stream.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"
@@ -25,6 +26,8 @@ idf_component_register(
         esp_driver_gpio
         esp_adc
         spiffs
+        esp_http_server
+        vfs
 )
 spiffs_create_partition_image(
     spiffs
