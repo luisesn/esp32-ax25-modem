@@ -264,6 +264,26 @@ static void wav_server_task(void *arg) {
     }
 }
 
+// ─── Envío de texto a clientes WebSocket ─────────────────────────────────────
+
+void audio_stream_ws_send_text(const char *text) {
+    if (s_httpd == NULL || text == NULL) return;
+    httpd_ws_frame_t pkt = {
+        .final      = true,
+        .fragmented = false,
+        .type       = HTTPD_WS_TYPE_TEXT,
+        .payload    = (uint8_t *)text,
+        .len        = strlen(text),
+    };
+    int client_fds[5];
+    size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
+    if (httpd_get_client_list(s_httpd, &n, client_fds) != ESP_OK) return;
+    for (int i = 0; i < (int)n; i++) {
+        if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
+            httpd_ws_send_data(s_httpd, client_fds[i], &pkt);
+    }
+}
+
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {

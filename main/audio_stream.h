@@ -22,3 +22,7 @@ extern QueueHandle_t audio_stream_q;
 // Inicia el servidor HTTP (port AUDIO_HTTP_PORT) y la tarea de streaming.
 // Debe llamarse después de que WiFi esté conectado.
 void audio_stream_init(void);
+
+// Envía un frame WebSocket TEXT a todos los clientes WS conectados.
+// Seguro de llamar desde cualquier tarea FreeRTOS.
+void audio_stream_ws_send_text(const char *text);
