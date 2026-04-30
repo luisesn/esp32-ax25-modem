@@ -33,15 +33,14 @@ esp32-aprs-modem/
 ├── partitions.csv                     tabla de particiones (NVS + OTA×2 + SPIFFS 704 KB)
 ├── main/
 │   ├── CMakeLists.txt                 fuentes, dependencias y creación de imagen SPIFFS
-│   ├── config.h                       TNC_MODE, KISS_TRANSPORT, WiFi SSID/pass, TCP port
+│   ├── config.h                       TNC_MODE, KISS_TRANSPORT, TCP port y GPIOs
 │   ├── main.c                         app_main — bifurca según TNC_MODE
 │   ├── kiss.h / kiss.c                framing KISS (encode/decode), independiente del transporte
 │   ├── transport.h / transport.c      interfaz abstracta { init, write } para transportes
 │   ├── transport_wifi.h / .c          WiFi STA + servidor TCP KISS (transporte activo)
-│   ├── ptt.h / ptt.c                  control GPIO del PTT
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
-│   ├── spiffs_data/config.json        configuración inicial (callsign, WiFi, AP) flasheada en SPIFFS
+│   ├── spiffs_data/config.json        configuración inicial (callsign, WiFi, AP, IP) flasheada en SPIFFS
 │   ├── idf_component.yml              declaración de dependencias (esp-dsp sin uso activo)
 │   └── LibAPRS-esp32-i2s/src/
 │       ├── LibAPRS.{h,cpp}            API de alto nivel (APRS_init, set_raw_hook, send_raw_frame…)
@@ -66,7 +65,7 @@ esp32-aprs-modem/
 ## Compilación y flasheo
 
 ```bash
-# Antes: editar main/config.h con tus credenciales WiFi
+# Antes: editar main/spiffs_data/config.json con tus credenciales WiFi
 idf.py set-target esp32
 idf.py build
 idf.py -p <PUERTO_SERIE> flash monitor
@@ -76,13 +75,13 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 
 ## Qué hace el firmware (modo KISS TNC)
 
-1. `PTT_Init()` configura GPIO 26 como salida PTT (activo alto).
-2. `config_load()` lee `config.json` desde la partición SPIFFS (callsign, WiFi, AP config).
+1. `config_load()` lee `config.json` desde la partición SPIFFS (callsign, WiFi, AP, IP).
 3. `transport_init(&transport_wifi_ops)` conecta a la red WiFi configurada e imprime la IP asignada.
 4. `kiss_init(on_kiss_frame)` registra el callback que transmite por radio las tramas recibidas del host.
 5. `APRS_init()` + `APRS_set_raw_hook(on_ax25_raw_frame)` arranca el demodulador AFSK y registra el callback que envía al host las tramas recibidas por radio.
 6. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio. (El despacho desde la misma tarea que controla el ADC es necesario para respetar el mutex interno de `adc_continuous`.)
 7. Cuando llega una trama AX.25 por radio → `on_ax25_raw_frame` → `kiss_send_frame()` → socket TCP → host.
+8. `audio_level_task` genera barra de nivel y hace parpadeo rápido del LED RX cuando el pico queda fuera del rango permitido.
 
 ## Conectar al host
 
@@ -117,16 +116,32 @@ direwolf -c direwolf.conf
 
 ## Configuración mínima antes de flashear
 
-Editar `main/config.h`:
+Editar `main/spiffs_data/config.json`:
 
-```c
-// Credenciales WiFi
-#define WIFI_SSID     "TU_SSID_AQUI"
-#define WIFI_PASSWORD "TU_PASSWORD_AQUI"
-
-// Puerto TCP donde escucha el ESP32
-#define KISS_TCP_PORT 8001
+```json
+{
+  "aprs": { "callsign": "TU_INDICATIVO" },
+  "wifi": {
+    "ssid": "TU_SSID_AQUI",
+    "password": "TU_PASSWORD_AQUI",
+    "connect_timeout_s": 120
+  },
+  "ap": {
+    "enabled": true,
+    "ssid": "APRS_AP",
+    "password": "12345678"
+  },
+  "ip": {
+    "enabled": false,
+    "addr": "44.61.3.71",
+    "netmask": "255.255.255.0",
+    "gateway": "44.61.3.1",
+    "ssid": 1
+  }
+}
 ```
+
+`main/config.h` mantiene parámetros de compilación (`TNC_MODE`, `KISS_TRANSPORT`, `KISS_TCP_PORT`, GPIOs).
 
 Para modo APRS consola (debug sin WiFi):
 
@@ -137,14 +152,14 @@ Para modo APRS consola (debug sin WiFi):
 
 ## Limitaciones actuales
 
-- **Credenciales WiFi en código fuente** — para producción, usar menuconfig (Kconfig) en lugar de `config.h`.
+- **Configuración en SPIFFS** — cambiar `config.json` en runtime requiere endpoint/configurador o reflashear imagen SPIFFS.
 - **RX pendiente verificación con señal RF real** — TX funciona (datos verificados por receptor externo); RX necesita señal de audio desde un transceptor o SDR para confirmar demodulación AFSK.
 - **FIFOs internos sin protección `portMUX_TYPE`** (report.md §2.6) — riesgo teórico de corrupción si TX y el callback de RX coinciden en el tiempo.
 - **Un solo cliente TCP a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 
 ## Indicativo y licencia de radioaficionado
 
-Editar `config.h` / `main.c` con tu propio indicativo antes de transmitir. **Transmitir en la banda amateur requiere licencia válida**. El indicativo de ejemplo `NO0CALL` no debe emitirse sin autorización expresa del titular.
+Editar `main/spiffs_data/config.json` (`aprs.callsign` y opcionalmente `ip.ssid`) con tu propio indicativo antes de transmitir. **Transmitir en la banda amateur requiere licencia válida**. El indicativo de ejemplo `NO0CALL` no debe emitirse sin autorización expresa del titular.
 
 ## Licencia
 

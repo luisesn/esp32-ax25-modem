@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-04-28
+Última actualización: 2026-04-30
 
 ---
 
@@ -250,7 +250,7 @@ Correcciones ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)):
 - `transmit_audio_i2s` (inicio TX): `gpio_set_level(1)` ← antes 0 → PTT pulsado durante TX.
 - `finish_transmission` (fin TX): `gpio_set_level(0)` ← antes 1 → PTT liberado tras TX.
 
-`ptt.c` no fue tocado — su lógica era correcta.
+El control de PTT quedó centralizado en `AFSK.cpp`; `ptt.c/.h` se eliminaron como código muerto.
 
 **Nuevos ficheros de infraestructura SPIFFS:**
 
@@ -260,4 +260,14 @@ Correcciones ([AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp)):
 4. `partitions.csv` — tabla de particiones personalizada: NVS (20 KB) + OTAdata + app0 + app1 (OTA×2, 1664 KB cada una) + SPIFFS (704 KB).
 5. `main/CMakeLists.txt` — añadido `spiffs` a `REQUIRES` y `spiffs_create_partition_image(spiffs spiffs_data FLASH_IN_PROJECT)`.
 
-`main.c` llama `config_load()` en el arranque. Los valores del JSON aún no están cableados a `transport_wifi.c` (que sigue usando las constantes de `config.h`); es infraestructura preparatoria para configuración dinámica.
+`main.c` llama `config_load()` en el arranque y `transport_wifi.c` usa `wifi.*` y `ap.*` desde `config.json`.
+
+---
+
+### 2026-04-30 — sincronización de estado actual
+
+1. **Build verificado**: `idf.py build` completa correctamente (con warnings de CMake/IDF no bloqueantes).
+2. **Código muerto eliminado**: `main/ptt.c` y `main/ptt.h` removidos del repositorio y de `main/CMakeLists.txt`.
+3. **Configuración de red en JSON**: `main/spiffs_data/config.json` incluye sección `ip` (`enabled`, `addr`, `netmask`, `gateway`, `ssid`) para el plan de modo IP nativo.
+4. **Indicativo/SSID configurables en runtime**: en `TNC_MODE_APRS`, `APRS_setCallsign()` ya toma `aprs.callsign` + `ip.ssid` desde `config_get()`.
+5. **Alarma de nivel de audio**: `audio_level_task` ahora usa umbrales (`AUDIO_LEVEL_TOO_LOW`, `AUDIO_LEVEL_TOO_HIGH`) y hace parpadeo rápido del LED RX (`GPIO_LED_RX`) cuando el pico está fuera de rango.
