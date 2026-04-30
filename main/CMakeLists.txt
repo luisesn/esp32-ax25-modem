@@ -29,6 +29,10 @@ idf_component_register(
         esp_http_server
         vfs
 )
+# AX25_MAX_FRAME_LEN por defecto es 330 (suficiente para APRS pero no para IP).
+# 600 cubre el MTU típico de tncattach (512 B payload + 16 B cabecera AX.25 + 2 B CRC).
+target_compile_definitions(__idf_main PRIVATE CUSTOM_FRAME_SIZE=600)
+
 spiffs_create_partition_image(
     spiffs
     spiffs_data
