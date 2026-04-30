@@ -75,6 +75,13 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #pos-btn:hover{background:#254f80}#pos-btn:disabled{opacity:.4;cursor:default}
 #pos-sym{background:#111;color:#e0e0e0;border:1px solid #333;border-radius:3px;
   font-family:monospace;font-size:.7rem;padding:.3rem .4rem}
+#cfg-editor{flex:1;min-height:8rem;background:#0a0a0a;color:#b0e0b0;border:1px solid #2a3a2a;
+  border-radius:3px;font-family:monospace;font-size:.65rem;resize:vertical;padding:.5rem;
+  line-height:1.5;white-space:pre;overflow:auto}
+#cfg-save-btn{padding:.4rem 1rem;font-size:.75rem;font-family:monospace;background:#0d2a0d;
+  color:#4fc84f;border:1px solid #4a9a4a;border-radius:3px;cursor:pointer;transition:background .2s}
+#cfg-save-btn:hover{background:#163816}#cfg-save-btn:disabled{opacity:.4;cursor:default}
+#cfg-status{font-size:.65rem;color:#888;margin-left:.5rem;flex:1}
 #send-hdr{padding:.35rem .6rem;font-size:.7rem;color:#c8a04a;
           border-bottom:1px solid #2a1a00;letter-spacing:.08em}
 #send-wrap{display:flex;flex-direction:column}
@@ -123,6 +130,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
     <div class="tab-bar">
       <button class="tab-btn active" onclick="showTab('msg',this)">MENSAJE</button>
       <button class="tab-btn" onclick="showTab('pos',this)">POSICIÓN</button>
+      <button class="tab-btn" onclick="showTab('cfg',this)">CONFIG</button>
     </div>
     <div id="tab-msg" class="tab-pane active">
       <div class="send-row">
@@ -175,6 +183,13 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div class="send-row">
         <button id="pos-btn" onclick="sendBeacon()">&#x1F4E1; Transmitir baliza</button>
         <span id="pos-status" style="font-size:.65rem;color:#888;margin-left:.5rem;flex:1"></span>
+      </div>
+    </div>
+    <div id="tab-cfg" class="tab-pane" style="justify-content:flex-start">
+      <textarea id="cfg-editor" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+      <div class="send-row" style="flex-shrink:0">
+        <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
+        <span id="cfg-status"></span>
       </div>
     </div>
   </div>
@@ -376,9 +391,39 @@ function showTab(name,btn){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  document.getElementById('tab-'+name).classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');  if(name==='cfg') loadCfg();}// ── Config editor ───────────────────────────────────────────────────
+let cfgLoaded=false;
+function loadCfg(){
+  if(cfgLoaded) return;
+  const ta=document.getElementById('cfg-editor');
+  const st=document.getElementById('cfg-status');
+  st.style.color='#888';st.textContent='Cargando…';
+  fetch('/api/config').then(r=>r.json()).then(d=>{
+    ta.value=JSON.stringify(d,null,2);
+    st.textContent='';
+    cfgLoaded=true;
+  }).catch(()=>{st.style.color='#c04040';st.textContent='Error al cargar config.';});
 }
-// ── GPS ────────────────────────────────────────────────────────────────────
+function saveCfg(){
+  const ta=document.getElementById('cfg-editor');
+  const st=document.getElementById('cfg-status');
+  const btn=document.getElementById('cfg-save-btn');
+  let parsed;
+  try{ parsed=JSON.parse(ta.value); }
+  catch(e){ st.style.color='#c04040';st.textContent='JSON inválido: '+e.message;return; }
+  btn.disabled=true;st.style.color='#888';st.textContent='Guardando…';
+  fetch('/api/config',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(parsed)
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      st.style.color='#4ac84a';st.textContent='✓ Guardado y aplicado';
+      cfgLoaded=false;  // force reload next time tab is opened
+    }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
+  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  ).finally(()=>{btn.disabled=false;});
+}// ── GPS ────────────────────────────────────────────────────────────────────
 function getGPS(){
   const btn=document.getElementById('gps-btn');
   const st=document.getElementById('pos-status');

@@ -22,5 +22,12 @@
         "netmask": "255.255.255.0",
         "gateway": "44.61.3.1",
         "ssid": 1
+    },
+    "digi": {
+        "enabled": false,
+        "alias": "WIDE1-1",
+        "callsign": "",
+        "ssid": 0,
+        "comment": "ESP32-DIGI"
     }
 }

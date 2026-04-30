@@ -15,7 +15,7 @@
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
 #include "audio_stream.h"
 #include "ax25ip.h"
-
+#include "digipeater.h"
 
 #include "device.h"
 
@@ -256,6 +256,7 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     kiss_send_frame(buf, len);
     try_auto_ack(buf, len);
+    digi_process_frame(buf, len);
     ax25ip_rx_frame(buf, len);
 
     static char s_aprs_json[APRS_JSON_BUF];
@@ -380,6 +381,8 @@ void app_main(void)
 
     afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
+
+    digi_init(config_get());
 
     // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
     // Debe llamarse después de transport_init (WiFi ya conectado).

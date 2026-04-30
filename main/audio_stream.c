@@ -11,6 +11,8 @@
 #include <math.h>
 #include "cJSON.h"
 #include "LibAPRS.h"
+#include "aux_config.h"
+#include "digipeater.h"
 
 #define TAG "audio_stream"
 
@@ -311,6 +313,65 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// GET /api/config → devuelve el config.json completo almacenado en SPIFFS.
+static esp_err_t config_get_handler(httpd_req_t *req) {
+    FILE *f = fopen(CONFIG_FILE_PATH, "r");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot open config");
+        return ESP_FAIL;
+    }
+    fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)fsz + 1);
+    if (!buf) { fclose(f); httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"); return ESP_FAIL; }
+    size_t rd = fread(buf, 1, (size_t)fsz, f); fclose(f); buf[rd] = '\0';
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
+// POST /api/config → guarda el body como nuevo config.json, recarga en RAM.
+// El body debe ser JSON válido (<= 2 KB). Recarga immediate sin reiniciar.
+static esp_err_t config_post_handler(httpd_req_t *req) {
+    // Límite de 2 KB para el body
+    static char body[2048];
+    int total = 0, ret;
+    while (total < (int)sizeof(body) - 1) {
+        ret = httpd_req_recv(req, body + total, sizeof(body) - 1 - (size_t)total);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
+            return ESP_FAIL;
+        }
+        total += ret;
+    }
+    body[total] = '\0';
+
+    // Validate JSON before saving
+    cJSON *parsed = cJSON_Parse(body);
+    if (!parsed) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(parsed);
+
+    if (!save_config(body)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
+        return ESP_FAIL;
+    }
+
+    // Reload config into RAM and re-apply runtime-updatable settings
+    cJSON *new_cfg = config_reload();
+    if (new_cfg) {
+        digi_init(new_cfg);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // 404 → redirect to / (captive-portal probes from Android/iOS/Windows)
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
     (void)err;
@@ -502,11 +563,23 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = aprs_beacon_handler,
     };
+    static const httpd_uri_t uri_cfg_get = {
+        .uri     = "/api/config",
+        .method  = HTTP_GET,
+        .handler = config_get_handler,
+    };
+    static const httpd_uri_t uri_cfg_post = {
+        .uri     = "/api/config",
+        .method  = HTTP_POST,
+        .handler = config_post_handler,
+    };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
     httpd_register_uri_handler(s_httpd, &uri_me);
     httpd_register_uri_handler(s_httpd, &uri_beacon);
+    httpd_register_uri_handler(s_httpd, &uri_cfg_get);
+    httpd_register_uri_handler(s_httpd, &uri_cfg_post);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
