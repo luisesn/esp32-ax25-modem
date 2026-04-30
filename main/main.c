@@ -104,6 +104,10 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
 #define ADC_REFERENCE REF_3V3
 #define OPEN_SQUELCH  false
 
+#define AUDIO_LEVEL_TOO_LOW    8
+#define AUDIO_LEVEL_TOO_HIGH   115
+#define AUDIO_ALERT_BLINK_MS   100
+
 // ---------------------------------------------------------------------------
 // Monitor de nivel de audio (250 ms)
 // ---------------------------------------------------------------------------
@@ -112,11 +116,29 @@ static void audio_level_task(void *arg)
 {
     (void)arg;
     char bar[13];
+    int log_div = 0;
+    bool alarm_led_state = false;
+    bool alarm_active = false;
     for (;;) {
-        vTaskDelay(250 / portTICK_PERIOD_MS);
+        vTaskDelay(AUDIO_ALERT_BLINK_MS / portTICK_PERIOD_MS);
 
         int8_t peak = audio_peak;
         audio_peak  = 0;
+
+        bool out_of_range = (peak < AUDIO_LEVEL_TOO_LOW) || (peak > AUDIO_LEVEL_TOO_HIGH);
+        if (out_of_range) {
+            alarm_active = true;
+#if GPIO_LED_RX >= 0
+            alarm_led_state = !alarm_led_state;
+            gpio_set_level(GPIO_LED_RX, alarm_led_state ? 1 : 0);
+#endif
+        } else if (alarm_active) {
+            alarm_active = false;
+            alarm_led_state = false;
+#if GPIO_LED_RX >= 0
+            gpio_set_level(GPIO_LED_RX, 0);
+#endif
+        }
 
         int level = (int)peak * 10 / 127;
         if (level > 10) level = 10;
@@ -127,7 +149,11 @@ static void audio_level_task(void *arg)
         bar[11] = '|';
         bar[12] = '\0';
 
-        printf("Audio: %s %3d\n", bar, (int)peak);
+        if (++log_div >= 3) {
+            log_div = 0;
+            printf("Audio: %s %3d%s\n", bar, (int)peak,
+                   out_of_range ? " [ALERT]" : "");
+        }
     }
 }
 
