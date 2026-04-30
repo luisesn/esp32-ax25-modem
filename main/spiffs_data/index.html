@@ -35,6 +35,9 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .pkt .dst{color:#f0b35a}
 .pkt .path{color:#8acb88}
 .pkt .info{color:#c0e0a0;word-break:break-all}
+.pkt-sent{background:#1a1400;border-left:2px solid #c8a04a;padding-left:.4rem}
+.pkt .tx-lbl{color:#c8a04a;font-weight:bold}
+.pkt .tx-arr{color:#6d6d6d}
 #info{font-size:.7rem;color:#555;text-align:center;line-height:1.6;margin-top:auto}
 #send-hdr{padding:.35rem .6rem;font-size:.7rem;color:#c8a04a;
           border-bottom:1px solid #2a1a00;letter-spacing:.08em}
@@ -160,6 +163,19 @@ function appendLog(src,dst,path,info){
     `<span class="info">${esc(info)}</span>`;
   log.prepend(d);
 }
+function appendSentLog(to,ssid,text){
+  const log=document.getElementById('log');
+  while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
+  const d=document.createElement('div');d.className='pkt pkt-sent';
+  const ts=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const dest=(ssid>=0&&ssid<=15)?`${to}-${ssid}`:to;
+  d.innerHTML=`<span class="ts">${ts}</span>`+
+    `<span class="tx-lbl">TX</span>`+
+    `<span class="tx-arr"> → </span>`+
+    `<span class="dst">${esc(dest)}</span>`+
+    ` <span class="info">${esc(text)}</span>`;
+  log.prepend(d);
+}
 // ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
 let ws=null,wsTimer=null;
 function setStatus(t){document.getElementById('status').textContent=t;}
@@ -210,7 +226,7 @@ function sendAPRS(){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({to,ssid,text})
   }).then(r=>r.json()).then(d=>{
-    if(d.ok){st.style.color='#4ac84a';st.textContent='Enviado ✓';}
+    if(d.ok){st.style.color='#4ac84a';st.textContent='Enviado ✓';appendSentLog(to,ssid,text);}
     else{st.style.color='#c04040';st.textContent='Error del servidor.';}
   }).catch(()=>{
     st.style.color='#c04040';st.textContent='Error de red.';
