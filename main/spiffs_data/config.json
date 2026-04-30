@@ -14,5 +14,12 @@
         "enabled": true,
         "ssid": "APRS_AP",
         "password": "12345678"
+    },
+    "ip": {
+        "enabled": false,
+        "addr": "44.61.3.71",
+        "netmask": "255.255.255.0",
+        "gateway": "44.61.3.1",
+        "ssid": 1
     }
 }

@@ -253,7 +253,24 @@ void app_main(void)
 
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
     AFSK_set_leds(GPIO_LED_TX, GPIO_LED_RX);
-    APRS_setCallsign("NO0CALL", 1);
+
+    const char *callsign = "NO0CALL";
+    int ssid = 1;
+    cJSON *cfg = config_get();
+    if (cfg) {
+        cJSON *aprs_obj = cJSON_GetObjectItem(cfg, "aprs");
+        if (aprs_obj) {
+            cJSON *cs = cJSON_GetObjectItem(aprs_obj, "callsign");
+            if (cJSON_IsString(cs) && cs->valuestring[0] != '\0')
+                callsign = cs->valuestring;
+        }
+        cJSON *ip_obj = cJSON_GetObjectItem(cfg, "ip");
+        if (ip_obj) {
+            cJSON *s = cJSON_GetObjectItem(ip_obj, "ssid");
+            if (cJSON_IsNumber(s)) ssid = (int)s->valueinteger;
+        }
+    }
+    APRS_setCallsign(callsign, ssid);
     APRS_set_msg_hook(aprs_msg_callback);
     xTaskCreate(processPacket, "processPacket", 2048, NULL, 5, NULL);
 
