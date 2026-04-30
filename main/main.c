@@ -9,7 +9,6 @@
 #include"aux_file_management.h"
 
 #include "driver/gpio.h"
-#include "ptt.h"
 
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
@@ -216,7 +215,6 @@ static void audio_sample_hook(int8_t sample) {
 
 void app_main(void)
 {
-    PTT_Init();
     file_management_init();
     // Cargamos aquí la configuración por primera vez
     config_load();
@@ -242,6 +240,7 @@ void app_main(void)
     kiss_init(on_kiss_frame);
 
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
+    AFSK_set_leds(GPIO_LED_TX, GPIO_LED_RX);
     afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
 
@@ -253,6 +252,7 @@ void app_main(void)
 #elif TNC_MODE == TNC_MODE_APRS
 
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
+    AFSK_set_leds(GPIO_LED_TX, GPIO_LED_RX);
     APRS_setCallsign("NO0CALL", 1);
     APRS_set_msg_hook(aprs_msg_callback);
     xTaskCreate(processPacket, "processPacket", 2048, NULL, 5, NULL);

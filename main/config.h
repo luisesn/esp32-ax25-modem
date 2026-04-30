@@ -2,6 +2,8 @@
 // Hardware
 // ---------------------------------------------------------------------------
 #define GPIO_PTT_OUT          GPIO_NUM_26
+#define GPIO_LED_RX           GPIO_NUM_22  // RX activity indicator (built-in LED)
+#define GPIO_LED_TX          -1            // TX activity indicator (disabled)
 #define CONFIG_PTT_ON_DELAY_MS  10
 #define CONFIG_PTT_OFF_DELAY_MS 10
 

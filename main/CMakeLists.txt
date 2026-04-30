@@ -8,7 +8,6 @@ idf_component_register(
         "LibAPRS-esp32-i2s/src/AFSK.cpp"
         "LibAPRS-esp32-i2s/src/AX25.cpp"
         "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
-        "ptt.c"
         "aux_file_management.c"
         "aux_config.c"
         "audio_stream.c"
