@@ -2,6 +2,7 @@
     "version": "1",
     "aprs": {
         "callsign": "NO0CALL",
+        "ssid": 11,
         "symbol_table": "/",
         "symbol_code": ">"
     },

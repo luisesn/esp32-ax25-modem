@@ -267,6 +267,25 @@ void app_main(void)
 
     APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
     AFSK_set_leds(GPIO_LED_TX, GPIO_LED_RX);
+
+    {
+        const char *cs = "NOCALL";
+        int cs_ssid = 0;
+        cJSON *cfg = config_get();
+        if (cfg) {
+            cJSON *aprs_obj = cJSON_GetObjectItem(cfg, "aprs");
+            if (aprs_obj) {
+                cJSON *cs_item = cJSON_GetObjectItem(aprs_obj, "callsign");
+                if (cJSON_IsString(cs_item) && cs_item->valuestring[0] != '\0')
+                    cs = cs_item->valuestring;
+                cJSON *ssid_item = cJSON_GetObjectItem(aprs_obj, "ssid");
+                if (cJSON_IsNumber(ssid_item))
+                    cs_ssid = (int)ssid_item->valueint;
+            }
+        }
+        APRS_setCallsign((char *)cs, cs_ssid);
+    }
+
     afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
 
@@ -293,7 +312,7 @@ void app_main(void)
         cJSON *ip_obj = cJSON_GetObjectItem(cfg, "ip");
         if (ip_obj) {
             cJSON *s = cJSON_GetObjectItem(ip_obj, "ssid");
-            if (cJSON_IsNumber(s)) ssid = (int)s->valueinteger;
+            if (cJSON_IsNumber(s)) ssid = (int)s->valueint;
         }
     }
     APRS_setCallsign(callsign, ssid);

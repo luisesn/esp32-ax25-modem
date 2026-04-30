@@ -8,6 +8,8 @@
 #include <lwip/sockets.h>
 #include <string.h>
 #include <stdio.h>
+#include "cJSON.h"
+#include "LibAPRS.h"
 
 #define TAG "audio_stream"
 
@@ -184,6 +186,48 @@ static esp_err_t index_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// POST /api/aprs/send
+// Body JSON: {"to":"NO0CAL","ssid":0,"text":"Hello"}
+// Encodes and queues an APRS message frame via afsk_queue_tx_frame (safe from
+// any task; dispatched by receive_audio_task). Works in both KISS TNC and APRS mode.
+static esp_err_t aprs_send_handler(httpd_req_t *req) {
+    char body[256];
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    body[len] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *j_to   = cJSON_GetObjectItem(root, "to");
+    cJSON *j_ssid = cJSON_GetObjectItem(root, "ssid");
+    cJSON *j_text = cJSON_GetObjectItem(root, "text");
+
+    if (!cJSON_IsString(j_to) || !cJSON_IsString(j_text)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing \"to\" or \"text\"");
+        return ESP_FAIL;
+    }
+
+    int ssid_val = (j_ssid && cJSON_IsNumber(j_ssid)) ? (int)j_ssid->valuedouble : 0;
+    if (ssid_val < 0)  ssid_val = 0;
+    if (ssid_val > 15) ssid_val = 15;
+
+    APRS_queue_msg(j_to->valuestring, ssid_val, j_text->valuestring);
+    ESP_LOGI(TAG, "APRS MSG queued → %s-%d: %s", j_to->valuestring, ssid_val, j_text->valuestring);
+
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // 404 → redirect to / (captive-portal probes from Android/iOS/Windows)
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
     (void)err;
@@ -311,8 +355,14 @@ void audio_stream_init(void) {
         .handler     = ws_handler,
         .is_websocket = true,
     };
+    static const httpd_uri_t uri_aprs_send = {
+        .uri     = "/api/aprs/send",
+        .method  = HTTP_POST,
+        .handler = aprs_send_handler,
+    };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
+    httpd_register_uri_handler(s_httpd, &uri_aprs_send);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
