@@ -30,11 +30,20 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   display:flex;flex-direction:column;gap:.45rem}
 .pkt{font-size:.7rem;line-height:1.45}
 .pkt .ts{color:#555;margin-right:.5rem}
-.pkt .src{color:#7ecfff;font-weight:bold}
+.pkt .src{color:#7ecfff;font-weight:bold;cursor:pointer;text-decoration:underline dotted}
+.pkt .src:hover{color:#b0e8ff}
 .pkt .sep{color:#6d6d6d}
 .pkt .dst{color:#f0b35a}
 .pkt .path{color:#8acb88}
 .pkt .info{color:#c0e0a0;word-break:break-all}
+.pkt-me{background:#0d1e0d;border-left:2px solid #4a9a4a}
+.pkt-ack{background:#1a1400;border-left:2px solid #c8a04a}
+.ack-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;
+  background:#2a2000;border:1px solid #c8a04a;border-radius:2px;
+  color:#c8a04a;margin-right:.35rem;vertical-align:middle}
+.me-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;
+  background:#0a280a;border:1px solid #4a9a4a;border-radius:2px;
+  color:#4fc84f;margin-right:.35rem;vertical-align:middle}
 .pkt-sent{background:#1a1400;border-left:2px solid #c8a04a;padding-left:.4rem}
 .pkt .tx-lbl{color:#c8a04a;font-weight:bold}
 .pkt .tx-arr{color:#6d6d6d}
@@ -146,16 +155,35 @@ function scheduleBlock(s){
 }
 // ── APRS log ───────────────────────────────────────────────────────────────
 const MAX_LOG=100;
+let myCall='',mySsid=-1;
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function fillDest(src){
+  const m=src.match(/^([A-Z0-9]+)(?:-(\d+))?$/);
+  if(!m)return;
+  document.getElementById('send-to').value=m[1];
+  const si=document.getElementById('send-ssid');
+  si.value=(m[2]!=null)?m[2]:'0';
+  document.getElementById('send-text').focus();
+}
 function appendLog(src,dst,path,info){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt';
   const ts=new Date().toLocaleTimeString('es',
     {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  d.innerHTML=`<span class="ts">${ts}</span>`+
-    `<span class="src">${esc(src)}</span>`+
+  // Detect ACK: info = "ackNNN" (after stripping addressee wrapper from raw info)
+  const isAck=/^ack\d+$/i.test(info.trim());
+  // Detect message to me: dst matches our callsign+ssid
+  const myAddr=myCall+(mySsid>0?'-'+mySsid:'');
+  const isToMe=myAddr&&dst.trim().toUpperCase()===myAddr.toUpperCase();
+  if(isAck)d.classList.add('pkt-ack');
+  else if(isToMe)d.classList.add('pkt-me');
+  let badge='';
+  if(isAck)badge='<span class="ack-badge">ACK</span>';
+  else if(isToMe)badge='<span class="me-badge">PARA MÍ</span>';
+  d.innerHTML=`<span class="ts">${ts}</span>${badge}`+
+    `<span class="src" onclick="fillDest('${esc(src)}')" title="Copiar al destino">${esc(src)}</span>`+
     `<span class="sep"> &gt; </span>`+
     `<span class="dst">${esc(dst)}</span>`+
     (path?`<span class="sep"> via </span><span class="path">${esc(path)}</span>`:'')+
@@ -192,7 +220,9 @@ function connectWS(){
       return;
     }
     try{const p=JSON.parse(e.data);
-      if(p.src!=null)appendLog(p.src,p.dst||'',p.path||'',p.info||'');
+      if(p.type==='ack_sent'){
+        appendSentLog(p.to,p.ssid,'ack'+p.id);
+      } else if(p.src!=null)appendLog(p.src,p.dst||'',p.path||'',p.info||'');
     }catch(_){}
   };
   ws.onclose=ws.onerror=()=>{
@@ -232,7 +262,7 @@ function sendAPRS(){
     st.style.color='#c04040';st.textContent='Error de red.';
   }).finally(()=>{btn.disabled=false;});
 }
-window.addEventListener('load',connectWS);
+window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});});
 </script>
 </body>
 </html>

@@ -186,6 +186,17 @@ static esp_err_t index_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// GET /api/me → returns our configured callsign+ssid as JSON
+static esp_err_t me_handler(httpd_req_t *req) {
+    char my_call[7]; int my_ssid;
+    APRS_getCallsign(my_call, &my_ssid);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"call\":\"%s\",\"ssid\":%d}", my_call, my_ssid);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
 // POST /api/aprs/send
 // Body JSON: {"to":"NO0CAL","ssid":0,"text":"Hello"}
 // Encodes and queues an APRS message frame via afsk_queue_tx_frame (safe from
@@ -360,9 +371,15 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = aprs_send_handler,
     };
+    static const httpd_uri_t uri_me = {
+        .uri     = "/api/me",
+        .method  = HTTP_GET,
+        .handler = me_handler,
+    };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
+    httpd_register_uri_handler(s_httpd, &uri_me);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
