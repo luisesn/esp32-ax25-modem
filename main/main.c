@@ -65,7 +65,7 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
     p = ax25_decode_addr(p, src, &is_last);
 
     // Repeater path
-    static char path[64]; int plen = 0; path[0] = '\0';
+    static char path[96]; int plen = 0; path[0] = '\0';
     while (!is_last && (p + 7) <= end) {
         char rpt[10];
         p = ax25_decode_addr(p, rpt, &is_last);
@@ -218,6 +218,7 @@ void app_main(void)
 {
     PTT_Init();
     file_management_init();
+    // Cargamos aquí la configuración por primera vez
     config_load();
     /*
     // test ptt
