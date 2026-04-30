@@ -25,7 +25,7 @@
     },
     "digi": {
         "enabled": false,
-        "alias": "WIDE1-1",
+        "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
         "callsign": "",
         "ssid": 0,
         "comment": "ESP32-DIGI"
