@@ -274,35 +274,42 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    float lat = (float)j_lat->valuedouble;
-    float lon = (float)j_lon->valuedouble;
+    double lat = j_lat->valuedouble;
+    double lon = j_lon->valuedouble;
     char  sym = (j_symbol && cJSON_IsString(j_symbol) && j_symbol->valuestring[0])
                     ? j_symbol->valuestring[0] : '>';
     const char *comment = (j_comment && cJSON_IsString(j_comment))
                               ? j_comment->valuestring : "";
 
-    if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Coordinates out of range");
         return ESP_FAIL;
     }
 
-    // Convert to APRS uncompressed format
-    int   lat_d = (int)fabsf(lat);
-    float lat_m = (fabsf(lat) - lat_d) * 60.0f;
-    char lat_str[9];  // DDMM.MMN\0
+    // APRS 1.01 §8 uncompressed position: DDMM.HHN (lat) DDDMM.HHW (lon)
+    // Use double throughout to avoid float precision loss (~7 sig. digits).
+    // Clamp minutes to 59.99 to prevent %05.2f producing "60.00" on rounding edge.
+    int    lat_d = (int)fabs(lat);
+    double lat_m = (fabs(lat) - lat_d) * 60.0;
+    if (lat_m >= 60.0) { lat_d++; lat_m = 0.0; }
+    char lat_str[9];  // DDMM.HHN\0  (2+5+1+1 = 9)
     snprintf(lat_str, sizeof(lat_str), "%02d%05.2f%c",
-             lat_d, lat_m, lat >= 0.0f ? 'N' : 'S');
+             lat_d, lat_m, lat >= 0.0 ? 'N' : 'S');
 
-    int   lon_d = (int)fabsf(lon);
-    float lon_m = (fabsf(lon) - lon_d) * 60.0f;
-    char lon_str[10]; // DDDMM.MME\0
+    int    lon_d = (int)fabs(lon);
+    double lon_m = (fabs(lon) - lon_d) * 60.0;
+    if (lon_m >= 60.0) { lon_d++; lon_m = 0.0; }
+    char lon_str[10]; // DDDMM.HHE\0 (3+5+1+1 = 10)
     snprintf(lon_str, sizeof(lon_str), "%03d%05.2f%c",
-             lon_d, lon_m, lon >= 0.0f ? 'E' : 'W');
+             lon_d, lon_m, lon >= 0.0 ? 'E' : 'W');
 
-    // APRS info field: !lat/lon_sym_comment  (symbol table = '/', primary)
+    // APRS info field: =lat/lon_sym_comment  (symbol table = '/', primary)
+    // '=' means "position without timestamp, APRS messaging enabled".
+    // Functionally identical to '!' but some radios (e.g. Yaesu) treat it
+    // differently in their station list display.
     char info[120];
-    snprintf(info, sizeof(info), "!%s/%s%c%s", lat_str, lon_str, sym, comment);
+    snprintf(info, sizeof(info), "=%s/%s%c%s", lat_str, lon_str, sym, comment);
 
     ESP_LOGI(TAG, "APRS beacon TX: %s", info);
     APRS_queue_beacon(info);
@@ -337,8 +344,13 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     // Límite de 2 KB para el body
     static char body[2048];
     int total = 0, ret;
-    while (total < (int)sizeof(body) - 1) {
-        ret = httpd_req_recv(req, body + total, sizeof(body) - 1 - (size_t)total);
+    int remaining = req->content_len > 0 ? (int)req->content_len : (int)sizeof(body) - 1;
+    if (remaining > (int)sizeof(body) - 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+    while (total < remaining) {
+        ret = httpd_req_recv(req, body + total, (size_t)(remaining - total));
         if (ret <= 0) {
             if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");

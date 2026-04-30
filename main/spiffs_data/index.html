@@ -108,6 +108,12 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   .send-row label{min-width:auto}
   #send-to,#send-text{width:100%}
 }
+#rec-btn{padding:.35rem .7rem;font-size:.75rem;font-family:monospace;
+  background:#1a0000;color:#c04040;border:1px solid #c04040;
+  border-radius:3px;cursor:pointer;transition:background .2s}
+.btn-row{display:flex;gap:.4rem;align-items:center}
+#rec-btn.active{background:#c04040;color:#fff;animation:blink .8s step-end infinite}
+@keyframes blink{50%{opacity:.5}}
 </style>
 </head>
 <body>
@@ -115,11 +121,13 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   <div id="top-panel" class="panel">
     <h1>&#x1F4FB; ESP32 APRS Monitor</h1>
     <div id="status">Conectando...</div>
-    <button id="btn" onclick="toggle()" disabled>&#x25B6; Escuchar</button>
+    <div class="btn-row">
+      <button id="btn" onclick="toggle()" disabled>&#x25B6; Escuchar</button>
+      <button id="rec-btn" onclick="toggleRec()" disabled title="Grabar audio y descargar WAV">&#x23FA; Grabar</button>
+    </div>
     <div id="meter-wrap"><div id="meter"></div></div>
     <div id="info">
-      IMA ADPCM &middot; 9600 Hz &middot; 38.4 kbps<br>
-      VLC/ffplay: <code>http://HOST:8080/audio</code>
+      IMA ADPCM &middot; 9600 Hz &middot; 38.4 kbps   -   VLC/ffplay: <code>http://HOST:8080/audio</code>
     </div>
   </div>
   <div id="log-wrap" class="panel">
@@ -222,9 +230,6 @@ function scheduleBlock(s){
   const n=actx.createBufferSource();n.buffer=b;n.connect(actx.destination);
   const now=actx.currentTime;if(nextAt<now+0.05)nextAt=now+0.05;
   n.start(nextAt);nextAt+=s.length/SR;
-  let sum=0;for(let i=0;i<s.length;i++)sum+=s[i]*s[i];
-  document.getElementById('meter').style.width=
-    Math.min(Math.sqrt(sum/s.length)*400,100)+'%';
 }
 // ── APRS log ───────────────────────────────────────────────────────────────
 const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
@@ -287,8 +292,60 @@ function appendSentLog(to,ssid,text){
   const tsISO=new Date().toISOString();
   logData.unshift({ts:tsISO,type:'tx',src:myCall+(mySsid>0?'-'+mySsid:''),dst:dest,path:'',info:text});
   if(logData.length>MAX_LOG)logData.length=MAX_LOG;
+}// ── WAV recorder ──────────────────────────────────────────────────────────────────
+let recChunks=[];
+let isRecording=false;
+function toggleRec(){
+  if(!isRecording) startRec(); else stopRec();
 }
-// ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
+function startRec(){
+  if(!actx){toggle();}  // auto-start playback if not already running
+  recChunks=[];
+  isRecording=true;
+  const btn=document.getElementById('rec-btn');
+  btn.textContent='⏹ Parar y guardar';
+  btn.classList.add('active');
+}
+function stopRec(){
+  isRecording=false;
+  const btn=document.getElementById('rec-btn');
+  btn.textContent='⏺ Grabar';
+  btn.classList.remove('active');
+  if(recChunks.length===0) return;
+  // Concatenate all Float32 chunks
+  const totalSamples=recChunks.reduce((s,c)=>s+c.length,0);
+  const pcm=new Int16Array(totalSamples);
+  let off=0;
+  recChunks.forEach(c=>{
+    for(let i=0;i<c.length;i++){
+      let v=Math.round(c[i]*32767);
+      if(v>32767)v=32767;if(v<-32768)v=-32768;
+      pcm[off++]=v;
+    }
+  });
+  recChunks=[];
+  // Build WAV: RIFF/PCM-16/mono/9600Hz
+  const dataBytes=pcm.buffer.byteLength;
+  const wav=new ArrayBuffer(44+dataBytes);
+  const d=new DataView(wav);
+  const enc=(o,s)=>{for(let i=0;i<s.length;i++)d.setUint8(o+i,s.charCodeAt(i));};
+  enc(0,'RIFF');d.setUint32(4,36+dataBytes,true);enc(8,'WAVE');
+  enc(12,'fmt ');d.setUint32(16,16,true);d.setUint16(20,1,true);  // PCM
+  d.setUint16(22,1,true);           // mono
+  d.setUint32(24,SR,true);          // sample rate
+  d.setUint32(28,SR*2,true);        // byte rate
+  d.setUint16(32,2,true);           // block align
+  d.setUint16(34,16,true);          // bits per sample
+  enc(36,'data');d.setUint32(40,dataBytes,true);
+  new Int16Array(wav,44).set(pcm);
+  const blob=new Blob([wav],{type:'audio/wav'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+  a.href=url;a.download='aprs-audio-'+ts+'.wav';
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},2000);
+}// ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
 let ws=null,wsTimer=null;
 function setStatus(t){document.getElementById('status').textContent=t;}
 function connectWS(){
@@ -297,10 +354,18 @@ function connectWS(){
   ws=new WebSocket('ws://'+location.host+'/ws');
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{setStatus('Conectado');
-    document.getElementById('btn').disabled=false;};
+    document.getElementById('btn').disabled=false;
+    document.getElementById('rec-btn').disabled=false;};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
-      if(e.data.byteLength===512&&actx)scheduleBlock(decodeBlock(e.data));
+      if(e.data.byteLength===512){
+        const decoded=decodeBlock(e.data);
+        // Meter always active, regardless of playback state
+        let sum=0;for(let i=0;i<decoded.length;i++)sum+=decoded[i]*decoded[i];
+        document.getElementById('meter').style.width=Math.min(Math.sqrt(sum/decoded.length)*400,100)+'%';
+        if(actx) scheduleBlock(decoded);
+        if(isRecording) recChunks.push(decoded);
+      }
       return;
     }
     try{const p=JSON.parse(e.data);
@@ -312,6 +377,8 @@ function connectWS(){
   ws.onclose=ws.onerror=()=>{
     setStatus('Desconectado — reconectando…');
     document.getElementById('btn').disabled=true;
+    document.getElementById('rec-btn').disabled=true;
+    if(isRecording) stopRec();  // save what we have if connection drops
     document.getElementById('meter').style.width='0';
     ws=null;nextAt=0;wsTimer=setTimeout(connectWS,5000);
   };
@@ -381,10 +448,12 @@ function parseAPRSPos(info){
 }
 // ── APRS format helpers (for beacon TX display) ────────────────────────────
 function fmtAPRSLat(lat){
-  const d=Math.floor(Math.abs(lat)),m=(Math.abs(lat)-d)*60;
+  const d=Math.floor(Math.abs(lat));
+  let m=(Math.abs(lat)-d)*60; if(m>=60){m=0;}  // clamp rounding edge
   return String(d).padStart(2,'0')+m.toFixed(2).padStart(5,'0')+(lat>=0?'N':'S');}
 function fmtAPRSLon(lon){
-  const d=Math.floor(Math.abs(lon)),m=(Math.abs(lon)-d)*60;
+  const d=Math.floor(Math.abs(lon));
+  let m=(Math.abs(lon)-d)*60; if(m>=60){m=0;}
   return String(d).padStart(3,'0')+m.toFixed(2).padStart(5,'0')+(lon>=0?'E':'W');}
 // ── Tab switching ──────────────────────────────────────────────────────────
 function showTab(name,btn){
@@ -458,7 +527,7 @@ function sendBeacon(){
   }).then(r=>r.json()).then(d=>{
     if(d.ok){
       st.style.color='#4ac84a';st.textContent='Baliza TX ✓';
-      appendSentLog('APRS',-1,'!'+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+comment);
+      appendSentLog('APRS',-1,'='+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+comment);
     }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
   }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
   ).finally(()=>{btn.disabled=false;});
