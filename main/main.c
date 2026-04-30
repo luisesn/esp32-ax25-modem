@@ -14,6 +14,7 @@
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
 #include "audio_stream.h"
+#include "ax25ip.h"
 
 
 #include "device.h"
@@ -255,6 +256,7 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     kiss_send_frame(buf, len);
     try_auto_ack(buf, len);
+    ax25ip_rx_frame(buf, len);
 
     static char s_aprs_json[APRS_JSON_BUF];
     if (ax25_frame_to_json(buf, len, s_aprs_json, sizeof(s_aprs_json)))
@@ -346,6 +348,7 @@ void app_main(void)
 
 #  if KISS_TRANSPORT == KISS_TRANSPORT_WIFI
     transport_init(&transport_wifi_ops);
+    ax25ip_init(config_get());
 #  elif KISS_TRANSPORT == KISS_TRANSPORT_UART
     // transport_init(&transport_uart_ops);  // pendiente implementar
 #  elif KISS_TRANSPORT == KISS_TRANSPORT_BT

@@ -11,6 +11,7 @@ idf_component_register(
         "aux_file_management.c"
         "aux_config.c"
         "audio_stream.c"
+        "ax25ip.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

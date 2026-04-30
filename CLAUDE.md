@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v5.x**. Estado actual (2026-04-30): **compila limpio, KISS TNC bidireccional operativo, TX verificado en hardware (datos decodificados por receptor externo), RX pendiente verificación con señal RF real**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-04-30): **compila limpio (binary 904 KB, 47 % libre), KISS TNC bidireccional operativo, TX verificado en hardware (datos decodificados por receptor externo), UI web funcional, gateway IP RFC 1226 implementado, RX pendiente verificación con señal RF real**.
 
 Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino), reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -17,26 +17,30 @@ Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handi
 esp32-aprs-modem/
 ├── CMakeLists.txt              # Proyecto ESP-IDF de nivel superior
 ├── sdkconfig                   # Configuración IDF (target: esp32)
+├── sdkconfig.defaults          # Valores por defecto (incluye CONFIG_LWIP_IP_FORWARD=y)
 ├── partitions.csv              # Tabla de particiones (NVS + OTA×2 + SPIFFS 704 KB)
 ├── main/
 │   ├── CMakeLists.txt          # Registra .c/.cpp, REQUIRES y crea imagen SPIFFS
 │   ├── config.h                # TNC_MODE, KISS_TRANSPORT, TCP port y GPIOs
-│   ├── idf_component.yml       # Dependencia esp-dsp declarada pero sin uso activo (pendiente quitar)
+│   ├── idf_component.yml       # Dependencia esp-dsp (sin uso activo — pendiente quitar)
 │   ├── main.c                  # app_main — bifurca según TNC_MODE (KISS o APRS)
 │   ├── kiss.h / kiss.c         # Framing KISS encode/decode, máquina de estados
 │   ├── transport.h / .c        # Interfaz abstracta { init, write } para transportes
 │   ├── transport_wifi.h / .c   # WiFi STA + servidor TCP KISS (transporte activo)
+│   ├── audio_stream.h / .c     # HTTP server port 80, WebSocket /ws, IMA ADPCM, REST API
+│   ├── ax25ip.h / ax25ip.c     # Gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
 │   ├── aux_config.h / .c       # Carga/guarda config JSON desde SPIFFS
 │   ├── aux_file_management.h/.c# Utilidades de sistema de ficheros SPIFFS
 │   ├── spiffs_data/
-│   │   └── config.json         # Config inicial (callsign, WiFi, AP, IP) flasheada en SPIFFS
+│   │   ├── config.json         # Config inicial (callsign, WiFi, AP, IP) flasheada en SPIFFS
+│   │   └── index.html          # UI web completa (APRS log, envío de mensajes, audio)
 │   └── LibAPRS-esp32-i2s/src/
-│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (APRS_init, set_raw_hook, send_raw_frame…)
+│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (init, queue_msg, queue_ack, get_callsign…)
 │       ├── AFSK.{h,cpp}        # Modulador/demodulador AFSK, DAC TX, ADC RX
 │       ├── AX25.{h,cpp}        # Codificación/decodificación AX.25 + raw_hook para KISS
 │       ├── CRC-CCIT.{h,c}      # CRC-CCITT para tramas AX.25
 │       ├── HDLC.h              # Flags HDLC (0x7E, 0x7F, AX25_ESC)
-│       ├── FIFO.h              # Cola circular inline
+│       ├── FIFO.h              # Cola circular inline (variantes _locked son static inline)
 │       ├── FakeArduino.{h,cpp} # Stub de `Serial`, `F()`, `_BV()`, cli/sei
 │       ├── device.h            # Pines y parámetros (GPIO_PTT_OUT, muestreo, canales)
 │       └── constants.h         # Macros m328p, REF_3V3 (herencia AVR — no se usan)
@@ -64,23 +68,31 @@ esp32-aprs-modem/
 ```bash
 # Desde la raíz del proyecto, con ESP-IDF exportado:
 idf.py set-target esp32
-idf.py build
+idf.py reconfigure   # genera build/config/sdkconfig.cmake antes del primer build
+ninja -C build       # o: idf.py build
 idf.py -p <PUERTO> flash monitor
 ```
+
+> **Trampa de primer build**: con IDF 6.1, `idf.py build` lanza ninja demasiado pronto y
+> ninja dispara un re-run de CMake que no encuentra `build/config/sdkconfig.cmake` (aún no
+> generado) → `FAILED: build.ninja`. Solución: `idf.py reconfigure` primero, luego `ninja -C build`.
 
 ## Flujo de ejecución actual
 
 ```
 app_main (main.c)
-  ├── config_load()      ← lee /spiffs/config.json (callsign, WiFi, AP, IP)
+  ├── spiffs_init() + config_load()   ← lee /spiffs/config.json
   ├── [si TNC_MODE_KISS]
   │     ├── transport_init(&transport_wifi_ops)   ← WiFi STA + TCP server port 8001
+  │     ├── ax25ip_init(config)                   ← gateway IP RFC 1226 (si ip.enabled=true)
+  │     ├── audio_stream_init()                   ← HTTP server port 80 + WebSocket /ws
   │     ├── kiss_init(on_kiss_frame)
   │     ├── APRS_init → AFSK_init → AFSK_hw_init
   │     │     ├── gpio_config PTT (GPIO26, salida, reposo bajo)
   │     │     ├── xQueueCreate(s_tx_queue, 4)  ← cola de tramas TX
   │     │     └── xTaskCreate(receive_audio_task, prio 10)
   │     │           └── [dentro de la tarea] adc_peripheral_start()
+  │     ├── APRS_setCallsign() ← indicativo de config.json (aprs.callsign / aprs.ssid)
   │     ├── afsk_set_tx_fn(APRS_send_raw_frame) ← registra fn de TX en cola
   │     └── APRS_set_raw_hook(on_ax25_raw_frame)
   ├── [si TNC_MODE_APRS]
@@ -88,15 +100,34 @@ app_main (main.c)
   │     └── xTaskCreate(processPacket, prio 5)
   └── xTaskCreate(audio_level_task, prio 3)   # barra de nivel + alarma LED por rango
 
-receive_audio_task (bucle infinito):
+receive_audio_task (bucle infinito, prio 10):
   1) Si s_tx_queue tiene trama pendiente → despacha s_tx_fn(data,len) [TX]
   2) Si tx_mode==true → vTaskDelay(10ms) y repetir   [pausa durante TX]
   3) adc_continuous_read(timeout=20ms)               [DMA ring buffer]
   4) Para cada muestra: decimar x5 → adc_to_s8 → AFSK_adc_isr
+     └── muestra → audio_stream_q (IMA ADPCM pipeline)
   5) APRS_poll() cada 4 muestras lógicas (~2,4 ms)
   6) vTaskDelay(1)                                   [cede CPU a IDLE]
 
-server_task (transport_wifi.c, cuando cliente TCP conectado):
+audio_stream_task (audio_stream.c, prio 3):
+  Lee audio_stream_q → codifica IMA ADPCM (1017 muestras → 512 B)
+  → envía frame binario por WebSocket a todos los clientes /ws conectados
+  wav_server_task (prio 3): WAV TCP en port 8080 para ffplay/VLC
+
+HTTP server (audio_stream.c, port 80):
+  GET /            → index.html (SPIFFS)
+  GET /ws          → WebSocket upgrade (audio + APRS JSON)
+  POST /api/aprs/send → envía mensaje APRS → APRS_queue_msg()
+  GET /api/me      → {"call":"NO0CAL","ssid":11} vía APRS_getCallsign()
+
+on_ax25_raw_frame (main.c, llamado por AX25 raw_hook):
+  ├── kiss_send_frame()              → host KISS TCP
+  ├── try_auto_ack()                 → si frame dirigido a nosotros con {NNN},
+  │     llama APRS_queue_ack() + audio_stream_ws_send_text({type:ack_sent})
+  ├── ax25ip_rx_frame()              → inyecta en lwIP si PID=0xCC
+  └── audio_stream_ws_send_text()   → JSON {type:aprs, src, dst, path, info}
+
+server_task (transport_wifi.c, cliente TCP KISS conectado):
   recibe bytes KISS → kiss_rx_byte() → on_kiss_frame → afsk_queue_tx_frame()
     ↑ NO llama APRS_send_raw_frame directamente (viola mutex ADC)
 
@@ -105,6 +136,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
   switch_to_tx():
     tx_mode=true → adc_continuous_stop → adc_continuous_deinit
     → vTaskDelay(20ms) → dac_continuous_new_channels → dac_continuous_enable
+    → gpio_set_direction(GPIO_PTT_OUT, OUTPUT)  ← restaura modo digital tras DAC_SIMUL
     → prime silence (TX_SAMPLE_BUFLEN bytes × 0x80)
   transmit_audio_i2s() en bucle: genera muestras AFSK, padding 0x80, escribe
     TX_SAMPLE_BUFLEN bytes al DMA (timeout=2000ms) hasta afsk->sending==false
@@ -138,7 +170,13 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **`freeMemory()`** devuelve `10000000` constante — el chequeo de RAM en `main.c` nunca falla. Pendiente sustituir por `esp_get_free_heap_size()`.
 
-- **`esp-dsp`** sigue declarado en `idf_component.yml` aunque los buffers FFT fueron eliminados. Alarga el build innecesariamente.
+- **`esp-dsp`** sigue declarado en `idf_component.yml` aunque los buffers FFT fueron eliminados. Alarga el build innecesariamente. Además sus ficheros Kalman (`ekf.cpp`, `ekf_imu13states.cpp`) necesitan `#include <cmath>` que falta en la versión 1.7.0 del componente — ya parcheado localmente.
+
+- **`CONFIG_LWIP_IP_FORWARD=y`** en `sdkconfig.defaults`: necesario para `ax25ip.c` (reenvío entre netifs). Si se hace `idf.py fullclean` hay que volver a ejecutar `idf.py reconfigure` para que este valor quede en `sdkconfig` antes de compilar.
+
+- **`pbuf_length(p)` no existe en lwIP**: la longitud total de una cadena pbuf es `p->tot_len`. Usar `pbuf_clen(p)` (cuenta fragmentos) o `p->tot_len` (bytes totales).
+
+- **`idf.py reconfigure` antes del primer ninja**: con IDF 6.1, `idf.py build` en un build directory vacío falla porque ninja dispara un re-run de CMake que intenta incluir `build/config/sdkconfig.cmake` antes de que CMake lo haya generado. Workaround: `idf.py reconfigure && ninja -C build`.
 
 - **SPIFFS y `config.json`**: `aux_config.c` lee `/spiffs/config.json` en el arranque. `transport_wifi.c` ya usa `wifi.ssid`/`wifi.password`/`wifi.connect_timeout_s` y fallback AP (`ap.*`) desde JSON. El fichero se flashea automáticamente con `idf.py build` gracias a `spiffs_create_partition_image` en `CMakeLists.txt`. Para modificar la config sin recompilar: editar `main/spiffs_data/config.json` y volver a flashear.
 
@@ -173,16 +211,23 @@ idf.py size-components     # auditar consumo RAM/Flash
 idf.py monitor             # ver trazas; salir con Ctrl-]
 ```
 
-## Estado de los problemas conocidos
+## Estado del proyecto
 
-Ver [report.md](report.md) para el detalle completo y [PROGRESS.md](PROGRESS.md) para el seguimiento.
+Ver [report.md](report.md) para el detalle técnico y [PROGRESS.md](PROGRESS.md) para el seguimiento.
 
-Resumen rápido:
+Resumen rápido (2026-04-30):
 - Sección 1 (bloqueantes): todos resueltos en código ✅
-- Sección 2.5 + 2.10 + 2.11 + 2.12 + 2.13: resueltos en código ✅
-- TX verificado en hardware: datos recibidos y decodificados por receptor externo ✅
-- Sección 2.2, 2.3, 2.6, 2.7, 2.8: pendientes ⬜
-- Verificación RX en hardware real con señal RF: pendiente ⚠️
+- KISS TNC bidireccional (WiFi TCP) operativo ✅
+- TX verificado en hardware: datos decodificados por receptor externo ✅
+- UI web (index.html): log APRS, envío de mensajes, audio IMA ADPCM, auto-ACK ✅
+- Gateway IP RFC 1226 (`ax25ip.c`): implementado, build limpio ✅
+- APRS_queue_msg / APRS_queue_ack / APRS_getCallsign ✅
+- Indicativo y SSID desde config.json en modo KISS ✅
+- Build binario: 904 KB (47 % libre) con `idf.py reconfigure && ninja -C build` ✅
+- `freeMemory()` constante ficticia: pendiente sustituir por `esp_get_free_heap_size()` ⬜
+- FIFOs sin protección portMUX_TYPE: riesgo teórico ⬜
+- Verificación RX con señal RF real: pendiente ⚠️
+- Verificación gateway IP en hardware real: pendiente ⚠️
 
 ## Referencias externas
 

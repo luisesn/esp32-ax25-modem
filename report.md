@@ -8,11 +8,24 @@ Los problemas históricos ya corregidos se eliminaron de este informe para evita
 
 ## Addendum de estado actual (2026-04-30)
 
-- `idf.py build` verificado en este entorno: compila correctamente (warnings de CMake/IDF no bloqueantes).
-- `ptt.c/.h` eliminados como código muerto; el control de PTT quedó centralizado en `AFSK.cpp`.
-- `transport_wifi.c` usa configuración WiFi/AP desde `config.json` (`wifi.*`, `ap.*`).
-- `main/spiffs_data/config.json` ya incluye sección `ip` (`enabled`, `addr`, `netmask`, `gateway`, `ssid`) para el modo IP nativo planificado.
-- `main.c::audio_level_task` añade alarma de nivel: parpadeo rápido del LED RX cuando el pico está fuera de rango (`AUDIO_LEVEL_TOO_LOW/HIGH`).
+**Estado del build:** binario 904 KB, 47 % libre. Compilación limpia con `idf.py reconfigure && ninja -C build` (IDF 6.1).
+
+**Infraestructura completada:**
+- `ptt.c/.h` eliminados; control PTT centralizado en `AFSK.cpp`.
+- `transport_wifi.c` usa config WiFi/AP desde `config.json`.
+- FIFO `_locked` variants: `static inline` con `portMUX_TYPE` compartido.
+- Indicativo/SSID leídos de `aprs.callsign` / `aprs.ssid` en config.json (modo KISS).
+
+**Nuevas funcionalidades (sesión nocturna 2026-04-30):**
+- `audio_stream.c/h` — servidor HTTP port 80 (UI web), WebSocket `/ws` (audio IMA ADPCM + JSON APRS), WAV TCP port 8080, REST `/api/aprs/send` y `/api/me`.
+- `index.html` — SPA completa: log APRS, envío de mensajes, streaming de audio, badges PARA MÍ / ACK / TX.
+- Auto-ACK: `try_auto_ack()` en `main.c` detecta mensajes dirigidos con `{NNN}`, transmite ACK y notifica al frontend vía WebSocket.
+- `ax25ip.c/h` — gateway IP RFC 1226 (lwIP custom netif, PID=0xCC, MTU=300, broadcast QST-0). Activado con `ip.enabled: true` en config.json y `CONFIG_LWIP_IP_FORWARD=y` en sdkconfig.
+- `APRS_queue_msg`, `APRS_queue_ack`, `APRS_getCallsign` añadidas a LibAPRS.cpp.
+
+**Único cierre pendiente de hardware:**
+- Verificación RX con señal RF real.
+- Verificación gateway IP RFC 1226 en hardware.
 
 ---
 

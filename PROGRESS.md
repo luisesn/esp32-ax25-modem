@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-04-30
+Última actualización: 2026-04-30 (sesión nocturna)
 
 ---
 
@@ -31,19 +31,23 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 |---|----------|--------|
 | 2.1 | Eliminar buffers FFT | ✅ eliminados de facto en ronda 2026-04-17 |
 | 2.2 | `freeMemory()` constante ficticia | ⬜ pendiente |
-| 2.3 | `Afsk` estático en lugar de `malloc` | ⬜ pendiente |
-| 2.4 | Macros deprecated I2S/ADC en `device.h` | ⬜ pendiente |
+| 2.3 | `Afsk` estático en lugar de `malloc` | ✅ ya es estático (AFSK.cpp) |
+| 2.4 | Macros deprecated I2S/ADC en `device.h` | ✅ renombradas a `AUDIO_ADC_*` |
 | 2.5 | Pausar RX durante TX | ✅ resuelto 2026-04-27 (ver bitácora) |
-| 2.6 | FIFOs sin protección de concurrencia | ⬜ pendiente |
-| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ⬜ pendiente en modo APRS; en modo KISS el callback es `kiss_send_frame` (send() sobre socket, rápido en práctica) |
+| 2.6 | FIFOs sin protección de concurrencia | ✅ variantes `_locked` ahora `static inline` con `portMUX_TYPE` |
+| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ⬜ pendiente en modo APRS; en KISS el callback es rápido |
 | 2.8 | `FakeArduino::Serial` stub sin implementación | ⬜ pendiente |
 | 3.1-3.6 | Limpieza restos AVR, `src.ino`, logs, etc. | ⬜ pendiente |
 | 3.3 | `aprs_msg_callback` como global implícita | ✅ `main.c` reescrito con hooks explícitos; ya no aplica |
+| nuevo | Indicativo y SSID desde config.json en KISS | ✅ 2026-04-30 |
+| nuevo | UI web con log APRS, envío y audio | ✅ 2026-04-30 |
+| nuevo | Auto-ACK de mensajes dirigidos | ✅ 2026-04-30 |
+| nuevo | Gateway IP RFC 1226 (`ax25ip.c`) | ✅ 2026-04-30 (verificación HW pendiente) |
 
-Orden sugerido para continuar:
-1. `esp-dsp` en `idf_component.yml` puede quitarse ya (los buffers FFT se eliminaron pero la dependencia sigue declarada — alarga el build).
-2. **2.2** `freeMemory()` → `esp_get_free_heap_size()`.
-3. **2.6** Proteger FIFOs con `portMUX_TYPE`.
+Pendientes prioritarios:
+1. **2.2** `freeMemory()` → `esp_get_free_heap_size()`.
+2. Quitar `esp-dsp` de `idf_component.yml` (los buffers FFT se eliminaron).
+3. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
 
 ---
 
@@ -271,3 +275,60 @@ El control de PTT quedó centralizado en `AFSK.cpp`; `ptt.c/.h` se eliminaron co
 3. **Configuración de red en JSON**: `main/spiffs_data/config.json` incluye sección `ip` (`enabled`, `addr`, `netmask`, `gateway`, `ssid`) para el plan de modo IP nativo.
 4. **Indicativo/SSID configurables en runtime**: en `TNC_MODE_APRS`, `APRS_setCallsign()` ya toma `aprs.callsign` + `ip.ssid` desde `config_get()`.
 5. **Alarma de nivel de audio**: `audio_level_task` ahora usa umbrales (`AUDIO_LEVEL_TOO_LOW`, `AUDIO_LEVEL_TOO_HIGH`) y hace parpadeo rápido del LED RX (`GPIO_LED_RX`) cuando el pico está fuera de rango.
+
+---
+
+### 2026-04-30 — sesión principal: UI web, auto-ACK, gateway IP RFC 1226
+
+**Ficheros nuevos:**
+- `main/audio_stream.h` / `main/audio_stream.c` — servidor HTTP port 80 (index.html vía SPIFFS), WebSocket `/ws` (audio IMA ADPCM + JSON APRS), servidor WAV TCP port 8080, endpoints REST `/api/aprs/send` y `/api/me`.
+- `main/ax25ip.h` / `main/ax25ip.c` — gateway IP RFC 1226: lwIP custom netif (MTU=300, sin ARP), `ax25ip_output` (WiFi→RF), `ax25ip_rx_frame` (RF→lwIP), destino broadcast QST-0.
+- `main/spiffs_data/index.html` — SPA completa: grid 25/50/25 (controles/log/audio), log APRS newest-first con badges `PARA MÍ` / `ACK` / `TX`, colores src=azul/dst=ámbar/path=verde, click en callsign rellena formulario, envío APRS desde navegador.
+
+**Cambios en ficheros existentes:**
+
+1. **`main/LibAPRS-esp32-i2s/src/FIFO.h`** — variantes `fifo_*_locked` pasadas a `static inline` para evitar `-Werror=static` cuando llaman a `vPortEnterCritical`/`vPortExitCritical` (que son `static` en ESP-IDF portmacro.h). Se declara `extern portMUX_TYPE g_fifo_mux` para compartir el mux.
+
+2. **`main/LibAPRS-esp32-i2s/src/LibAPRS.h`** — añadidas declaraciones:
+   ```c
+   void APRS_queue_ack(const char *to_call, int to_ssid, const char *msg_id);
+   void APRS_getCallsign(char *buf_out, int *ssid_out);
+   ```
+
+3. **`main/LibAPRS-esp32-i2s/src/LibAPRS.cpp`** — refactor de `APRS_queue_msg`:
+   - `queue_aprs_info(to_call, to_ssid, info_text, info_len)`: helper estático compartido que construye frame UI AX.25 `:DEST     :info` y llama `afsk_queue_tx_frame()`.
+   - `APRS_queue_msg`: añade sufijo `{NNN}`, llama `queue_aprs_info`.
+   - `APRS_queue_ack`: construye `"ack<msg_id>"`, llama `queue_aprs_info`.
+   - `APRS_getCallsign`: copia `CALL[6]` y `CALL_SSID`.
+
+4. **`main/main.c`** — varias adiciones en modo KISS:
+   - `#include <stdlib.h>` (para `atoi`) + `#include "ax25ip.h"` + `#include "audio_stream.h"`.
+   - Lee `aprs.callsign` y `aprs.ssid` de config.json, llama `APRS_setCallsign()`.
+   - Llama `ax25ip_init(config_get())` tras `transport_init`.
+   - Llama `audio_stream_init()` tras `ax25ip_init`.
+   - `try_auto_ack()`: parsea trama AX.25 raw, comprueba si va dirigida a nosotros (comparación de 9 chars sin distinción mayúsculas/minúsculas + SSID), extrae `{NNN}`, llama `APRS_queue_ack()` + `audio_stream_ws_send_text({type:"ack_sent",...})`.
+   - `on_ax25_raw_frame()`: llama en orden `kiss_send_frame`, `try_auto_ack`, `ax25ip_rx_frame`, `audio_stream_ws_send_text` (JSON {type:"aprs",...}).
+   - `audio_stream.c::me_handler` (GET /api/me): llama `APRS_getCallsign()`, responde `{"call":"...","ssid":N}`.
+
+5. **`main/audio_stream.c`** — servidor HTTP (port 80) con 4 handlers URI, WebSocket `/ws` con broadcast binario (ADPCM) y texto (JSON APRS/ACK), cola `audio_stream_q` de 2048 muestras, tarea `audio_stream_task` (prio 3), tarea `wav_server_task` (prio 3, WAV TCP port 8080).
+
+6. **`main/CMakeLists.txt`** — añadidos `"audio_stream.c"` y `"ax25ip.c"` a SRCS; añadidos `esp_http_server`, `vfs`, `espressif__cjson` a REQUIRES.
+
+7. **`sdkconfig.defaults`** — añadido `CONFIG_LWIP_IP_FORWARD=y`.
+
+**Bug fixes durante el build:**
+
+- `pbuf_length(p)` no existe en lwIP → cambiado a `p->tot_len` en `ax25ip.c`.
+- `#include <cmath>` faltante en `managed_components/espressif__esp-dsp/modules/kalman/ekf/common/ekf.cpp` y `ekf_imu13states.cpp` (error `std::cos/sin/atan not found`) → parcheados localmente.
+- Corrupción de caché CMake por `CONFIG_LWIP_IP_FORWARD` añadido a `sdkconfig.defaults` con build directory existente → `rm -rf build && idf.py reconfigure && ninja -C build`.
+
+**Resultado del build:**
+```
+build/esp32-aprs-modem.bin  0xdcb60 bytes (904 KB)
+Smallest app partition: 0x1a0000 bytes
+0xc34a0 bytes (47%) free
+```
+
+**Verificación hardware pendiente:**
+- RX con señal RF real.
+- Gateway IP RFC 1226 en hardware (requiere `ip.enabled: true` en config.json y ruta en el host: `ip route add 44.61.3.0/24 via <ESP32-IP>`).
