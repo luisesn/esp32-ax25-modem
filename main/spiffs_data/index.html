@@ -24,7 +24,12 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #meter{height:100%;width:0;
        background:linear-gradient(90deg,#2a8a2a,#8a8a2a,#8a2a2a);transition:width .05s}
 #log-hdr{padding:.35rem .6rem;font-size:.7rem;color:#4a9a4a;
-         border-bottom:1px solid #1a2a1a;letter-spacing:.08em}
+         border-bottom:1px solid #1a2a1a;letter-spacing:.08em;
+         display:flex;align-items:center;justify-content:space-between}
+#dl-btn{font-size:.6rem;font-family:monospace;background:none;border:1px solid #2a4a2a;
+  color:#4a9a4a;border-radius:3px;padding:.15rem .45rem;cursor:pointer;line-height:1.4;
+  transition:background .15s}
+#dl-btn:hover{background:#0d1e0d}
 #log-wrap{display:flex;flex-direction:column;min-height:0}
 #log{flex:1;min-height:0;overflow-y:auto;padding:.5rem .6rem;
   display:flex;flex-direction:column;gap:.45rem}
@@ -48,6 +53,28 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .pkt .tx-lbl{color:#c8a04a;font-weight:bold}
 .pkt .tx-arr{color:#6d6d6d}
 #info{font-size:.7rem;color:#555;text-align:center;line-height:1.6;margin-top:auto}
+.tab-bar{display:flex;border-bottom:1px solid #2a1a00;flex-shrink:0}
+.tab-btn{flex:1;padding:.35rem;font-size:.65rem;font-family:monospace;background:none;
+  border:none;color:#666;cursor:pointer;letter-spacing:.06em;
+  border-bottom:2px solid transparent;transition:color .15s}
+.tab-btn.active{color:#c8a04a;border-bottom:2px solid #c8a04a}
+.tab-pane{display:none;padding:.75rem;flex-direction:column;gap:.6rem;flex:1;min-height:0;
+  justify-content:center}
+.tab-pane.active{display:flex}
+#gps-btn{padding:.35rem .5rem;font-size:.7rem;font-family:monospace;background:#0d1e0d;
+  color:#4a9a4a;border:1px solid #4a9a4a;border-radius:3px;cursor:pointer;white-space:nowrap}
+#gps-btn:hover{background:#162816}#gps-btn:disabled{opacity:.4;cursor:default}
+.map-link{text-decoration:none;font-size:.8rem;margin-left:.25rem;opacity:.9}
+.map-link:hover{opacity:1}
+.pos-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;background:#001830;
+  border:1px solid #7ecfff;border-radius:2px;color:#7ecfff;margin-right:.3rem;
+  vertical-align:middle}
+#pos-btn{padding:.4rem 1rem;font-size:.75rem;font-family:monospace;background:#1a3a5c;
+  color:#7ecfff;border:1px solid #7ecfff;border-radius:3px;cursor:pointer;
+  transition:background .2s;white-space:nowrap}
+#pos-btn:hover{background:#254f80}#pos-btn:disabled{opacity:.4;cursor:default}
+#pos-sym{background:#111;color:#e0e0e0;border:1px solid #333;border-radius:3px;
+  font-family:monospace;font-size:.7rem;padding:.3rem .4rem}
 #send-hdr{padding:.35rem .6rem;font-size:.7rem;color:#c8a04a;
           border-bottom:1px solid #2a1a00;letter-spacing:.08em}
 #send-wrap{display:flex;flex-direction:column}
@@ -89,12 +116,15 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
     </div>
   </div>
   <div id="log-wrap" class="panel">
-    <div id="log-hdr">APRS LOG</div>
+    <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
     <div id="log"></div>
   </div>
   <div id="send-wrap" class="panel">
-    <div id="send-hdr">ENVIAR MENSAJE APRS</div>
-    <div id="send-form">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="showTab('msg',this)">MENSAJE</button>
+      <button class="tab-btn" onclick="showTab('pos',this)">POSICIÓN</button>
+    </div>
+    <div id="tab-msg" class="tab-pane active">
       <div class="send-row">
         <label>Destino</label>
         <input id="send-to" type="text" maxlength="6" placeholder="NO0CAL" spellcheck="false" autocomplete="off">
@@ -118,6 +148,34 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <button id="send-btn" onclick="sendAPRS()">&#x2191; Enviar</button>
       </div>
       <div id="send-status"></div>
+    </div>
+    <div id="tab-pos" class="tab-pane">
+      <div class="send-row">
+        <button id="gps-btn" onclick="getGPS()">&#x1F4CD; GPS</button>
+        <label style="min-width:2rem">Lat</label>
+        <input id="pos-lat" type="number" step="any" min="-90" max="90" placeholder="40.41680" style="flex:1;min-width:3.5rem">
+        <label style="min-width:2rem">Lon</label>
+        <input id="pos-lon" type="number" step="any" min="-180" max="180" placeholder="-3.70380" style="flex:1;min-width:3.5rem">
+      </div>
+      <div class="send-row">
+        <label>Símbolo</label>
+        <select id="pos-sym">
+          <option value="&gt;">&gt; Coche</option>
+          <option value="-">- Casa</option>
+          <option value="k">k SUV/4x4</option>
+          <option value="Y">Y Barco</option>
+          <option value="j">j Avión</option>
+          <option value="#"># Digipeater</option>
+          <option value="r">r RX-only</option>
+          <option value="n">n MESH</option>
+        </select>
+        <label style="min-width:3.5rem">Comentario</label>
+        <input id="pos-comment" type="text" maxlength="43" placeholder="ESP32-APRS" style="flex:1">
+      </div>
+      <div class="send-row">
+        <button id="pos-btn" onclick="sendBeacon()">&#x1F4E1; Transmitir baliza</button>
+        <span id="pos-status" style="font-size:.65rem;color:#888;margin-left:.5rem;flex:1"></span>
+      </div>
     </div>
   </div>
 </div>
@@ -154,8 +212,7 @@ function scheduleBlock(s){
     Math.min(Math.sqrt(sum/s.length)*400,100)+'%';
 }
 // ── APRS log ───────────────────────────────────────────────────────────────
-const MAX_LOG=100;
-let myCall='',mySsid=-1;
+const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fillDest(src){
@@ -182,14 +239,23 @@ function appendLog(src,dst,path,info){
   let badge='';
   if(isAck)badge='<span class="ack-badge">ACK</span>';
   else if(isToMe)badge='<span class="me-badge">PARA MÍ</span>';
-  d.innerHTML=`<span class="ts">${ts}</span>${badge}`+
+  const pos=parseAPRSPos(info);
+  const mapLink=pos
+    ?` <a class="map-link" href="https://maps.google.com/?q=${pos.lat},${pos.lon}" target="_blank" rel="noopener" title="Ver en Google Maps (${pos.lat},${pos.lon})">&#x1F5FA;&#xFE0F;</a>`
+    :'';
+  const posBadge=pos?'<span class="pos-badge">POS</span>':'';
+  d.innerHTML=`<span class="ts">${ts}</span>${badge}${posBadge}`+
     `<span class="src" onclick="fillDest('${esc(src)}')" title="Copiar al destino">${esc(src)}</span>`+
     `<span class="sep"> &gt; </span>`+
     `<span class="dst">${esc(dst)}</span>`+
     (path?`<span class="sep"> via </span><span class="path">${esc(path)}</span>`:'')+
     ` `+
-    `<span class="info">${esc(info)}</span>`;
+    `<span class="info">${esc(info)}</span>`+
+    mapLink;
   log.prepend(d);
+  const tsISO=new Date().toISOString();
+  logData.unshift({ts:tsISO,type:isAck?'ack':(isToMe?'me':'rx'),src,dst,path,info});
+  if(logData.length>MAX_LOG)logData.length=MAX_LOG;
 }
 function appendSentLog(to,ssid,text){
   const log=document.getElementById('log');
@@ -203,6 +269,9 @@ function appendSentLog(to,ssid,text){
     `<span class="dst">${esc(dest)}</span>`+
     ` <span class="info">${esc(text)}</span>`;
   log.prepend(d);
+  const tsISO=new Date().toISOString();
+  logData.unshift({ts:tsISO,type:'tx',src:myCall+(mySsid>0?'-'+mySsid:''),dst:dest,path:'',info:text});
+  if(logData.length>MAX_LOG)logData.length=MAX_LOG;
 }
 // ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
 let ws=null,wsTimer=null;
@@ -261,6 +330,93 @@ function sendAPRS(){
   }).catch(()=>{
     st.style.color='#c04040';st.textContent='Error de red.';
   }).finally(()=>{btn.disabled=false;});
+}
+// ── Download log as CSV ────────────────────────────────────────────────────
+function csvEsc(s){return'"'+String(s).replace(/"/g,'""')+'"';}
+function downloadLog(){
+  if(!logData.length){return;}
+  const hdr='time,type,src,dst,path,info\n';
+  const rows=logData.map(r=>
+    [r.ts,r.type||'rx',r.src||'',r.dst||'',r.path||'',r.info||'']
+    .map(csvEsc).join(','));
+  const blob=new Blob([hdr+rows.join('\n')],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='aprs_log_'+new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+// ── APRS position parser ──────────────────────────────────────────────────
+function parseAPRSPos(info){
+  if(!info||info.length<18)return null;
+  let s=info,first=s[0];
+  if(first==='@'||first==='/'){
+    // skip 7-char timestamp: DDHHMM + z|h|/
+    if(s.length<26)return null;
+    s=s.slice(7);
+  }else if(first==='!'||first==='='){
+    s=s.slice(1);
+  }else return null;
+  const m=s.match(/^(\d{2})(\d{2}\.\d{2,3})([NS])(.)(\d{3})(\d{2}\.\d{2,3})([EW])(.)(.*)/);
+  if(!m)return null;
+  const lat=(parseInt(m[1],10)+parseFloat(m[2])/60)*(m[3]==='S'?-1:1);
+  const lon=(parseInt(m[5],10)+parseFloat(m[6])/60)*(m[7]==='W'?-1:1);
+  if(isNaN(lat)||isNaN(lon)||lat<-90||lat>90||lon<-180||lon>180)return null;
+  return{lat:lat.toFixed(5),lon:lon.toFixed(5),sym:m[8],comment:m[9]};
+}
+// ── APRS format helpers (for beacon TX display) ────────────────────────────
+function fmtAPRSLat(lat){
+  const d=Math.floor(Math.abs(lat)),m=(Math.abs(lat)-d)*60;
+  return String(d).padStart(2,'0')+m.toFixed(2).padStart(5,'0')+(lat>=0?'N':'S');}
+function fmtAPRSLon(lon){
+  const d=Math.floor(Math.abs(lon)),m=(Math.abs(lon)-d)*60;
+  return String(d).padStart(3,'0')+m.toFixed(2).padStart(5,'0')+(lon>=0?'E':'W');}
+// ── Tab switching ──────────────────────────────────────────────────────────
+function showTab(name,btn){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
+}
+// ── GPS ────────────────────────────────────────────────────────────────────
+function getGPS(){
+  const btn=document.getElementById('gps-btn');
+  const st=document.getElementById('pos-status');
+  if(!navigator.geolocation){st.style.color='#c04040';st.textContent='GPS no soportado.';return;}
+  btn.disabled=true;st.style.color='#888';st.textContent='Obteniendo posición…';
+  navigator.geolocation.getCurrentPosition(pos=>{
+    document.getElementById('pos-lat').value=pos.coords.latitude.toFixed(5);
+    document.getElementById('pos-lon').value=pos.coords.longitude.toFixed(5);
+    st.style.color='#4a9a4a';
+    st.textContent=`±${Math.round(pos.coords.accuracy)}m ✓`;
+    btn.disabled=false;
+  },err=>{
+    st.style.color='#c04040';st.textContent='GPS: '+err.message;
+    btn.disabled=false;
+  },{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+}
+// ── Send APRS beacon ───────────────────────────────────────────────────────
+function sendBeacon(){
+  const lat=parseFloat(document.getElementById('pos-lat').value);
+  const lon=parseFloat(document.getElementById('pos-lon').value);
+  const sym=document.getElementById('pos-sym').value;
+  const comment=document.getElementById('pos-comment').value.trim();
+  const st=document.getElementById('pos-status');
+  if(isNaN(lat)||lat<-90||lat>90){st.style.color='#c04040';st.textContent='Latitud inválida (-90…90).';return;}
+  if(isNaN(lon)||lon<-180||lon>180){st.style.color='#c04040';st.textContent='Longitud inválida (-180…180).';return;}
+  const btn=document.getElementById('pos-btn');
+  btn.disabled=true;st.style.color='#888';st.textContent='Enviando…';
+  fetch('/api/aprs/beacon',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({lat,lon,symbol:sym,comment})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      st.style.color='#4ac84a';st.textContent='Baliza TX ✓';
+      appendSentLog('APRS',-1,'!'+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+comment);
+    }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
+  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  ).finally(()=>{btn.disabled=false;});
 }
 window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});});
 </script>

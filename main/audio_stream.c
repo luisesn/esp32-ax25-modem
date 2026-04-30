@@ -8,6 +8,7 @@
 #include <lwip/sockets.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include "cJSON.h"
 #include "LibAPRS.h"
 
@@ -153,7 +154,10 @@ static void audio_stream_task(void *arg) {
                             .payload    = s_adpcm_block,
                             .len        = ADPCM_BLOCK_BYTES,
                         };
-                        httpd_ws_send_data(s_httpd, client_fds[i], &pkt);
+                        if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
+                            // Socket muerto: cerrar sesión para que httpd lo limpie
+                            httpd_sess_trigger_close(s_httpd, client_fds[i]);
+                        }
                     }
                 }
             }
@@ -239,6 +243,74 @@ static esp_err_t aprs_send_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// POST /api/aprs/beacon
+// Body JSON: {"lat": 40.4168, "lon": -3.7038, "symbol": ">", "comment": "ESP32"}
+// Converts decimal coordinates to APRS uncompressed position and queues for TX.
+static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
+    char body[256];
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    body[len] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *j_lat     = cJSON_GetObjectItem(root, "lat");
+    cJSON *j_lon     = cJSON_GetObjectItem(root, "lon");
+    cJSON *j_symbol  = cJSON_GetObjectItem(root, "symbol");
+    cJSON *j_comment = cJSON_GetObjectItem(root, "comment");
+
+    if (!cJSON_IsNumber(j_lat) || !cJSON_IsNumber(j_lon)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing lat/lon");
+        return ESP_FAIL;
+    }
+
+    float lat = (float)j_lat->valuedouble;
+    float lon = (float)j_lon->valuedouble;
+    char  sym = (j_symbol && cJSON_IsString(j_symbol) && j_symbol->valuestring[0])
+                    ? j_symbol->valuestring[0] : '>';
+    const char *comment = (j_comment && cJSON_IsString(j_comment))
+                              ? j_comment->valuestring : "";
+
+    if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Coordinates out of range");
+        return ESP_FAIL;
+    }
+
+    // Convert to APRS uncompressed format
+    int   lat_d = (int)fabsf(lat);
+    float lat_m = (fabsf(lat) - lat_d) * 60.0f;
+    char lat_str[9];  // DDMM.MMN\0
+    snprintf(lat_str, sizeof(lat_str), "%02d%05.2f%c",
+             lat_d, lat_m, lat >= 0.0f ? 'N' : 'S');
+
+    int   lon_d = (int)fabsf(lon);
+    float lon_m = (fabsf(lon) - lon_d) * 60.0f;
+    char lon_str[10]; // DDDMM.MME\0
+    snprintf(lon_str, sizeof(lon_str), "%03d%05.2f%c",
+             lon_d, lon_m, lon >= 0.0f ? 'E' : 'W');
+
+    // APRS info field: !lat/lon_sym_comment  (symbol table = '/', primary)
+    char info[120];
+    snprintf(info, sizeof(info), "!%s/%s%c%s", lat_str, lon_str, sym, comment);
+
+    ESP_LOGI(TAG, "APRS beacon TX: %s", info);
+    APRS_queue_beacon(info);
+
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 // 404 → redirect to / (captive-portal probes from Android/iOS/Windows)
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
     (void)err;
@@ -249,11 +321,57 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err
 }
 
 // GET /ws → WebSocket upgrade.
-// En ESP-IDF 6.1 este handler se llama cuando el cliente envía un frame
-// (no al conectar). Para streaming unidireccional basta con consumir el frame.
+// En ESP-IDF 6.1 este handler se llama:
+//   a) en el handshake inicial (req->method == HTTP_GET)
+//   b) cada vez que el cliente envía un frame
+// Es CRÍTICO consumir el payload completo de cada frame, de lo contrario los
+// bytes sobrantes quedan en el buffer TCP y la próxima lectura intenta parsearlos
+// como cabecera de frame → "WS frame is not properly masked" en bucle.
 static esp_err_t ws_handler(httpd_req_t *req) {
-    httpd_ws_frame_t pkt = { .type = HTTPD_WS_TYPE_TEXT, .payload = NULL, .len = 0 };
-    httpd_ws_recv_frame(req, &pkt, 0);
+    if (req->method == HTTP_GET) {
+        // Handshake inicial — solo confirmar upgrade
+        return ESP_OK;
+    }
+
+    // 1. Leer cabecera para obtener tipo y longitud del payload
+    httpd_ws_frame_t pkt = {0};
+    esp_err_t ret = httpd_ws_recv_frame(req, &pkt, 0);
+    if (ret != ESP_OK) {
+        return ret;  // httpd cerrará el socket al recibir error
+    }
+
+    // 2. Consumir el payload (si lo hay) para vaciar el buffer TCP
+    uint8_t *buf = NULL;
+    if (pkt.len > 0) {
+        buf = malloc(pkt.len);
+        if (!buf) return ESP_ERR_NO_MEM;
+        pkt.payload = buf;
+        ret = httpd_ws_recv_frame(req, &pkt, pkt.len);
+        if (ret != ESP_OK) {
+            free(buf);
+            return ret;
+        }
+    }
+
+    // 3. Responder a frames de control
+    if (pkt.type == HTTPD_WS_TYPE_PING) {
+        httpd_ws_frame_t pong = {
+            .final = true, .type = HTTPD_WS_TYPE_PONG,
+            .payload = buf, .len = pkt.len,
+        };
+        httpd_ws_send_frame(req, &pong);
+    } else if (pkt.type == HTTPD_WS_TYPE_CLOSE) {
+        // Responder CLOSE y dejar que httpd cierre el socket
+        httpd_ws_frame_t close_f = {
+            .final = true, .type = HTTPD_WS_TYPE_CLOSE,
+            .payload = NULL, .len = 0,
+        };
+        httpd_ws_send_frame(req, &close_f);
+        free(buf);
+        return ESP_FAIL;  // provoca cierre de sesión por parte de httpd
+    }
+
+    free(buf);
     return ESP_OK;
 }
 
@@ -334,8 +452,11 @@ void audio_stream_ws_send_text(const char *text) {
     size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
     if (httpd_get_client_list(s_httpd, &n, client_fds) != ESP_OK) return;
     for (int i = 0; i < (int)n; i++) {
-        if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
-            httpd_ws_send_data(s_httpd, client_fds[i], &pkt);
+        if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
+                httpd_sess_trigger_close(s_httpd, client_fds[i]);
+            }
+        }
     }
 }
 
@@ -376,10 +497,16 @@ void audio_stream_init(void) {
         .method  = HTTP_GET,
         .handler = me_handler,
     };
+    static const httpd_uri_t uri_beacon = {
+        .uri     = "/api/aprs/beacon",
+        .method  = HTTP_POST,
+        .handler = aprs_beacon_handler,
+    };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
     httpd_register_uri_handler(s_httpd, &uri_me);
+    httpd_register_uri_handler(s_httpd, &uri_beacon);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
