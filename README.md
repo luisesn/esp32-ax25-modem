@@ -2,6 +2,8 @@
 
 Módem APRS / KISS TNC (AX.25 sobre AFSK Bell-202, 1200 bps) para **ESP32**, basado en ESP-IDF v6.1.
 
+Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
+
 (Creado dando latigazos a Claude y otros...)
 
 > ✅ **Estado (2026-05-01): compila limpio (binary ~904 KB, 47 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
@@ -284,3 +286,4 @@ El código heredado de LibAPRS mantiene su licencia original (ver [main/LibAPRS-
 - [Mark Qvist](https://github.com/markqvist) — LibAPRS original.
 - [handiko](https://github.com/handiko) — port a ESP32 con I2S.
 - Francesco Sacchi — código base de decodificación AX.25.
+- [kamilsss655](https://github.com/kamilsss655) — Hardware https://github.com/kamilsss655/ESPRI
