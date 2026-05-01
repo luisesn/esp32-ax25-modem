@@ -1,14 +1,14 @@
 {
     "version": "1",
     "aprs": {
-        "callsign": "NO0CALL",
+        "callsign": "EA1JBS",
         "ssid": 11,
         "symbol_table": "/",
         "symbol_code": ">"
     },
     "wifi": {
-        "ssid": "YOUR_SSID",
-        "password": "YOUR_PASSWORD",
+        "ssid": "DIGIFIBRA-8E8F",
+        "password": "XKHGBFTLRK",
         "connect_timeout_s": 120
     },
     "ap": {
@@ -26,12 +26,12 @@
     "digi": {
         "enabled": false,
         "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
-        "callsign": "",
+        "callsign": "EA1JBS",
         "ssid": 0,
         "comment": "ESP32-DIGI"
     },
     "morse": {
-        "enabled": false,
+        "enabled": true,
         "callsign": "",
         "tone_hz": 1000,
         "wpm": 20,

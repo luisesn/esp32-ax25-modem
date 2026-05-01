@@ -251,7 +251,10 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
 
                 addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
 
-                ESP_LOGI(TAG, "Digipeated via alias %s-%d → %s-%d (len=%u)",
+                char src_call[8]; int src_ssid; bool src_h, src_last;
+                addr_read(&frame[7], src_call, &src_ssid, &src_h, &src_last);
+                ESP_LOGI(TAG, "%s-%d digipeated via alias %s-%d → %s-%d (len=%u)",
+                         src_call, src_ssid,
                          s_aliases[ai].call, s_aliases[ai].ssid,
                          s_call, s_call_ssid, (unsigned)len);
                 did_digi = true;

@@ -257,12 +257,19 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     kiss_send_frame(buf, len);
     try_auto_ack(buf, len);
-    digi_process_frame(buf, len);
+    bool digipeated = digi_process_frame(buf, len);
     ax25ip_rx_frame(buf, len);
 
     static char s_aprs_json[APRS_JSON_BUF];
-    if (ax25_frame_to_json(buf, len, s_aprs_json, sizeof(s_aprs_json)))
+    if (ax25_frame_to_json(buf, len, s_aprs_json, sizeof(s_aprs_json))) {
         audio_stream_ws_send_text(s_aprs_json);
+        if (digipeated) {
+            static char s_digi_json[APRS_JSON_BUF + 32];
+            snprintf(s_digi_json, sizeof(s_digi_json),
+                     "{\"type\":\"digipeated\",%s", s_aprs_json + 1);
+            audio_stream_ws_send_text(s_digi_json);
+        }
+    }
 }
 
 // Trama KISS completa recibida del host → encolar para TX en receive_audio_task.
