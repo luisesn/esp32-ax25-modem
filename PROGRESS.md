@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-04-30 (sesión nocturna)
+Última actualización: 2026-05-01
 
 ---
 
@@ -43,11 +43,19 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | nuevo | UI web con log APRS, envío y audio | ✅ 2026-04-30 |
 | nuevo | Auto-ACK de mensajes dirigidos | ✅ 2026-04-30 |
 | nuevo | Gateway IP RFC 1226 (`ax25ip.c`) | ✅ 2026-04-30 (verificación HW pendiente) |
+| nuevo | Digipeater WIDEn-N multi-alias (`digipeater.c`) | ✅ 2026-05-01 |
+| nuevo | Logging de digipeat a serie y WebSocket (badge DIGI) | ✅ 2026-05-01 |
+| nuevo | Baliza morse CW periódica (`morse.c`) | ✅ 2026-05-01 |
+| nuevo | Baliza posición APRS vía REST `/api/aprs/beacon` | ✅ 2026-05-01 |
+| nuevo | Editor de config en UI web (`/api/config` GET+POST) | ✅ 2026-05-01 |
+| nuevo | Grabación de audio WAV en UI web | ✅ 2026-05-01 |
+| nuevo | `freeMemory()` → `esp_get_free_heap_size()` en modo APRS | ✅ 2026-05-01 |
+| 2.2 | `freeMemory()` constante ficticia en FakeArduino | ⬜ pendiente (baja prioridad; main.c ya usa heap real) |
 
 Pendientes prioritarios:
-1. **2.2** `freeMemory()` → `esp_get_free_heap_size()`.
-2. Quitar `esp-dsp` de `idf_component.yml` (los buffers FFT se eliminaron).
-3. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
+1. Quitar `esp-dsp` de `idf_component.yml` (los buffers FFT se eliminaron).
+2. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
+3. Verificación RX + gateway IP en hardware real.
 
 ---
 
@@ -332,3 +340,36 @@ Smallest app partition: 0x1a0000 bytes
 **Verificación hardware pendiente:**
 - RX con señal RF real.
 - Gateway IP RFC 1226 en hardware (requiere `ip.enabled: true` en config.json y ruta en el host: `ip route add 44.61.3.0/24 via <ESP32-IP>`).
+
+---
+
+### 2026-05-01 — digipeater, morse, baliza posición, editor config, logging DIGI
+
+**Nuevos ficheros:**
+- [main/digipeater.h](main/digipeater.h) / [main/digipeater.c](main/digipeater.c) — digipeater WIDEn-N completo: aliases múltiples (array JSON o string), inserción del indicativo propio en path (H-bit=1), decremento N, supresión de duplicados (FNV-1a 32 slots TTL 30 s), prevención de bucles por H-bit. Logging serie `ESP_LOGI` incluye SRC de la trama digipeateada. Notificación WebSocket `{"type":"digipeated",...}` para badge DIGI en la UI.
+- [main/morse.h](main/morse.h) / [main/morse.c](main/morse.c) — baliza morse CW periódica. Parámetros desde `config.json`: `tone_hz`, `wpm`, `period_s`, `callsign` (fallback a `aprs.callsign`). Despacha desde `receive_audio_task` vía `morse_check_and_dispatch()` (propietaria del mutex I2S0). Timer FreeRTOS da semáforo; `morse_trigger_now()` para disparo inmediato (REST o UI).
+
+**Cambios en ficheros existentes:**
+
+1. **`main/LibAPRS-esp32-i2s/src/AFSK.cpp`** — añadida llamada a `morse_check_and_dispatch()` al inicio del bucle de `receive_audio_task`, antes del dispatch de cola TX.
+
+2. **`main/LibAPRS-esp32-i2s/src/LibAPRS.cpp`** — añadida `APRS_queue_beacon(const char *info)`: construye trama AX.25 UI con el info field literal y llama `afsk_queue_tx_frame()`.
+
+3. **`main/audio_stream.c`** — nuevos handlers REST:
+   - `POST /api/aprs/beacon` — convierte lat/lon decimal a formato APRS 1.01 uncompressed (DDMM.HHN / DDDMM.HHW), construye info field `!lat/lonScomment`, llama `APRS_queue_beacon()`.
+   - `GET /api/config` — devuelve `config.json` completo desde SPIFFS.
+   - `POST /api/config` — guarda nuevo JSON en SPIFFS, recarga en RAM, llama `digi_init()` y `morse_init()` con la nueva config.
+   - `POST /api/morse/trigger` — llama `morse_trigger_now()`.
+
+4. **`main/main.c`** — añadidas llamadas a `digi_init(config_get())` y `morse_init(config_get())` en `app_main` (modo KISS). Refactor `on_ax25_raw_frame`: captura valor de retorno de `digi_process_frame` y envía evento WebSocket `{"type":"digipeated",...}` si fue digipeateado. Modo APRS: sustituido `freeMemory()` por `esp_get_free_heap_size()`.
+
+5. **`main/CMakeLists.txt`** — añadidos `digipeater.c`, `morse.c` a SRCS; añadido `esp_timer` a REQUIRES; definición `CUSTOM_FRAME_SIZE=600` para soportar MTU 512 de tncattach.
+
+6. **`main/spiffs_data/config.json`** — añadidas secciones `digi` (enabled, alias array, callsign, ssid, comment) y `morse` (enabled, callsign, tone_hz, wpm, period_s).
+
+7. **`main/spiffs_data/index.html`** — nuevas funcionalidades:
+   - Pestaña POSICIÓN: formulario lat/lon + símbolo + comentario → `POST /api/aprs/beacon`. Botón Morse (one-shot).
+   - Pestaña CONFIG: editor JSON con `GET/POST /api/config`. Carga al abrir el tab; guarda y notifica resultado.
+   - Badge DIGI (azul, `.pkt-digi`) para paquetes con `type:'digipeated'` en WebSocket.
+   - Botón "Grabar" (`.rec-btn`): captura bloques IMA ADPCM del WebSocket, los decodifica y descarga como archivo WAV PCM 16-bit 9600 Hz.
+   - `appendLog` acepta 5º param `isDigi`; CSV incluye `type='digi'` para estas filas.

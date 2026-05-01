@@ -1,56 +1,81 @@
 # Informe técnico — esp32-aprs-modem
 
-Fecha: 2026-04-30 (actualizado; original 2026-04-17)
+Fecha: 2026-05-01 (actualizado; original 2026-04-17)
 Autor: análisis automático (Claude Code)
 
 Este documento lista únicamente los problemas que siguen vigentes en el código actual.
 Los problemas históricos ya corregidos se eliminaron de este informe para evitar ruido.
 
-## Addendum de estado actual (2026-04-30)
+## Estado actual (2026-05-01)
 
-**Estado del build:** binario 904 KB, 47 % libre. Compilación limpia con `idf.py reconfigure && ninja -C build` (IDF 6.1).
+**Build:** binario ~904 KB, 47 % libre. Compilación limpia con `idf.py reconfigure && ninja -C build` (IDF 6.1).
 
 **Infraestructura completada:**
-- `ptt.c/.h` eliminados; control PTT centralizado en `AFSK.cpp`.
-- `transport_wifi.c` usa config WiFi/AP desde `config.json`.
+- Control PTT centralizado en `AFSK.cpp` (activo-alto, GPIO 26).
+- Conmutación half-duplex I2S0: ADC y DAC nunca activos simultáneamente.
+- Cola TX `s_tx_queue` despacha desde `receive_audio_task` (propietaria del mutex ADC).
 - FIFO `_locked` variants: `static inline` con `portMUX_TYPE` compartido.
-- Indicativo/SSID leídos de `aprs.callsign` / `aprs.ssid` en config.json (modo KISS).
+- Indicativo/SSID leídos de `config.json` en arranque (modo KISS y modo APRS).
+- `config.json` editable en runtime vía `POST /api/config` sin reflashear SPIFFS.
 
-**Nuevas funcionalidades (sesión nocturna 2026-04-30):**
-- `audio_stream.c/h` — servidor HTTP port 80 (UI web), WebSocket `/ws` (audio IMA ADPCM + JSON APRS), WAV TCP port 8080, REST `/api/aprs/send` y `/api/me`.
-- `index.html` — SPA completa: log APRS, envío de mensajes, streaming de audio, badges PARA MÍ / ACK / TX.
-- Auto-ACK: `try_auto_ack()` en `main.c` detecta mensajes dirigidos con `{NNN}`, transmite ACK y notifica al frontend vía WebSocket.
-- `ax25ip.c/h` — gateway IP RFC 1226 (lwIP custom netif, PID=0xCC, MTU=300, broadcast QST-0). Activado con `ip.enabled: true` en config.json y `CONFIG_LWIP_IP_FORWARD=y` en sdkconfig.
-- `APRS_queue_msg`, `APRS_queue_ack`, `APRS_getCallsign` añadidas a LibAPRS.cpp.
-
-**Único cierre pendiente de hardware:**
-- Verificación RX con señal RF real.
-- Verificación gateway IP RFC 1226 en hardware.
-
----
-
-## 1. Estado de temas vigentes del informe
-
-Todos los temas de código que estaban marcados como vigentes quedaron resueltos en esta ronda:
-
-1. `FIFO.h`: `fifo_*_locked` ahora protege con `taskENTER_CRITICAL`/`taskEXIT_CRITICAL` sobre `portMUX_TYPE` compartido.
-2. `AFSK.cpp`: `APRS_poll()` se movió fuera del hot path de RX a una tarea dedicada `aprs_poll_task`.
-3. `LibAPRS.cpp`: `APRS_init()` ya no usa `malloc`; ahora inicializa un `Afsk` estático.
-4. `FakeArduino.cpp`: se implementaron `print/println` para evitar símbolos sin definir si se usa `APRS_printSettings()`.
-5. `src.ino`: eliminado del árbol de `main/LibAPRS-esp32-i2s/src/`.
-6. `device.h`/`AFSK.h`: eliminadas macros legacy sin uso (`F_CPU`, `FREQUENCY_CORRECTION`, `KEEP_RECORDING_THRESH`, `CPU_FREQ`).
-
-Build validado tras estos cambios: `idf.py build` finaliza correctamente.
+**Funcionalidades operativas:**
+- KISS TNC bidireccional sobre WiFi TCP (port 8001).
+- Servidor HTTP port 80: UI web SPA (log APRS, mensajes, posición, config, audio).
+- WebSocket `/ws`: audio IMA ADPCM + eventos JSON APRS/ACK/DIGI.
+- WAV TCP port 8080 para streaming externo (ffplay, VLC).
+- Auto-ACK: detecta mensajes `{NNN}` dirigidos al propio indicativo y responde.
+- Digipeater WIDEn-N: aliases múltiples, inserción en path, dedup FNV-1a (TTL 30 s), logging serie + WebSocket badge DIGI.
+- Baliza morse CW periódica (configurable tono/WPM/periodo/callsign; one-shot REST).
+- Baliza de posición APRS: `POST /api/aprs/beacon` (lat/lon decimal → formato APRS 1.01).
+- Gateway IP RFC 1226 (`ax25ip.c`): lwIP custom netif, PID=0xCC, MTU=300, activado con `ip.enabled: true`.
 
 ---
 
-## 2. Único punto pendiente (requiere hardware)
+## 1. Puntos de código pendientes
 
-- **Verificación RX con señal RF real**: no se puede cerrar desde este entorno sin acceso a radio/transceptor/SDR físico.
+### 1.1 `esp-dsp` en `idf_component.yml` sin uso activo
+
+**Archivo:** `main/idf_component.yml`
+
+Los buffers FFT y la dependencia `dsps_*` se eliminaron. `esp-dsp` sigue declarado como dependencia, lo que alarga el build innecesariamente. Sus ficheros `ekf.cpp` / `ekf_imu13states.cpp` requieren parches locales de `#include <cmath>` para compilar (ya aplicados en `managed_components/`).
+
+**Solución**: eliminar la entrada `espressif/esp-dsp` de `idf_component.yml` y borrar el directorio `managed_components/espressif__esp-dsp/`.
+
+**Impacto**: build más rápido, sin cambio funcional.
 
 ---
 
-## 3. Resumen ejecutivo actual
+### 1.2 `freeMemory()` en `FakeArduino.cpp`
 
-- No quedan temas de código abiertos de los que estaban vigentes en este informe.
-- El único cierre pendiente es la validación final de RX sobre hardware real.
+**Archivo:** `main/LibAPRS-esp32-i2s/src/FakeArduino.cpp`
+
+`freeMemory()` sigue devolviendo la constante `10000000`. No se usa en el código activo: `main.c` (modo APRS) ya llama `esp_get_free_heap_size()` directamente. Impacto: nulo en la práctica. Pendiente por completitud.
+
+**Solución**: sustituir la constante por `(int)esp_get_free_heap_size()` en `FakeArduino.cpp`.
+
+---
+
+### 1.3 `APRS_poll` en modo APRS clásico
+
+**Archivo:** `main/LibAPRS-esp32-i2s/src/AFSK.cpp` (función `receive_audio_task`)
+
+`APRS_poll()` se llama cada 4 muestras decimadas dentro de `receive_audio_task`. En modo KISS esto es correcto (el callback `on_ax25_raw_frame` es rápido). En modo APRS clásico (`TNC_MODE_APRS`), el callback `aprs_msg_callback` hace un `malloc` y una copia de la trama — carga extra en el hot path de RX. Riesgo: si el malloc es lento (heap fragmentado), introduce jitter en el procesamiento de muestras.
+
+**Solución** (solo si se usa modo APRS): mover el callback a una tarea separada con notificación por `xTaskNotify`, similar a `processPacket`. En modo KISS el comportamiento actual es correcto y no debe cambiarse.
+
+---
+
+## 2. Verificación hardware pendiente
+
+| Punto | Estado |
+|-------|--------|
+| RX con señal RF real (transceptor o SDR) | ⚠️ pendiente |
+| TX: datos decodificados por receptor externo | ✅ verificado |
+| Gateway IP RFC 1226 en hardware | ⚠️ pendiente |
+| Digipeater: retransmisión verificada en hardware | ⚠️ pendiente |
+
+---
+
+## 3. Trampas de implementación documentadas
+
+Las trampas de bajo nivel (I2S0 compartido, timeout ADC, `vTaskDelay(1)`, `TX_SAMPLE_BUFLEN=2048`, GPIO26/PTT/DAC2, polaridad PTT, escritura completa al DMA) están documentadas con detalle en [CLAUDE.md](CLAUDE.md) sección "Convenciones y trampas conocidas".
