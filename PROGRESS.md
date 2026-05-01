@@ -50,12 +50,12 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | nuevo | Editor de config en UI web (`/api/config` GET+POST) | ✅ 2026-05-01 |
 | nuevo | Grabación de audio WAV en UI web | ✅ 2026-05-01 |
 | nuevo | `freeMemory()` → `esp_get_free_heap_size()` en modo APRS | ✅ 2026-05-01 |
-| 2.2 | `freeMemory()` constante ficticia en FakeArduino | ⬜ pendiente (baja prioridad; main.c ya usa heap real) |
+| 2.2 | `freeMemory()` constante ficticia en FakeArduino | ✅ solo queda en `.ino` de ejemplo (no compilado); `main.c` usa `esp_get_free_heap_size()` |
+| nuevo | Eliminar `esp-dsp` de `idf_component.yml` y `managed_components/` | ✅ 2026-05-01 |
 
 Pendientes prioritarios:
-1. Quitar `esp-dsp` de `idf_component.yml` (los buffers FFT se eliminaron).
-2. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
-3. Verificación RX + gateway IP en hardware real.
+1. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
+2. Verificación RX + gateway IP en hardware real.
 
 ---
 

@@ -2,6 +2,8 @@
 
 Módem APRS / KISS TNC (AX.25 sobre AFSK Bell-202, 1200 bps) para **ESP32**, basado en ESP-IDF v6.1.
 
+(Creado dando latigazos a Claude y otros...)
+
 > ✅ **Estado (2026-05-01): compila limpio (binary ~904 KB, 47 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.

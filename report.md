@@ -33,29 +33,7 @@ Los problemas históricos ya corregidos se eliminaron de este informe para evita
 
 ## 1. Puntos de código pendientes
 
-### 1.1 `esp-dsp` en `idf_component.yml` sin uso activo
-
-**Archivo:** `main/idf_component.yml`
-
-Los buffers FFT y la dependencia `dsps_*` se eliminaron. `esp-dsp` sigue declarado como dependencia, lo que alarga el build innecesariamente. Sus ficheros `ekf.cpp` / `ekf_imu13states.cpp` requieren parches locales de `#include <cmath>` para compilar (ya aplicados en `managed_components/`).
-
-**Solución**: eliminar la entrada `espressif/esp-dsp` de `idf_component.yml` y borrar el directorio `managed_components/espressif__esp-dsp/`.
-
-**Impacto**: build más rápido, sin cambio funcional.
-
----
-
-### 1.2 `freeMemory()` en `FakeArduino.cpp`
-
-**Archivo:** `main/LibAPRS-esp32-i2s/src/FakeArduino.cpp`
-
-`freeMemory()` sigue devolviendo la constante `10000000`. No se usa en el código activo: `main.c` (modo APRS) ya llama `esp_get_free_heap_size()` directamente. Impacto: nulo en la práctica. Pendiente por completitud.
-
-**Solución**: sustituir la constante por `(int)esp_get_free_heap_size()` en `FakeArduino.cpp`.
-
----
-
-### 1.3 `APRS_poll` en modo APRS clásico
+### 1.1 `APRS_poll` en modo APRS clásico
 
 **Archivo:** `main/LibAPRS-esp32-i2s/src/AFSK.cpp` (función `receive_audio_task`)
 
