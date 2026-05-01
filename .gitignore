@@ -2,3 +2,11 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
+.git-filter-script.sh
+.gitignore
+copilot-cli.ps1
+.gitignore
+doc/*
+dependencies.lock
+clean_personal_data.sh
+streaming.md
