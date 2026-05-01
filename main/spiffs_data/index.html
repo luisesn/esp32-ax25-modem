@@ -197,6 +197,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <textarea id="cfg-editor" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
       <div class="send-row" style="flex-shrink:0">
         <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
+        <button id="morse-btn" onclick="triggerMorse()" title="Enviar baliza morse ahora">&#x2D9; Morse</button>
         <span id="cfg-status"></span>
       </div>
     </div>
@@ -529,6 +530,16 @@ function sendBeacon(){
       st.style.color='#4ac84a';st.textContent='Baliza TX ✓';
       appendSentLog('APRS',-1,'='+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+comment);
     }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
+  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  ).finally(()=>{btn.disabled=false;});
+}
+function triggerMorse(){
+  const btn=document.getElementById('morse-btn');
+  const st=document.getElementById('cfg-status');
+  btn.disabled=true;st.style.color='#888';st.textContent='Enviando morse…';
+  fetch('/api/morse/trigger',{method:'POST'}).then(r=>r.json()).then(d=>{
+    st.style.color=d.ok?'#4ac84a':'#c04040';
+    st.textContent=d.ok?'Morse TX encolado ✓':'Error';
   }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
   ).finally(()=>{btn.disabled=false;});
 }

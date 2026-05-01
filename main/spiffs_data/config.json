@@ -29,5 +29,12 @@
         "callsign": "",
         "ssid": 0,
         "comment": "ESP32-DIGI"
+    },
+    "morse": {
+        "enabled": false,
+        "callsign": "",
+        "tone_hz": 1000,
+        "wpm": 20,
+        "period_s": 600
     }
 }

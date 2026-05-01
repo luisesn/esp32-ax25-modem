@@ -13,6 +13,7 @@
 #include "LibAPRS.h"
 #include "aux_config.h"
 #include "digipeater.h"
+#include "morse.h"
 
 #define TAG "audio_stream"
 
@@ -377,8 +378,17 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     cJSON *new_cfg = config_reload();
     if (new_cfg) {
         digi_init(new_cfg);
+        morse_init(new_cfg);
     }
 
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// POST /api/morse/trigger → trigger an immediate one-shot morse beacon.
+static esp_err_t morse_trigger_handler(httpd_req_t *req) {
+    morse_trigger_now();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
@@ -543,6 +553,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
+    cfg.max_uri_handlers = 12;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -585,6 +596,11 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = config_post_handler,
     };
+    static const httpd_uri_t uri_morse_trigger = {
+        .uri     = "/api/morse/trigger",
+        .method  = HTTP_POST,
+        .handler = morse_trigger_handler,
+    };
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
@@ -592,6 +608,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_beacon);
     httpd_register_uri_handler(s_httpd, &uri_cfg_get);
     httpd_register_uri_handler(s_httpd, &uri_cfg_post);
+    httpd_register_uri_handler(s_httpd, &uri_morse_trigger);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

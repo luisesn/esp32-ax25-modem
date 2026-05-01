@@ -16,6 +16,7 @@
 #include "audio_stream.h"
 #include "ax25ip.h"
 #include "digipeater.h"
+#include "morse.h"
 
 #include "device.h"
 
@@ -383,6 +384,7 @@ void app_main(void)
     APRS_set_raw_hook(on_ax25_raw_frame);
 
     digi_init(config_get());
+    morse_init(config_get());
 
     // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
     // Debe llamarse después de transport_init (WiFi ya conectado).
