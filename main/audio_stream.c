@@ -4,6 +4,7 @@
 #include "esp_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <lwip/sockets.h>
 #include <string.h>
@@ -18,6 +19,18 @@
 #define TAG "audio_stream"
 
 QueueHandle_t audio_stream_q = NULL;
+
+// ─── RAM log buffer (last LOG_CAPACITY text WS messages) ─────────────────────
+
+#define LOG_CAPACITY 250
+
+typedef struct { uint32_t seq; char *json; } log_entry_t;
+
+static log_entry_t       s_log_ring[LOG_CAPACITY];
+static int               s_log_head     = 0;
+static int               s_log_count    = 0;
+static uint32_t          s_log_seq_next = 1;
+static SemaphoreHandle_t s_log_mutex    = NULL;
 
 // ─── IMA ADPCM ───────────────────────────────────────────────────────────────
 
@@ -532,27 +545,100 @@ static void wav_server_task(void *arg) {
     }
 }
 
+// ─── GET /api/log?since=N ─────────────────────────────────────────────────────
+
+static esp_err_t log_handler(httpd_req_t *req)
+{
+    uint32_t since = 0;
+    char qs[32];
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK) {
+        char val[12];
+        if (httpd_query_key_value(qs, "since", val, sizeof(val)) == ESP_OK)
+            since = (uint32_t)strtoul(val, NULL, 10);
+    }
+
+    char *ptrs[LOG_CAPACITY];
+    int   pcount   = 0;
+    uint32_t last_seq = 0;
+
+    xSemaphoreTake(s_log_mutex, portMAX_DELAY);
+    last_seq = s_log_seq_next > 0 ? s_log_seq_next - 1 : 0;
+    int start = (s_log_head - s_log_count + LOG_CAPACITY) % LOG_CAPACITY;
+    for (int i = 0; i < s_log_count; i++) {
+        int idx = (start + i) % LOG_CAPACITY;
+        if (s_log_ring[idx].seq > since && s_log_ring[idx].json)
+            ptrs[pcount++] = strdup(s_log_ring[idx].json);
+    }
+    xSemaphoreGive(s_log_mutex);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    char hdr[48];
+    snprintf(hdr, sizeof(hdr), "{\"last_seq\":%lu,\"entries\":[",
+             (unsigned long)last_seq);
+    httpd_resp_sendstr_chunk(req, hdr);
+    for (int i = 0; i < pcount; i++) {
+        if (i > 0) httpd_resp_sendstr_chunk(req, ",");
+        httpd_resp_sendstr_chunk(req, ptrs[i]);
+        free(ptrs[i]);
+    }
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
 // ─── Envío de texto a clientes WebSocket ─────────────────────────────────────
 
 void audio_stream_ws_send_text(const char *text) {
     if (s_httpd == NULL || text == NULL) return;
+
+    // Obtener número de secuencia
+    uint32_t seq = 0;
+    if (s_log_mutex) {
+        xSemaphoreTake(s_log_mutex, portMAX_DELAY);
+        seq = s_log_seq_next++;
+        xSemaphoreGive(s_log_mutex);
+    }
+
+    // Construir copia con seq inyectado: {"seq":N,...campos originales...}
+    size_t tlen   = strlen(text);
+    char  *wrapped = (char *)malloc(tlen + 24);
+    if (wrapped)
+        snprintf(wrapped, tlen + 24, "{\"seq\":%lu,%s", (unsigned long)seq, text + 1);
+
+    // Almacenar en ring buffer (fuera del malloc, liberar viejo fuera del mutex)
+    char *to_free = NULL;
+    if (s_log_mutex && wrapped) {
+        xSemaphoreTake(s_log_mutex, portMAX_DELAY);
+        to_free = s_log_ring[s_log_head].json;
+        s_log_ring[s_log_head].seq  = seq;
+        s_log_ring[s_log_head].json = wrapped;
+        s_log_head = (s_log_head + 1) % LOG_CAPACITY;
+        if (s_log_count < LOG_CAPACITY) s_log_count++;
+        xSemaphoreGive(s_log_mutex);
+    }
+    free(to_free);
+
+    // Enviar por WebSocket
+    const char *send_str = wrapped ? wrapped : text;
     httpd_ws_frame_t pkt = {
         .final      = true,
         .fragmented = false,
         .type       = HTTPD_WS_TYPE_TEXT,
-        .payload    = (uint8_t *)text,
-        .len        = strlen(text),
+        .payload    = (uint8_t *)send_str,
+        .len        = strlen(send_str),
     };
-    int client_fds[5];
+    int    client_fds[5];
     size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
     if (httpd_get_client_list(s_httpd, &n, client_fds) != ESP_OK) return;
     for (int i = 0; i < (int)n; i++) {
         if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
+            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK)
                 httpd_sess_trigger_close(s_httpd, client_fds[i]);
-            }
         }
     }
+    // wrapped queda en el ring buffer — no liberar aquí
 }
 
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
@@ -565,7 +651,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 13;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -613,6 +699,14 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = morse_trigger_handler,
     };
+    static const httpd_uri_t uri_log = {
+        .uri     = "/api/log",
+        .method  = HTTP_GET,
+        .handler = log_handler,
+    };
+
+    s_log_mutex = xSemaphoreCreateMutex();
+
     httpd_register_uri_handler(s_httpd, &uri_index);
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
@@ -621,6 +715,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_cfg_get);
     httpd_register_uri_handler(s_httpd, &uri_cfg_post);
     httpd_register_uri_handler(s_httpd, &uri_morse_trigger);
+    httpd_register_uri_handler(s_httpd, &uri_log);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

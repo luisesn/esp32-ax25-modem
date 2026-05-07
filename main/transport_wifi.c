@@ -174,47 +174,67 @@ static void wifi_connect(void) {
         return;
     }
 
-    // --- Leer sección wifi ---
-    cJSON *wifi_j  = cJSON_GetObjectItem(config, "wifi");
-    cJSON *ap_j    = cJSON_GetObjectItem(config, "ap");
+    // --- Leer sección wifi (array o objeto único, retrocompatible) ---
+    cJSON *wifi_j = cJSON_GetObjectItem(config, "wifi");
+    cJSON *ap_j   = cJSON_GetObjectItem(config, "ap");
 
-    const char *ssid     = NULL;
-    const char *password = NULL;
-    int timeout_s        = DEFAULT_CONNECT_TIMEOUT_S;
-
-    if (wifi_j) {
-        cJSON *it;
-        it = cJSON_GetObjectItem(wifi_j, "ssid");
-        if (cJSON_IsString(it)) ssid = it->valuestring;
-        it = cJSON_GetObjectItem(wifi_j, "password");
-        if (cJSON_IsString(it)) password = it->valuestring;
-        it = cJSON_GetObjectItem(wifi_j, "connect_timeout_s");
-        if (cJSON_IsNumber(it) && it->valuedouble > 0)
-            timeout_s = (int)it->valuedouble;
-    }
-
-    // --- Intentar STA ---
-    bool connected  = false;
+    bool connected   = false;
     bool sta_started = false;
 
-    if (ssid && ssid[0]) {
-        wifi_config_t sta_cfg = {};
-        snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),     "%s", ssid);
-        snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s",
-                 password ? password : "");
+    if (wifi_j) {
+        int net_count = cJSON_IsArray(wifi_j) ? cJSON_GetArraySize(wifi_j) : 1;
 
-        s_sta_active = true;
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-        esp_wifi_start();
-        sta_started = true;
+        for (int ni = 0; ni < net_count && !connected; ni++) {
+            cJSON *net = cJSON_IsArray(wifi_j)
+                         ? cJSON_GetArrayItem(wifi_j, ni)
+                         : wifi_j;
+            if (!cJSON_IsObject(net)) continue;
 
-        ESP_LOGI(TAG, "Conectando a '%s' (timeout %d s)...", ssid, timeout_s);
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
-                                               pdFALSE, pdTRUE,
-                                               pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
-        connected    = (bits & WIFI_CONNECTED_BIT) != 0;
-        s_sta_active = false;
+            const char *ssid     = NULL;
+            const char *password = NULL;
+            int  timeout_s       = DEFAULT_CONNECT_TIMEOUT_S;
+            cJSON *it;
+            it = cJSON_GetObjectItem(net, "ssid");
+            if (cJSON_IsString(it)) ssid = it->valuestring;
+            it = cJSON_GetObjectItem(net, "password");
+            if (cJSON_IsString(it)) password = it->valuestring;
+            it = cJSON_GetObjectItem(net, "connect_timeout_s");
+            if (cJSON_IsNumber(it) && it->valuedouble > 0)
+                timeout_s = (int)it->valuedouble;
+
+            if (!ssid || !ssid[0]) continue;
+
+            wifi_config_t sta_cfg = {};
+            snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),
+                     "%s", ssid);
+            snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password),
+                     "%s", password ? password : "");
+
+            if (sta_started) {
+                // Parar antes de reconfigurar para la siguiente red
+                s_sta_active = false;
+                esp_wifi_stop();
+                vTaskDelay(pdMS_TO_TICKS(300));
+            }
+            xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+
+            s_sta_active = true;
+            esp_wifi_set_mode(WIFI_MODE_STA);
+            esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+            esp_wifi_start();
+            sta_started = true;
+
+            ESP_LOGI(TAG, "Conectando a '%s' (timeout %d s)...", ssid, timeout_s);
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
+                                                   pdFALSE, pdTRUE,
+                                                   pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
+            s_sta_active = false;
+            connected = (bits & WIFI_CONNECTED_BIT) != 0;
+
+            if (!connected)
+                ESP_LOGW(TAG, "No se pudo conectar a '%s'%s", ssid,
+                         ni + 1 < net_count ? ". Probando siguiente..." : ".");
+        }
     }
 
     if (!connected) {

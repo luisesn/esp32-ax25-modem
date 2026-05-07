@@ -239,6 +239,7 @@ function scheduleBlock(s){
 // ── APRS log ───────────────────────────────────────────────────────────────
 const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
 let s_gps_course=null,s_gps_speed_kt=null;
+let s_last_log_seq=0;
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fillDest(src){
@@ -249,17 +250,35 @@ function fillDest(src){
   si.value=(m[2]!=null)?m[2]:'0';
   document.getElementById('send-text').focus();
 }
+function isMessageToMe(info){
+  if(!myCall||!info) return false;
+  const pad9=s=>(s+'         ').slice(0,9).toUpperCase();
+  const addrFull=pad9(myCall+(mySsid>0?'-'+mySsid:''));
+  const addrBase=mySsid>0?pad9(myCall):null;
+  function checkInfo(s){
+    const u=s.toUpperCase();
+    if(u.startsWith(':'+addrFull+':')) return true;
+    if(addrBase&&u.startsWith(':'+addrBase+':')) return true;
+    return false;
+  }
+  if(checkInfo(info)) return true;
+  if(info[0]==='}'){
+    const gt=info.indexOf('>');
+    if(gt<0) return false;
+    const col=info.indexOf(':',gt);
+    if(col<0) return false;
+    return checkInfo(info.slice(col+1));
+  }
+  return false;
+}
 function appendLog(src,dst,path,info,isDigi){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt';
   const ts=new Date().toLocaleTimeString('es',
     {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  // Detect ACK: info = "ackNNN" (after stripping addressee wrapper from raw info)
   const isAck=/^ack\d+$/i.test(info.trim());
-  // Detect message to me: dst matches our callsign+ssid
-  const myAddr=myCall+(mySsid>0?'-'+mySsid:'');
-  const isToMe=myAddr&&dst.trim().toUpperCase()===myAddr.toUpperCase();
+  const isToMe=isMessageToMe(info);
   if(isDigi)d.classList.add('pkt-digi');
   if(isAck)d.classList.add('pkt-ack');
   else if(isToMe)d.classList.add('pkt-me');
@@ -353,7 +372,20 @@ function stopRec(){
   a.href=url;a.download='aprs-audio-'+ts+'.wav';
   document.body.appendChild(a);a.click();
   setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},2000);
-}// ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
+}// ── Dispatcher de mensajes WebSocket / historial ──────────────────────────
+function handleMsg(p){
+  if(p.seq)s_last_log_seq=p.seq;
+  if(p.type==='ack_sent'){
+    appendSentLog(p.to,p.ssid,'ack'+p.id);
+  } else if(p.type==='morse_tx'){
+    appendSentLog('CW',-1,'Morse: '+p.call);
+  } else if(p.type==='digipeated'&&p.src!=null){
+    appendLog(p.src,p.dst||'',p.path||'',p.info||'',true);
+  } else if(p.src!=null){
+    appendLog(p.src,p.dst||'',p.path||'',p.info||'');
+  }
+}
+// ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
 let ws=null,wsTimer=null;
 function setStatus(t){document.getElementById('status').textContent=t;}
 function connectWS(){
@@ -363,7 +395,15 @@ function connectWS(){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{setStatus('Conectado');
     document.getElementById('btn').disabled=false;
-    document.getElementById('rec-btn').disabled=false;};
+    document.getElementById('rec-btn').disabled=false;
+    if(s_last_log_seq>0){
+      fetch('/api/log?since='+s_last_log_seq)
+        .then(r=>r.json())
+        .then(d=>{
+          if(d.last_seq)s_last_log_seq=d.last_seq;
+          if(d.entries)d.entries.forEach(e=>{try{handleMsg(JSON.parse(e));}catch(_){}});
+        }).catch(()=>{});
+    }};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
       if(e.data.byteLength===512){
@@ -376,15 +416,7 @@ function connectWS(){
       }
       return;
     }
-    try{const p=JSON.parse(e.data);
-      if(p.type==='ack_sent'){
-        appendSentLog(p.to,p.ssid,'ack'+p.id);
-      } else if(p.type==='morse_tx'){
-        appendSentLog('CW',-1,'Morse: '+p.call);
-      } else if(p.type==='digipeated'&&p.src!=null){
-        appendLog(p.src,p.dst||'',p.path||'',p.info||'',true);
-      } else if(p.src!=null)appendLog(p.src,p.dst||'',p.path||'',p.info||'');
-    }catch(_){}
+    try{const p=JSON.parse(e.data);handleMsg(p);}catch(_){}
   };
   ws.onclose=ws.onerror=()=>{
     setStatus('Desconectado — reconectando…');
@@ -445,9 +477,9 @@ function parseAPRSPos(info){
   if(!info||info.length<18)return null;
   let s=info,first=s[0];
   if(first==='@'||first==='/'){
-    // skip 7-char timestamp: DDHHMM + z|h|/
-    if(s.length<26)return null;
-    s=s.slice(7);
+    // DTI(1) + timestamp DDHHMMz/h (7) = 8 chars before position
+    if(s.length<27)return null;
+    s=s.slice(8);
   }else if(first==='!'||first==='='){
     s=s.slice(1);
   }else return null;
