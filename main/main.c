@@ -186,7 +186,29 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 
     // p → info field
     size_t info_len = (size_t)(end - p);
-    if (info_len < 12) return;                // ":XXXXXXXXX:m" mínimo
+    if (info_len < 12) return;
+
+    // Third-party traffic (APRS §17): info starts with '}'.
+    // Inner frame text: "INNERSRC>DST,PATH:INNERINFO"
+    // Re-point p to inner info and replace src_call with the inner source
+    // so the rest of the function works unchanged for the ACK reply.
+    if (p[0] == '}') {
+        const uint8_t *inner = p + 1;
+        const uint8_t *gt = (const uint8_t *)memchr(inner, '>', (size_t)(end - inner));
+        if (!gt) return;
+        size_t slen = (size_t)(gt - inner);
+        if (slen == 0 || slen > 9) return;
+        memcpy(src_call, inner, slen);
+        src_call[slen] = '\0';
+        // Advance past "DST,PATH" to the first ':' that opens the inner info field
+        const uint8_t *ci = gt + 1;
+        while (ci < end && *ci != ':') ci++;
+        if (ci >= end) return;
+        p = ci;
+        info_len = (size_t)(end - p);
+        if (info_len < 12) return;
+    }
+
     if (p[0] != ':' || p[10] != ':') return;
 
     // Comparar los 9 chars del addressee con nuestro call+ssid (sin distinguir mayúsculas)

@@ -268,6 +268,8 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
     cJSON *j_lon     = cJSON_GetObjectItem(root, "lon");
     cJSON *j_symbol  = cJSON_GetObjectItem(root, "symbol");
     cJSON *j_comment = cJSON_GetObjectItem(root, "comment");
+    cJSON *j_course  = cJSON_GetObjectItem(root, "course");  // degrees 0-360
+    cJSON *j_speed   = cJSON_GetObjectItem(root, "speed");   // knots
 
     if (!cJSON_IsNumber(j_lat) || !cJSON_IsNumber(j_lon)) {
         cJSON_Delete(root);
@@ -281,6 +283,12 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
                     ? j_symbol->valuestring[0] : '>';
     const char *comment = (j_comment && cJSON_IsString(j_comment))
                               ? j_comment->valuestring : "";
+
+    bool has_cse = cJSON_IsNumber(j_course) && cJSON_IsNumber(j_speed);
+    int  cse = has_cse ? (int)j_course->valuedouble : 0;
+    int  spd = has_cse ? (int)j_speed->valuedouble  : 0;
+    if (cse < 0 || cse > 360) cse = 0;
+    if (spd < 0 || spd > 999) spd = 0;
 
     if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
         cJSON_Delete(root);
@@ -310,7 +318,11 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
     // Functionally identical to '!' but some radios (e.g. Yaesu) treat it
     // differently in their station list display.
     char info[120];
-    snprintf(info, sizeof(info), "=%s/%s%c%s", lat_str, lon_str, sym, comment);
+    if (has_cse)
+        snprintf(info, sizeof(info), "=%s/%s%c%03d/%03d%s",
+                 lat_str, lon_str, sym, cse, spd, comment);
+    else
+        snprintf(info, sizeof(info), "=%s/%s%c%s", lat_str, lon_str, sym, comment);
 
     ESP_LOGI(TAG, "APRS beacon TX: %s", info);
     APRS_queue_beacon(info);

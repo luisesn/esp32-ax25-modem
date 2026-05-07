@@ -238,6 +238,7 @@ function scheduleBlock(s){
 }
 // ── APRS log ───────────────────────────────────────────────────────────────
 const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
+let s_gps_course=null,s_gps_speed_kt=null;
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fillDest(src){
@@ -378,6 +379,8 @@ function connectWS(){
     try{const p=JSON.parse(e.data);
       if(p.type==='ack_sent'){
         appendSentLog(p.to,p.ssid,'ack'+p.id);
+      } else if(p.type==='morse_tx'){
+        appendSentLog('CW',-1,'Morse: '+p.call);
       } else if(p.type==='digipeated'&&p.src!=null){
         appendLog(p.src,p.dst||'',p.path||'',p.info||'',true);
       } else if(p.src!=null)appendLog(p.src,p.dst||'',p.path||'',p.info||'');
@@ -510,6 +513,9 @@ function getGPS(){
   navigator.geolocation.getCurrentPosition(pos=>{
     document.getElementById('pos-lat').value=pos.coords.latitude.toFixed(5);
     document.getElementById('pos-lon').value=pos.coords.longitude.toFixed(5);
+    const spd=pos.coords.speed,hdg=pos.coords.heading;
+    s_gps_course   =(hdg!=null&&!isNaN(hdg))?Math.round(hdg):null;
+    s_gps_speed_kt =(spd!=null&&!isNaN(spd))?Math.round(spd*1.94384):null;
     st.style.color='#4a9a4a';
     st.textContent=`±${Math.round(pos.coords.accuracy)}m ✓`;
     btn.disabled=false;
@@ -529,14 +535,20 @@ function sendBeacon(){
   if(isNaN(lon)||lon<-180||lon>180){st.style.color='#c04040';st.textContent='Longitud inválida (-180…180).';return;}
   const btn=document.getElementById('pos-btn');
   btn.disabled=true;st.style.color='#888';st.textContent='Enviando…';
+  const beaconBody={lat,lon,symbol:sym,comment};
+  if(s_gps_course!=null&&s_gps_speed_kt!=null){
+    beaconBody.course=s_gps_course;beaconBody.speed=s_gps_speed_kt;
+  }
   fetch('/api/aprs/beacon',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({lat,lon,symbol:sym,comment})
+    body:JSON.stringify(beaconBody)
   }).then(r=>r.json()).then(d=>{
     if(d.ok){
       st.style.color='#4ac84a';st.textContent='Baliza TX ✓';
-      appendSentLog('APRS',-1,'='+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+comment);
+      const cseSpd=(s_gps_course!=null&&s_gps_speed_kt!=null)
+        ?String(s_gps_course).padStart(3,'0')+'/'+String(s_gps_speed_kt).padStart(3,'0'):'';
+      appendSentLog('APRS',-1,'='+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+cseSpd+comment);
     }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
   }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
   ).finally(()=>{btn.disabled=false;});

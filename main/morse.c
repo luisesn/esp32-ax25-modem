@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "cJSON.h"
 #include "morse.h"
+#include "audio_stream.h"
 
 static const char *TAG = "morse";
 
@@ -142,6 +143,13 @@ bool morse_check_and_dispatch(void) {
     if (xSemaphoreTake(s_ready_sem, 0) != pdTRUE) return false;
 
     ESP_LOGI(TAG, "Morse beacon TX: %s  unit=%lu samp", s_callsign, (unsigned long)s_unit_samples);
+
+    {
+        static char s_morse_json[64];
+        snprintf(s_morse_json, sizeof(s_morse_json),
+                 "{\"type\":\"morse_tx\",\"call\":\"%s\"}", s_callsign);
+        audio_stream_ws_send_text(s_morse_json);
+    }
 
     afsk_morse_tx_begin();
     do_morse_tx();
