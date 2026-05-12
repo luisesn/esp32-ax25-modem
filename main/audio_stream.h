@@ -26,3 +26,8 @@ void audio_stream_init(void);
 // Envía un frame WebSocket TEXT a todos los clientes WS conectados.
 // Seguro de llamar desde cualquier tarea FreeRTOS.
 void audio_stream_ws_send_text(const char *text);
+
+// Returns the httpd handle (valid after audio_stream_init()).
+// Used by sstv_init() to register its URI handlers.
+#include "esp_http_server.h"
+httpd_handle_t audio_stream_get_httpd(void);

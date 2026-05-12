@@ -17,6 +17,7 @@
 #include "ax25ip.h"
 #include "digipeater.h"
 #include "morse.h"
+#include "sstv.h"
 
 #include "device.h"
 
@@ -419,6 +420,7 @@ void app_main(void)
     // Debe llamarse después de transport_init (WiFi ya conectado).
     audio_stream_init();
     afsk_set_audio_hook(audio_sample_hook);
+    sstv_init();
 
 #elif TNC_MODE == TNC_MODE_APRS
 

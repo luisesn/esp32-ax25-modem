@@ -133,6 +133,8 @@ static void build_wav_header(uint8_t *buf) {
 static httpd_handle_t s_httpd      = NULL;
 static QueueHandle_t  s_wav_q      = NULL; // blocks for WAV TCP client
 
+httpd_handle_t audio_stream_get_httpd(void) { return s_httpd; }
+
 // ─── audio_stream_task ───────────────────────────────────────────────────────
 
 static int8_t  s_sample_buf[ADPCM_SAMPLES_BLOCK];
