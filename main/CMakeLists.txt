@@ -14,6 +14,7 @@ idf_component_register(
         "ax25ip.c"
         "digipeater.c"
         "morse.c"
+        "rx_stats.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

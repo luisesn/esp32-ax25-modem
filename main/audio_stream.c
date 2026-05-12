@@ -15,6 +15,8 @@
 #include "aux_config.h"
 #include "digipeater.h"
 #include "morse.h"
+#include "rx_stats.h"
+#include "AFSK.h"
 
 #define TAG "audio_stream"
 
@@ -588,6 +590,32 @@ static esp_err_t log_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── GET /api/rx/stats ────────────────────────────────────────────────────────
+
+static esp_err_t rx_stats_handler(httpd_req_t *req)
+{
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"v1\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
+        "\"v2\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
+        "\"v2_enabled\":%s,\"v2_agc_peak\":%ld,\"v2_squelch_open\":%s}",
+        (unsigned long)rx_stats_v1.frames_crc_ok,
+        (unsigned long)rx_stats_v1.frames_crc_err,
+        (unsigned long)rx_stats_v1.hdlc_flags,
+        (unsigned long)rx_stats_v1.fifo_overflows,
+        (unsigned long)rx_stats_v2.frames_crc_ok,
+        (unsigned long)rx_stats_v2.frames_crc_err,
+        (unsigned long)rx_stats_v2.hdlc_flags,
+        (unsigned long)rx_stats_v2.fifo_overflows,
+        AFSK_modem_v2 ? "true" : "false",
+        (long)afsk_v2_agc_peak,
+        afsk_v2_squelch_open ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
 // ─── Envío de texto a clientes WebSocket ─────────────────────────────────────
 
 void audio_stream_ws_send_text(const char *text) {
@@ -651,7 +679,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 13;
+    cfg.max_uri_handlers = 14;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -704,6 +732,11 @@ void audio_stream_init(void) {
         .method  = HTTP_GET,
         .handler = log_handler,
     };
+    static const httpd_uri_t uri_rx_stats = {
+        .uri     = "/api/rx/stats",
+        .method  = HTTP_GET,
+        .handler = rx_stats_handler,
+    };
 
     s_log_mutex = xSemaphoreCreateMutex();
 
@@ -716,6 +749,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_cfg_post);
     httpd_register_uri_handler(s_httpd, &uri_morse_trigger);
     httpd_register_uri_handler(s_httpd, &uri_log);
+    httpd_register_uri_handler(s_httpd, &uri_rx_stats);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

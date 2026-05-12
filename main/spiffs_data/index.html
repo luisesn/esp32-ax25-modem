@@ -118,6 +118,21 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .btn-row{display:flex;gap:.4rem;align-items:center}
 #rec-btn.active{background:#c04040;color:#fff;animation:blink .8s step-end infinite}
 @keyframes blink{50%{opacity:.5}}
+.stats-grid{width:100%;border-collapse:collapse;font-size:.7rem;line-height:1.7}
+.stats-grid th{color:#555;font-weight:normal;text-align:right;padding:.05rem .5rem}
+.stats-grid th:first-child{text-align:left;padding-left:0}
+.stats-grid td{text-align:right;padding:.05rem .5rem;font-variant-numeric:tabular-nums}
+.stats-grid td:first-child{text-align:left;color:#888;padding-left:0}
+.stats-grid tr:not(:last-child) td,.stats-grid tr:not(:last-child) th{border-bottom:1px solid #191919}
+.stats-v1{color:#7ecfff}.stats-v2{color:#4fc84f}
+#agc-wrap{flex:1;height:8px;background:#1a1a1a;border:1px solid #333;border-radius:2px;overflow:hidden;margin:0 .5rem}
+#agc-bar{height:100%;width:0;background:linear-gradient(90deg,#2a8a2a,#8a8a2a,#8a2a2a);transition:width .3s}
+.stats-badges{display:flex;gap:.4rem;flex-wrap:wrap}
+.bdg{display:inline-block;font-size:.6rem;padding:.05rem .3rem;border-radius:2px}
+.bdg-ok{background:#0a280a;border:1px solid #4a9a4a;color:#4fc84f}
+.bdg-off{background:#181818;border:1px solid #333;color:#555}
+.bdg-info{background:#001830;border:1px solid #7ecfff;color:#7ecfff}
+.bdg-warn{background:#281800;border:1px solid #c8a04a;color:#c8a04a}
 </style>
 </head>
 <body>
@@ -143,6 +158,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn active" onclick="showTab('msg',this)">MENSAJE</button>
       <button class="tab-btn" onclick="showTab('pos',this)">POSICIÓN</button>
       <button class="tab-btn" onclick="showTab('cfg',this)">CONFIG</button>
+      <button class="tab-btn" onclick="showTab('stats',this)">STATS</button>
     </div>
     <div id="tab-msg" class="tab-pane active">
       <div class="send-row">
@@ -203,6 +219,36 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
         <button id="morse-btn" onclick="triggerMorse()" title="Enviar baliza morse ahora">&#x2D9; Morse</button>
         <span id="cfg-status"></span>
+      </div>
+    </div>
+    <div id="tab-stats" class="tab-pane" style="justify-content:flex-start;gap:.7rem">
+      <table class="stats-grid">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="stats-v1">V1</th>
+            <th class="stats-v2">V2</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Tramas CRC OK</td><td id="s-v1-ok">—</td><td id="s-v2-ok">—</td></tr>
+          <tr><td>Tramas CRC ERR</td><td id="s-v1-err">—</td><td id="s-v2-err">—</td></tr>
+          <tr><td>Flags HDLC</td><td id="s-v1-flags">—</td><td id="s-v2-flags">—</td></tr>
+          <tr><td>FIFO overflows</td><td id="s-v1-ov">—</td><td id="s-v2-ov">—</td></tr>
+        </tbody>
+      </table>
+      <div class="send-row">
+        <span style="font-size:.7rem;color:#888;min-width:4.5rem">AGC Peak</span>
+        <div id="agc-wrap"><div id="agc-bar"></div></div>
+        <span id="agc-val" style="font-size:.7rem;color:#555;min-width:2rem;text-align:right">—</span>
+      </div>
+      <div class="stats-badges">
+        <span id="v2-badge" class="bdg bdg-off">V2 desactivado</span>
+        <span id="squelch-badge" class="bdg bdg-off">Squelch cerrado</span>
+      </div>
+      <div class="send-row">
+        <button id="stats-ref-btn" onclick="loadStats()" style="font-size:.7rem;font-family:monospace;background:#111;color:#888;border:1px solid #333;border-radius:3px;padding:.3rem .7rem;cursor:pointer">&#x21BA; Actualizar</button>
+        <span id="stats-status" style="font-size:.65rem;color:#555;margin-left:.5rem"></span>
       </div>
     </div>
   </div>
@@ -500,11 +546,42 @@ function fmtAPRSLon(lon){
   let m=(Math.abs(lon)-d)*60; if(m>=60){m=0;}
   return String(d).padStart(3,'0')+m.toFixed(2).padStart(5,'0')+(lon>=0?'E':'W');}
 // ── Tab switching ──────────────────────────────────────────────────────────
+let statsTimer=null;
+function loadStats(){
+  fetch('/api/rx/stats').then(r=>r.json()).then(d=>{
+    document.getElementById('s-v1-ok').textContent    = d.v1.frames_ok;
+    document.getElementById('s-v1-err').textContent   = d.v1.frames_err;
+    document.getElementById('s-v1-flags').textContent = d.v1.hdlc_flags;
+    document.getElementById('s-v1-ov').textContent    = d.v1.fifo_ov;
+    document.getElementById('s-v2-ok').textContent    = d.v2_enabled ? d.v2.frames_ok  : '—';
+    document.getElementById('s-v2-err').textContent   = d.v2_enabled ? d.v2.frames_err : '—';
+    document.getElementById('s-v2-flags').textContent = d.v2_enabled ? d.v2.hdlc_flags : '—';
+    document.getElementById('s-v2-ov').textContent    = d.v2_enabled ? d.v2.fifo_ov    : '—';
+    const pct=Math.min(Math.abs(d.v2_agc_peak)/127*100,100);
+    document.getElementById('agc-bar').style.width=pct+'%';
+    document.getElementById('agc-val').textContent=d.v2_enabled?d.v2_agc_peak:'—';
+    const v2b=document.getElementById('v2-badge');
+    v2b.textContent=d.v2_enabled?'V2 activo':'V2 desactivado';
+    v2b.className='bdg '+(d.v2_enabled?'bdg-ok':'bdg-off');
+    const sqb=document.getElementById('squelch-badge');
+    sqb.textContent=d.v2_squelch_open?'Squelch ABIERTO':'Squelch cerrado';
+    sqb.className='bdg '+(d.v2_squelch_open?'bdg-ok':'bdg-off');
+    const st=document.getElementById('stats-status');
+    st.textContent=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }).catch(()=>{
+    const st=document.getElementById('stats-status');
+    st.style.color='#c04040';st.textContent='Error de red';
+  });
+}
 function showTab(name,btn){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
-  document.getElementById('tab-'+name).classList.add('active');  if(name==='cfg') loadCfg();}// ── Config editor ───────────────────────────────────────────────────
+  document.getElementById('tab-'+name).classList.add('active');
+  if(name==='cfg') loadCfg();
+  clearInterval(statsTimer);statsTimer=null;
+  if(name==='stats'){loadStats();statsTimer=setInterval(loadStats,5000);}
+}// ── Config editor ───────────────────────────────────────────────────
 let cfgLoaded=false;
 function loadCfg(){
   if(cfgLoaded) return;
