@@ -267,6 +267,25 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       </div>
     </div>
     <div id="tab-sstv" class="tab-pane" style="justify-content:flex-start;gap:.6rem;overflow-y:auto">
+      <div style="font-size:.65rem;color:#888;border:1px solid #2a3a2a;border-radius:4px;padding:.4rem .5rem;background:#0a120a">
+        <b style="color:#4fc84f">Test Pattern</b>
+        <div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.35rem">
+          <select id="sstv-test-mode"
+            style="background:#111;color:#e0e0e0;border:1px solid #333;border-radius:3px;
+                   font-family:monospace;font-size:.65rem;padding:.25rem .3rem">
+            <option value="robot_36">Robot 36</option>
+            <option value="robot_72">Robot 72</option>
+            <option value="martin_m1">Martin M1</option>
+            <option value="martin_m2">Martin M2</option>
+            <option value="scottie_s1">Scottie S1</option>
+          </select>
+          <button onclick="sstvSendTest()"
+            style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;
+                   background:#0d2a0d;color:#4fc84f;border:1px solid #4a9a4a;
+                   border-radius:3px;cursor:pointer">TX Test Pattern</button>
+          <span id="sstv-test-status" style="color:#666;font-size:.6rem"></span>
+        </div>
+      </div>
       <div style="font-size:.65rem;color:#888">
         <b style="color:#c8a04a">Subir imagen</b>
         <div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-top:.35rem">
@@ -486,8 +505,10 @@ function handleMsg(p){
     const k=p.src+'|'+p.dst+'|'+p.info;
     if(!isDuplicate(k))appendLog(p.src,p.dst||'',p.path||'',p.info||'',true);
   } else if(p.type==='sstv_done'){
-    document.getElementById('sstv-tx-status').textContent=
-      '✓ Transmision de '+(p.name||'imagen')+' completada.';
+    const label=p.name==='test_pattern'?'test pattern':p.name||'imagen';
+    document.getElementById('sstv-tx-status').textContent='✓ TX '+label+' completado.';
+    const tst=document.getElementById('sstv-test-status');
+    if(tst)tst.textContent='';
     loadSstvGallery();
   } else if(p.src!=null){
     const k=p.src+'|'+p.dst+'|'+p.info;
@@ -738,6 +759,24 @@ function triggerMorse(){
 }
 // ── SSTV ───────────────────────────────────────────────────────────────────
 const sstvModeDims={martin:[320,256],robot:[320,240]};
+async function sstvSendTest(){
+  const mode=document.getElementById('sstv-test-mode').value;
+  const st=document.getElementById('sstv-test-status');
+  const txst=document.getElementById('sstv-tx-status');
+  st.style.color='#888';st.textContent='Enviando…';
+  try{
+    const r=await fetch('/api/sstv/test',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode})});
+    const d=await r.json();
+    if(d.status==='queued'){
+      st.style.color='#4ac84a';st.textContent='En cola ✓';
+      txst.style.color='#888';txst.textContent='TX test pattern ('+mode+')…';
+    } else {
+      st.style.color='#c04040';st.textContent=d.error||'Error';
+    }
+  }catch(e){st.style.color='#c04040';st.textContent='Error de red';}
+}
 async function loadSstvGallery(){
   const el=document.getElementById('sstv-gallery');
   if(!el)return;

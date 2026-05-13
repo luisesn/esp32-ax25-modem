@@ -30,22 +30,22 @@ QueueHandle_t s_sstv_queue = NULL;
 // Generated from round(128 + 127.5*sin(2*pi*i/256)).
 // ---------------------------------------------------------------------------
 static const uint8_t sin_table_256[256] = {
-    128,131,134,137,140,143,146,149,152,155,158,162,165,167,170,173,
-    176,179,182,185,188,190,193,196,198,201,203,206,208,211,213,215,
-    218,220,222,224,226,228,230,232,234,235,237,238,240,241,242,244,
-    245,246,247,248,249,249,250,251,251,252,252,252,253,253,253,253,
-    253,253,253,253,252,252,252,251,251,250,249,249,248,247,246,245,
-    244,242,241,240,238,237,235,234,232,230,228,226,224,222,220,218,
-    215,213,211,208,206,203,201,198,196,193,190,188,185,182,179,176,
-    173,170,167,165,162,158,155,152,149,146,143,140,137,134,131,128,
-    124,121,118,115,112,109,106,103,100, 97, 94, 90, 87, 85, 82, 79,
-     76, 73, 70, 67, 64, 62, 59, 56, 54, 51, 49, 46, 44, 41, 39, 37,
-     34, 32, 30, 28, 26, 24, 22, 20, 18, 17, 15, 14, 12, 11, 10,  8,
-      7,  6,  5,  4,  3,  3,  2,  1,  1,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  1,  1,  2,  3,  3,  4,  5,  6,  7,  8, 10, 11,
-     12, 14, 15, 17, 18, 20, 22, 24, 26, 28, 30, 32, 34, 37, 39, 41,
-     44, 46, 49, 51, 54, 56, 59, 62, 64, 67, 70, 73, 76, 79, 82, 85,
-     87, 90, 94, 97,100,103,106,109,112,115,118,121,124,128,122,125,
+    128,131,134,137,140,144,147,150,153,156,159,162,165,168,171,174,
+    177,180,183,185,188,191,194,196,199,201,204,206,209,211,214,216,
+    218,220,222,225,227,229,230,232,234,236,237,239,240,242,243,245,
+    246,247,248,249,250,251,252,252,253,254,254,255,255,255,255,255,
+    255,255,255,255,255,255,254,254,253,252,252,251,250,249,248,247,
+    246,245,243,242,240,239,237,236,234,232,230,229,227,225,222,220,
+    218,216,214,211,209,206,204,201,199,196,194,191,188,185,183,180,
+    177,174,171,168,165,162,159,156,153,150,147,144,140,137,134,131,
+    128,125,122,119,116,112,109,106,103,100, 97, 94, 91, 88, 85, 82,
+     79, 76, 73, 71, 68, 65, 62, 60, 57, 55, 52, 50, 47, 45, 42, 40,
+     38, 36, 34, 31, 29, 27, 26, 24, 22, 20, 19, 17, 16, 14, 13, 11,
+     10,  9,  8,  7,  6,  5,  4,  4,  3,  2,  2,  1,  1,  1,  1,  1,
+      0,  1,  1,  1,  1,  1,  2,  2,  3,  4,  4,  5,  6,  7,  8,  9,
+     10, 11, 13, 14, 16, 17, 19, 20, 22, 24, 26, 27, 29, 31, 34, 36,
+     38, 40, 42, 45, 47, 50, 52, 55, 57, 60, 62, 65, 68, 71, 73, 76,
+     79, 82, 85, 88, 91, 94, 97,100,103,106,109,112,116,119,122,125,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,20 +56,27 @@ typedef struct {
     int      cols;
     int      rows;
     uint32_t sync_us;
+    uint32_t sync_porch_us; /* post-sync porch: 3000 µs for Robot, 0 for others */
     uint32_t scan_us;       /* total scan per channel (R/G/B or Y) */
     uint32_t c_scan_us;     /* chroma scan per channel (Robot only) */
-    uint32_t porch_us;
+    uint32_t porch_us;      /* separator pulse duration / inter-channel porch */
+    uint32_t sep_porch_us;  /* porch after separator before chroma (Robot: 1500 µs) */
     bool     is_ycbcr;
     bool     chroma_422;    /* Robot 72: Cb+Cr each line; Robot 36: alternating */
     bool     is_scottie;    /* Scottie line order: porch+G+porch+B+sync+porch+R */
 } SstvModeParams;
 
+/* Timing from the Robot/Martin/Scottie SSTV specifications.
+ * Robot 36 per line: 9+3+88+4.5+1.5+44 = 150 ms × 240 = 36 s  (scanTime=150 in decoder)
+ * Robot 72 per line: 9+3+138+4.5+1.5+69+4.5+1.5+69 = 300 ms × 240 = 72 s
+ * Martin M1 per line: 4.862+0.572+146.432×3+0.572×2 = 445.9 ms × 256 ≈ 114 s
+ * Scottie S1 per line: 1.5+138.24+1.5+138.24+9+1.5+138.24 = 428.2 ms × 256 ≈ 110 s */
 static const SstvModeParams sstv_modes[5] = {
-    /* MARTIN_M1 */ { 0xAC, 320, 256,  4862, 146432,      0,  572, false, false, false },
-    /* MARTIN_M2 */ { 0x28, 320, 256,  4862,  73216,      0,  572, false, false, false },
-    /* SCOTTIE_S1*/{ 0x3C, 320, 256,  9000, 138240,      0, 1500, false, false, true  },
-    /* ROBOT_36  */ { 0x08, 320, 240,  7000,  88000,  44000, 4500, true,  false, false },
-    /* ROBOT_72  */ { 0x0C, 320, 240,  7000,  88000,  44000, 4500, true,  true,  false },
+    /* MARTIN_M1 */ { 0xAC, 320, 256,  4862,    0, 146432,      0,  572,    0, false, false, false },
+    /* MARTIN_M2 */ { 0x28, 320, 256,  4862,    0,  73216,      0,  572,    0, false, false, false },
+    /* SCOTTIE_S1*/{ 0x3C, 320, 256,  9000,    0, 138240,      0, 1500,    0, false, false, true  },
+    /* ROBOT_36  */ { 0x08, 320, 240,  9000, 3000,  88000,  44000, 4500, 1500, true,  false, false },
+    /* ROBOT_72  */ { 0x0C, 320, 240,  9000, 3000, 138000,  69000, 4500, 1500, true,  true,  false },
 };
 
 // ---------------------------------------------------------------------------
@@ -84,57 +91,68 @@ static inline uint32_t freq_to_inc(float f) {
     return (uint32_t)((double)f / SSTV_DAC_FS * 4294967296.0);
 }
 
-static inline uint32_t us_to_samples(uint32_t us) {
-    return (uint32_t)((uint64_t)us * SSTV_DAC_FS / 1000000UL);
+/* Global sample clock — carries fractional µs→sample error forward across all
+ * tx_tone/tx_scan segments in the session.  Without this, each us_to_samples()
+ * call truncates independently: Martin M1 porches lose 0.456 samples × 3 × 256
+ * lines = 350 samples, plus scan error, totalling ~21 ms = ~15 px slant.
+ * With s_sample_acc the total error across the entire TX is ≤ 1 sample. */
+static int64_t  s_sample_acc = 0;
+
+static uint32_t sclk_us(uint32_t us) {
+    s_sample_acc += (int64_t)us * SSTV_DAC_FS;
+    uint32_t n = (uint32_t)(s_sample_acc / 1000000LL);
+    s_sample_acc %= 1000000LL;
+    return n;
 }
 
-/* Shared DAC output buffer — only used from receive_audio_task. */
-static uint8_t s_dac_buf[SSTV_BUF_SIZE];
+/* Shared DAC output buffer — only used from receive_audio_task.
+ * s_dac_pos persists across tx_tone/tx_scan calls so samples from consecutive
+ * short elements (sync, porch, scan) are packed into the same 2048-byte block.
+ * Without this, each call would zero-pad to 2048 bytes and every 7-ms sync
+ * pulse would actually take 42 ms, making Robot 36 run at ~72 s. */
+static uint8_t  s_dac_buf[SSTV_BUF_SIZE];
+static uint32_t s_dac_pos = 0;
 
-/* Transmit n_samples of a single frequency; writes full 2048-byte DAC blocks. */
-static void tx_tone(ToneGen *g, float freq_hz, uint32_t n_samples) {
-    g->phase_inc = freq_to_inc(freq_hz);
-    uint32_t done = 0;
-    while (done < n_samples) {
-        uint32_t chunk = n_samples - done;
-        if (chunk > SSTV_BUF_SIZE) chunk = SSTV_BUF_SIZE;
-        for (uint32_t i = 0; i < chunk; i++) {
-            g->phase_acc += g->phase_inc;
-            s_dac_buf[i] = sin_table_256[g->phase_acc >> 24];
-        }
-        if (chunk < SSTV_BUF_SIZE)
-            memset(s_dac_buf + chunk, 128, SSTV_BUF_SIZE - chunk);
+static inline void dac_out(uint8_t s) {
+    s_dac_buf[s_dac_pos++] = s;
+    if (s_dac_pos == SSTV_BUF_SIZE) {
         afsk_write_dac_block(s_dac_buf, SSTV_BUF_SIZE, 2000);
-        done += chunk;
+        s_dac_pos = 0;
     }
 }
 
-/* Transmit n_px pixels; px_us = microseconds per pixel (Q0, integer).
- * Uses a sub-sample accumulator to prevent timing drift over a scan line. */
-static void tx_scan(ToneGen *g, const uint8_t *ch, int n_px, uint32_t px_us) {
-    uint32_t num = (uint64_t)px_us * SSTV_DAC_FS;
-    uint32_t den = 1000000UL;
-    uint32_t acc = 0;
-    uint32_t pos = 0;
+static void dac_flush(void) {
+    if (s_dac_pos > 0) {
+        memset(s_dac_buf + s_dac_pos, 128, SSTV_BUF_SIZE - s_dac_pos);
+        afsk_write_dac_block(s_dac_buf, SSTV_BUF_SIZE, 2000);
+        s_dac_pos = 0;
+    }
+}
 
+/* tx_tone takes duration in microseconds; sclk_us converts to sample count. */
+static void tx_tone(ToneGen *g, float freq_hz, uint32_t us) {
+    uint32_t n = sclk_us(us);
+    g->phase_inc = freq_to_inc(freq_hz);
+    for (uint32_t i = 0; i < n; i++) {
+        g->phase_acc += g->phase_inc;
+        dac_out(sin_table_256[g->phase_acc >> 24]);
+    }
+}
+
+/* Transmit n_px pixels over exactly total_us microseconds.
+ * sclk_us carries the fractional-sample error forward across segments. */
+static void tx_scan(ToneGen *g, const uint8_t *ch, int n_px, uint32_t total_us) {
+    uint32_t total_smp = sclk_us(total_us);
+    uint32_t acc = 0;
     for (int x = 0; x < n_px; x++) {
         g->phase_inc = freq_to_inc(1500.0f + (ch[x] / 255.0f) * 800.0f);
-        acc += num;
-        uint32_t px_smp = acc / den;
-        acc %= den;
-
+        acc += total_smp;
+        uint32_t px_smp = acc / (uint32_t)n_px;
+        acc %= (uint32_t)n_px;
         for (uint32_t s = 0; s < px_smp; s++) {
             g->phase_acc += g->phase_inc;
-            s_dac_buf[pos++] = sin_table_256[g->phase_acc >> 24];
-            if (pos == SSTV_BUF_SIZE) {
-                afsk_write_dac_block(s_dac_buf, SSTV_BUF_SIZE, 2000);
-                pos = 0;
-            }
+            dac_out(sin_table_256[g->phase_acc >> 24]);
         }
-    }
-    if (pos > 0) {
-        memset(s_dac_buf + pos, 128, SSTV_BUF_SIZE - pos);
-        afsk_write_dac_block(s_dac_buf, SSTV_BUF_SIZE, 2000);
     }
 }
 
@@ -145,19 +163,19 @@ static void tx_vis(SstvMode mode) {
     ToneGen g = {0};
     uint8_t vis = sstv_modes[mode].vis_code;
 
-    tx_tone(&g, 1900.0f, us_to_samples(300000));  /* leader */
-    tx_tone(&g, 1200.0f, us_to_samples( 10000));  /* break */
-    tx_tone(&g, 1900.0f, us_to_samples(300000));  /* leader */
-    tx_tone(&g, 1200.0f, us_to_samples( 30000));  /* VIS start bit */
+    tx_tone(&g, 1900.0f, 300000);  /* leader */
+    tx_tone(&g, 1200.0f,  10000);  /* break */
+    tx_tone(&g, 1900.0f, 300000);  /* leader */
+    tx_tone(&g, 1200.0f,  30000);  /* VIS start bit */
 
     int parity = 0;
     for (int b = 0; b < 7; b++) {
         int bit = (vis >> b) & 1;
         parity ^= bit;
-        tx_tone(&g, bit ? 1300.0f : 1100.0f, us_to_samples(30000));
+        tx_tone(&g, bit ? 1300.0f : 1100.0f, 30000);
     }
-    tx_tone(&g, parity ? 1300.0f : 1100.0f, us_to_samples(30000)); /* parity */
-    tx_tone(&g, 1200.0f, us_to_samples( 30000));  /* VIS stop bit */
+    tx_tone(&g, parity ? 1300.0f : 1100.0f, 30000); /* parity */
+    tx_tone(&g, 1200.0f, 30000);  /* VIS stop bit */
 }
 
 // ---------------------------------------------------------------------------
@@ -165,9 +183,13 @@ static void tx_vis(SstvMode mode) {
 // ---------------------------------------------------------------------------
 static void rgb_to_ycbcr(uint8_t r, uint8_t g, uint8_t b,
                           uint8_t *Y, uint8_t *Cb, uint8_t *Cr) {
-    int32_t y  =  16 + (( 66 * r + 129 * g +  25 * b + 128) >> 8);
-    int32_t cb = 128 + ((-38 * r -  74 * g + 112 * b + 128) >> 8);
-    int32_t cr = 128 + ((112 * r -  94 * g -  18 * b + 128) >> 8);
+    /* BT.601 full-range (Y 0-255, Cb/Cr 0-255 centered at 128).
+     * SSTV maps ch=0 → 1500 Hz (black) and ch=255 → 2300 Hz (white), so
+     * full-range is required — studio swing (Y 16-235) would compress the
+     * frequency span and produce wrong brightness and hue. */
+    int32_t y  = (( 77 * r + 150 * g +  29 * b + 128) >> 8);
+    int32_t cb = 128 + ((-43 * r -  85 * g + 128 * b + 128) >> 8);
+    int32_t cr = 128 + ((128 * r - 107 * g -  21 * b + 128) >> 8);
     *Y  = (uint8_t)(y  < 0 ? 0 : y  > 255 ? 255 : y);
     *Cb = (uint8_t)(cb < 0 ? 0 : cb > 255 ? 255 : cb);
     *Cr = (uint8_t)(cr < 0 ? 0 : cr > 255 ? 255 : cr);
@@ -179,52 +201,82 @@ static void rgb_to_ycbcr(uint8_t r, uint8_t g, uint8_t b,
 static void tx_rgb_line(ToneGen *g, const SstvModeParams *mp,
                          const uint8_t *r_ch, const uint8_t *g_ch,
                          const uint8_t *b_ch) {
-    uint32_t px_us = mp->scan_us / (uint32_t)mp->cols;
     if (mp->is_scottie) {
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, g_ch, mp->cols, px_us);
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, b_ch, mp->cols, px_us);
-        tx_tone(g, 1200.0f, us_to_samples(mp->sync_us));
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, r_ch, mp->cols, px_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, g_ch, mp->cols, mp->scan_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, b_ch, mp->cols, mp->scan_us);
+        tx_tone(g, 1200.0f, mp->sync_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, r_ch, mp->cols, mp->scan_us);
     } else {
-        /* Martin */
-        tx_tone(g, 1200.0f, us_to_samples(mp->sync_us));
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, r_ch, mp->cols, px_us);
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, g_ch, mp->cols, px_us);
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, b_ch, mp->cols, px_us);
+        /* Martin: GBR (green, blue, red) — el estándar y los decodificadores
+         * esperan G → B → R en ese orden. Invertir produce un desplazamiento
+         * cíclico de canales (rojo aparece como verde, etc.).
+         * Línea: sync + porch + G + porch + B + porch + R + porch.
+         * El cuarto porch (tras R) es imprescindible: completa la duración de
+         * línea estándar 446.446 ms (= 4.862 + 4×0.572 + 3×146.432). Sin él
+         * cada línea pierde 0.572 ms = 1.25 px (a 457.6 µs/px), lo que produce
+         * exactamente 45° de slant sobre 256 líneas en Martin M1. */
+        tx_tone(g, 1200.0f, mp->sync_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, g_ch, mp->cols, mp->scan_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, b_ch, mp->cols, mp->scan_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        tx_scan(g, r_ch, mp->cols, mp->scan_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Transmit one YCbCr line (Robot)
 // ---------------------------------------------------------------------------
+/* is_even: row % 2 == 0.
+ * Robot 36 separator frequency encodes the chroma type so decoders can detect
+ * even/odd without counting lines.  Convención mayoritaria (MMSSTV, QSSTV,
+ * pySSTV y la espec original de Robot Research):
+ *   1500 Hz separator → R-Y (Cr)
+ *   2300 Hz separator → B-Y (Cb)
+ * Aquí elegimos: línea par envía Cr tras 1500 Hz; línea impar envía Cb tras
+ * 2300 Hz. La asignación opuesta intercambia rojo↔azul en el receptor.
+ * After the separator there is always a 1500 Hz porch (sep_porch_us = 1500 µs)
+ * before chroma data starts; without it the chroma arrives 1.5 ms early per
+ * line and the image slants. */
 static void tx_ycbcr_line(ToneGen *g, const SstvModeParams *mp,
                             const uint8_t *y_ch, const uint8_t *cb_ch,
-                            const uint8_t *cr_ch, bool send_cb) {
-    /* Robot: sync + Y + porch + Cb_or_Cr */
-    uint32_t y_px_us = mp->scan_us / (uint32_t)mp->cols;
-    uint32_t c_px_us = mp->c_scan_us / ((uint32_t)mp->cols / 2);
+                            const uint8_t *cr_ch, bool is_even) {
+    int c_px = mp->cols / 2;
 
-    tx_tone(g, 1200.0f, us_to_samples(mp->sync_us));
-    tx_scan(g, y_ch, mp->cols, y_px_us);
-    tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
+    tx_tone(g, 1200.0f, mp->sync_us);
+    if (mp->sync_porch_us)
+        tx_tone(g, 1500.0f, mp->sync_porch_us);
+    tx_scan(g, y_ch, mp->cols, mp->scan_us);
 
     if (mp->chroma_422) {
-        /* Robot 72: Cb + Cr each line */
-        tx_scan(g, cb_ch, mp->cols / 2, c_px_us);
-        tx_tone(g, 1500.0f, us_to_samples(mp->porch_us));
-        tx_scan(g, cr_ch, mp->cols / 2, c_px_us);
+        /* Robot 72: Cb then Cr every line */
+        tx_tone(g, 1500.0f, mp->porch_us);
+        if (mp->sep_porch_us)
+            tx_tone(g, 1500.0f, mp->sep_porch_us);
+        tx_scan(g, cb_ch, c_px, mp->c_scan_us);
+        tx_tone(g, 1500.0f, mp->porch_us);
+        if (mp->sep_porch_us)
+            tx_tone(g, 1500.0f, mp->sep_porch_us);
+        tx_scan(g, cr_ch, c_px, mp->c_scan_us);
     } else {
-        /* Robot 36: Cb on even lines, Cr on odd lines */
-        if (send_cb)
-            tx_scan(g, cb_ch, mp->cols / 2, c_px_us);
-        else
-            tx_scan(g, cr_ch, mp->cols / 2, c_px_us);
+        /* Robot 36: la frecuencia del separador identifica qué croma sigue.
+         *   1500 Hz → Cr (R-Y);  2300 Hz → Cb (B-Y). */
+        if (is_even) {
+            tx_tone(g, 1500.0f, mp->porch_us); /* sep 1500 Hz → Cr */
+            if (mp->sep_porch_us)
+                tx_tone(g, 1500.0f, mp->sep_porch_us);
+            tx_scan(g, cr_ch, c_px, mp->c_scan_us);
+        } else {
+            tx_tone(g, 2300.0f, mp->porch_us); /* sep 2300 Hz → Cb */
+            if (mp->sep_porch_us)
+                tx_tone(g, 1500.0f, mp->sep_porch_us);
+            tx_scan(g, cb_ch, c_px, mp->c_scan_us);
+        }
     }
 }
 
@@ -232,7 +284,7 @@ static void tx_ycbcr_line(ToneGen *g, const SstvModeParams *mp,
 // TJpgDec integration
 // ---------------------------------------------------------------------------
 #define JPEG_ROW_BUF_HEIGHT  16   /* max MCU height for 4:2:0 */
-#define JPEG_WORK_SIZE       4096
+#define JPEG_WORK_SIZE       8192 /* ROM TJpgDec with JD_FASTDECODE=2 needs ~6 KB */
 
 typedef struct {
     FILE *f;
@@ -269,7 +321,13 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
     const uint8_t *pix = (const uint8_t *)bitmap;
     int bw  = (int)(rect->right  - rect->left + 1);
     int bh  = (int)(rect->bottom - rect->top  + 1);
-    int img_w = (int)jdec->width;
+    /* Use mp->cols instead of jdec->width: the JDEC struct layout in ROM
+     * may differ from the header, making jdec->width unreliable. */
+    int img_w = ctx->mp->cols;
+
+    if (ctx->lines_done == 0 && (int)rect->top == 0 && (int)rect->left == 0)
+        ESP_LOGI(TAG, "output_cb first block: [%d,%d,%d,%d] img_w=%d",
+                 rect->left, rect->top, rect->right, rect->bottom, img_w);
 
     /* Copy MCU block pixels into row_buf. */
     for (int row = 0; row < bh; row++) {
@@ -307,17 +365,8 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
                         cr_ch[x/2] = (uint8_t)((Cr + Cr2) / 2);
                     }
                 }
-                if (mp->chroma_422) {
-                    tx_ycbcr_line(ctx->tg, mp, y_ch, cb_ch, cr_ch, true);
-                } else {
-                    bool even = (img_row % 2 == 0);
-                    if (even) {
-                        memcpy(ctx->cb_prev, cb_ch, 160);
-                        tx_ycbcr_line(ctx->tg, mp, y_ch, cb_ch, cr_ch, true);
-                    } else {
-                        tx_ycbcr_line(ctx->tg, mp, y_ch, ctx->cb_prev, cr_ch, false);
-                    }
-                }
+                bool is_even = (img_row % 2 == 0);
+                tx_ycbcr_line(ctx->tg, mp, y_ch, cb_ch, cr_ch, is_even);
             } else {
                 /* RGB modes (Martin, Scottie) */
                 uint8_t r_ch[320], g_ch[320], b_ch[320];
@@ -337,9 +386,96 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
 }
 
 // ---------------------------------------------------------------------------
+// Test pattern transmit (no file — pixels generated in RAM)
+// 8 SMPTE color bars (top 75%) + gray ramp (bottom 25%)
+// ---------------------------------------------------------------------------
+static const uint8_t s_bar_rgb[8][3] = {
+    {255, 255, 255},  /* white   */
+    {255, 255,   0},  /* yellow  */
+    {  0, 255, 255},  /* cyan    */
+    {  0, 255,   0},  /* green   */
+    {255,   0, 255},  /* magenta */
+    {255,   0,   0},  /* red     */
+    {  0,   0, 255},  /* blue    */
+    {  0,   0,   0},  /* black   */
+};
+
+static void sstv_transmit_test_pattern(SstvMode mode) {
+    const SstvModeParams *mp = &sstv_modes[(int)mode];
+    int bars_rows = (mp->rows * 3) / 4;   /* top 75% = color bars */
+
+    afsk_switch_to_tx();
+    gpio_set_level(GPIO_PTT_OUT, 1);
+    s_dac_pos = 0;
+    s_sample_acc = 0;
+
+    tx_vis(mode);
+
+    ToneGen g = {0};
+    /* Guard tone: prevents VIS stop bit (1200 Hz, 30 ms) from merging with the
+     * first line sync (also 1200 Hz).  Without it the decoder sees one 39 ms
+     * pulse instead of a 30 ms VIS stop + a 9 ms sync, missing the image start. */
+    tx_tone(&g, 1500.0f, 10000);
+    if (mp->is_scottie)
+        tx_tone(&g, 1200.0f, mp->sync_us);
+
+    for (int row = 0; row < mp->rows; row++) {
+        uint8_t r_ch[320], g_ch[320], b_ch[320];
+
+        if (row < bars_rows) {
+            /* Color bars */
+            for (int x = 0; x < mp->cols; x++) {
+                int bar = x * 8 / mp->cols;
+                r_ch[x] = s_bar_rgb[bar][0];
+                g_ch[x] = s_bar_rgb[bar][1];
+                b_ch[x] = s_bar_rgb[bar][2];
+            }
+        } else {
+            /* Gray ramp */
+            for (int x = 0; x < mp->cols; x++) {
+                uint8_t v = (uint8_t)((uint32_t)x * 255 / (mp->cols - 1));
+                r_ch[x] = g_ch[x] = b_ch[x] = v;
+            }
+        }
+
+        if (mp->is_ycbcr) {
+            uint8_t y_ch[320], cb_ch[160], cr_ch[160];
+            for (int x = 0; x < mp->cols; x++) {
+                uint8_t Y, Cb, Cr;
+                rgb_to_ycbcr(r_ch[x], g_ch[x], b_ch[x], &Y, &Cb, &Cr);
+                y_ch[x] = Y;
+                if (x % 2 == 0) {
+                    int nx = (x + 1 < mp->cols) ? x + 1 : x;
+                    uint8_t Y2, Cb2, Cr2;
+                    rgb_to_ycbcr(r_ch[nx], g_ch[nx], b_ch[nx], &Y2, &Cb2, &Cr2);
+                    cb_ch[x/2] = (uint8_t)((Cb + Cb2) / 2);
+                    cr_ch[x/2] = (uint8_t)((Cr + Cr2) / 2);
+                }
+            }
+            tx_ycbcr_line(&g, mp, y_ch, cb_ch, cr_ch, (row % 2 == 0));
+        } else {
+            tx_rgb_line(&g, mp, r_ch, g_ch, b_ch);
+        }
+
+        if ((row + 1) % 32 == 0)
+            ESP_LOGI(TAG, "Test pattern line %d/%d", row + 1, mp->rows);
+    }
+
+    dac_flush();
+    gpio_set_level(GPIO_PTT_OUT, 0);
+    afsk_switch_to_rx();
+    audio_stream_ws_send_text("{\"type\":\"sstv_done\",\"name\":\"test_pattern\"}");
+    ESP_LOGI(TAG, "SSTV test pattern TX done");
+}
+
+// ---------------------------------------------------------------------------
 // Main transmit function
 // ---------------------------------------------------------------------------
 void sstv_transmit(const SstvRequest *req) {
+    if (req->is_test) {
+        sstv_transmit_test_pattern(req->mode);
+        return;
+    }
     char path[80];
     snprintf(path, sizeof(path), "%s/%s", SSTV_DIR, req->name);
     ESP_LOGI(TAG, "SSTV TX start: %s mode=%d", path, (int)req->mode);
@@ -354,14 +490,15 @@ void sstv_transmit(const SstvRequest *req) {
 
     afsk_switch_to_tx();
     gpio_set_level(GPIO_PTT_OUT, 1);
+    s_dac_pos = 0;
+    s_sample_acc = 0;
 
     tx_vis(req->mode);
 
-    /* Scottie needs an initial sync pulse before line 0. */
     ToneGen g = {0};
-    if (mp->is_scottie) {
-        tx_tone(&g, 1200.0f, us_to_samples(mp->sync_us));
-    }
+    tx_tone(&g, 1500.0f, 10000); /* guard: separate VIS stop from first sync */
+    if (mp->is_scottie)
+        tx_tone(&g, 1200.0f, mp->sync_us);
 
     /* Set up JPEG decode context. */
     memset(&s_jctx, 0, sizeof(s_jctx));
@@ -372,17 +509,22 @@ void sstv_transmit(const SstvRequest *req) {
 
     JRESULT rc = jd_prepare(&s_jdec, jpeg_input_cb, s_jwork, sizeof(s_jwork), &s_jctx);
     if (rc != JDR_OK) {
-        ESP_LOGE(TAG, "jd_prepare failed: %d", (int)rc);
+        ESP_LOGE(TAG, "jd_prepare failed: rc=%d (3=pool_small, 6=fmt, 8=unsupported)",
+                 (int)rc);
         goto done;
     }
+    ESP_LOGI(TAG, "jd_prepare OK, jdec.width=%d jdec.height=%d (expect %dx%d)",
+             (int)s_jdec.width, (int)s_jdec.height, mp->cols, mp->rows);
 
     /* Scale 0 = no scaling (output at full resolution). */
     rc = jd_decomp(&s_jdec, jpeg_output_cb, 0);
+    ESP_LOGI(TAG, "jd_decomp rc=%d, lines_done=%d", (int)rc, s_jctx.lines_done);
     if (rc != JDR_OK && rc != JDR_INTR) {
-        ESP_LOGE(TAG, "jd_decomp failed: %d", (int)rc);
+        ESP_LOGE(TAG, "jd_decomp error: rc=%d", (int)rc);
     }
 
 done:
+    dac_flush();  /* send any remaining samples before dropping PTT */
     fclose(f);
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
@@ -745,6 +887,37 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* ---- POST /api/sstv/test  {"mode":"robot_36"} ---- */
+static esp_err_t sstv_test_handler(httpd_req_t *req) {
+    char buf[128] = {0};
+    int len = httpd_req_recv(req, buf, (int)sizeof(buf) - 1);
+    SstvMode mode = SSTV_MODE_ROBOT_36;
+    if (len > 0) {
+        cJSON *root = cJSON_ParseWithLength(buf, len);
+        if (root) {
+            cJSON *m = cJSON_GetObjectItem(root, "mode");
+            if (m && m->valuestring) {
+                const char *ms = m->valuestring;
+                if      (strcmp(ms, "martin_m1") == 0) mode = SSTV_MODE_MARTIN_M1;
+                else if (strcmp(ms, "martin_m2") == 0) mode = SSTV_MODE_MARTIN_M2;
+                else if (strcmp(ms, "scottie_s1") == 0) mode = SSTV_MODE_SCOTTIE_S1;
+                else if (strcmp(ms, "robot_36")  == 0) mode = SSTV_MODE_ROBOT_36;
+                else if (strcmp(ms, "robot_72")  == 0) mode = SSTV_MODE_ROBOT_72;
+            }
+            cJSON_Delete(root);
+        }
+    }
+    SstvRequest sr = {.is_test = true, .mode = mode};
+    strncpy(sr.name, "test_pattern", sizeof(sr.name) - 1);
+    if (xQueueSend(s_sstv_queue, &sr, 0) != pdTRUE) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "TX busy");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"queued\"}");
+    return ESP_OK;
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -778,11 +951,16 @@ void sstv_init(void) {
         .uri = "/api/sstv/upload", .method = HTTP_POST,
         .handler = sstv_upload_handler
     };
+    static const httpd_uri_t uri_test = {
+        .uri = "/api/sstv/test", .method = HTTP_POST,
+        .handler = sstv_test_handler
+    };
 
     httpd_register_uri_handler(server, &uri_list);
     httpd_register_uri_handler(server, &uri_send);
     httpd_register_uri_handler(server, &uri_delete);
     httpd_register_uri_handler(server, &uri_upload);
+    httpd_register_uri_handler(server, &uri_test);
 
     ESP_LOGI(TAG, "SSTV initialized (queue=%p, httpd=%p)", s_sstv_queue, server);
 }

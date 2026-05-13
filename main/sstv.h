@@ -24,6 +24,7 @@ typedef struct {
     char       name[48];   // filename in /spiffs/sstv/, e.g. "foto.jpg"
     SstvFormat fmt;
     SstvMode   mode;
+    bool       is_test;    // transmit generated test pattern instead of file
 } SstvRequest;
 
 extern QueueHandle_t s_sstv_queue;
