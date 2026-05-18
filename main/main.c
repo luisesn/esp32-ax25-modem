@@ -29,6 +29,14 @@
 #  endif
 #endif
 
+// Project-level dispatch hook registered with afsk_set_dispatch_hook().
+// Called from receive_audio_task each iteration when not in TX mode.
+// Must not be called directly — task-ownership of I2S0 DAC is required.
+static void project_dispatch_hook(void) {
+    morse_check_and_dispatch();
+    sstv_dispatch_if_pending();
+}
+
 // ---------------------------------------------------------------------------
 // AX.25 mini-parser → JSON (KISS TNC mode only)
 // ---------------------------------------------------------------------------
@@ -421,6 +429,7 @@ void app_main(void)
     audio_stream_init();
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
+    afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS
 

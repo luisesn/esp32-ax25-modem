@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-01): compila limpio (binary ~904 KB, 47 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-18): compila limpio (binary ~904 KB, 46 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con carga de JPEG vía web. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -47,10 +47,14 @@ esp32-aprs-modem/
 │   ├── audio_stream.h / audio_stream.c  servidor HTTP port 80 (UI web), WebSocket /ws
 │   │                                  (audio IMA ADPCM + JSON APRS), WAV TCP port 8080,
 │   │                                  REST: /api/aprs/send, /api/aprs/beacon, /api/me,
-│   │                                        /api/config (GET/POST), /api/morse/trigger
+│   │                                        /api/config (GET/POST), /api/morse/trigger,
+│   │                                        /api/log, /api/rx/stats
 │   ├── digipeater.h / digipeater.c    digipeater WIDEn-N: aliases múltiples, supresión de
 │   │                                  duplicados (FNV-1a, TTL 30 s), logging serie + WebSocket
 │   ├── morse.h / morse.c              baliza morse CW periódica (tono, WPM, periodo, one-shot)
+│   ├── sstv.h / sstv.c                TX SSTV (Martin M1/M2, Scottie S1, Robot 36/72);
+│   │                                  JPEG on-the-fly vía ROM TJpgDec; REST: /api/sstv/*
+│   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
 │   ├── ax25ip.h / ax25ip.c            gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
@@ -62,7 +66,7 @@ esp32-aprs-modem/
 │       ├── LibAPRS.{h,cpp}            API de alto nivel (APRS_init, queue_msg, queue_ack,
 │       │                              queue_beacon, getCallsign…)
 │       ├── AFSK.{h,cpp}               modulador/demodulador AFSK, DAC TX, ADC RX,
-│       │                              cola TX s_tx_queue, morse_check_and_dispatch
+│       │                              cola TX s_tx_queue, hook de despacho periódico
 │       ├── AX25.{h,cpp}               codificación/decodificación AX.25 + raw_hook para KISS
 │       ├── CRC-CCIT.{h,c}             CRC-CCITT para tramas AX.25
 │       ├── HDLC.h                     flags HDLC (0x7E, 0x7F, AX25_ESC)
@@ -110,7 +114,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
    - Inyecta paquetes IP en la pila lwIP si PID=0xCC (`ax25ip_rx_frame`).
    - Notifica a los clientes WebSocket con JSON `{"src":..., "dst":..., "path":..., "info":...}`.
 6. `digi_init()` configura el digipeater WIDEn-N desde `config.json`.
-7. `morse_init()` configura la baliza morse CW periódica; se despacha desde `receive_audio_task` vía `morse_check_and_dispatch()`.
+7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. Ambos se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
 8. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
 9. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
 10. `audio_level_task` genera barra de nivel y hace parpadeo rápido del LED RX cuando el pico queda fuera del rango permitido.
@@ -129,14 +133,21 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
-| `GET`  | `/`      | Sirve `index.html` desde SPIFFS |
-| `GET`  | `/ws`    | WebSocket upgrade (audio binario IMA ADPCM + JSON APRS/ACK/DIGI) |
-| `POST` | `/api/aprs/send` | Envía mensaje APRS. Body JSON: `{"to":"CALL","ssid":N,"text":"..."}` |
-| `POST` | `/api/aprs/beacon` | Transmite baliza de posición. Body JSON: `{"lat":40.4,"lon":-3.7,"symbol":">","comment":"..."}` |
-| `GET`  | `/api/me` | Devuelve `{"call":"...","ssid":N}` con el indicativo configurado |
-| `GET`  | `/api/config` | Devuelve `config.json` completo |
-| `POST` | `/api/config` | Guarda nuevo `config.json` y recarga digipeater + morse en RAM |
-| `POST` | `/api/morse/trigger` | Dispara baliza morse inmediata (one-shot) |
+| `GET`    | `/`                     | Sirve `index.html` desde SPIFFS |
+| `GET`    | `/ws`                   | WebSocket upgrade (audio binario IMA ADPCM + JSON APRS/ACK/DIGI) |
+| `POST`   | `/api/aprs/send`        | Envía mensaje APRS. Body JSON: `{"to":"CALL","ssid":N,"text":"..."}` |
+| `POST`   | `/api/aprs/beacon`      | Transmite baliza de posición. Body JSON: `{"lat":40.4,"lon":-3.7,"symbol":">","comment":"..."}` |
+| `GET`    | `/api/me`               | Devuelve `{"call":"...","ssid":N}` con el indicativo configurado |
+| `GET`    | `/api/config`           | Devuelve `config.json` completo |
+| `POST`   | `/api/config`           | Guarda nuevo `config.json` y recarga digipeater + morse en RAM |
+| `POST`   | `/api/morse/trigger`    | Dispara baliza morse inmediata (one-shot) |
+| `GET`    | `/api/log?since=N`      | Historial de log (entradas de secuencia > N) |
+| `GET`    | `/api/rx/stats`         | Estadísticas de recepción (tramas OK/error, FIFO overflows, AGC, squelch) |
+| `GET`    | `/api/sstv/list`        | Lista imágenes JPEG disponibles en `/spiffs/sstv/` |
+| `POST`   | `/api/sstv/send`        | Transmite imagen SSTV. Body: `{"name":"foto.jpg","mode":"martin_m1"}` |
+| `POST`   | `/api/sstv/test`        | Transmite patrón de prueba SMPTE. Body: `{"mode":"robot_36"}` |
+| `POST`   | `/api/sstv/upload`      | Sube JPEG vía `multipart/form-data` (partes: `name` + `image`; máx. 200 KB, 10 imágenes) |
+| `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
 
 ## Digipeater WIDEn-N
 
@@ -173,8 +184,38 @@ Identificación CW periódica configurable desde `config.json`:
 ```
 
 - `callsign` vacío usa `aprs.callsign` como fallback.
-- Se despacha desde `receive_audio_task` (propietaria del I2S0) para respetar el mutex ADC/DAC.
+- Se despacha desde `receive_audio_task` (propietaria del I2S0) para respetar el mutex ADC/DAC. El mecanismo de despacho usa `afsk_set_dispatch_hook()` para mantener la librería LibAPRS libre de dependencias del proyecto.
 - Activable on-demand con `POST /api/morse/trigger` o el botón "Morse" en la UI web.
+
+## SSTV (Slow-Scan Television)
+
+El firmware incluye un transmisor SSTV completo. Soporta los modos más habituales en HF/VHF:
+
+| Modo | Dimensión | Duración aprox. |
+|------|-----------|-----------------|
+| Martin M1  | 320×256 | ~114 s |
+| Martin M2  | 320×256 |  ~58 s |
+| Scottie S1 | 320×256 | ~110 s |
+| Robot 36   | 320×240 |  ~36 s |
+| Robot 72   | 320×240 |  ~72 s |
+
+### Flujo de transmisión
+
+1. Sube una imagen JPEG desde la UI web (o vía `POST /api/sstv/upload`).
+2. Selecciona modo y pulsa enviar (`POST /api/sstv/send`), o usa el patrón de prueba SMPTE (`POST /api/sstv/test`).
+3. La petición se encola y se despacha desde `receive_audio_task` (propietaria del DAC I2S0).
+4. El firmware decodifica el JPEG on-the-fly usando el decodificador TJpgDec de la ROM del ESP32, convierte cada línea a FSK (1500–2300 Hz) a 48 kHz y lo escribe al DAC por DMA.
+5. El PTT se activa automáticamente durante la transmisión.
+
+### Configuración SPIFFS
+
+Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El directorio se crea automáticamente al arrancar.
+
+### Limitaciones
+
+- El JPEG debe caber en la partición SPIFFS (704 KB total, compartida con `index.html` y `config.json`).
+- No se admite recepción SSTV (solo TX).
+- La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
 
 ## Gateway IP RFC 1226 (opcional)
 
@@ -223,19 +264,23 @@ direwolf -c direwolf.conf
 
 ## Configuración mínima antes de flashear
 
-Editar `main/spiffs_data/config.json`. Campos obligatorios:
+Editar `main/spiffs_data/config.json`. Estructura completa con todos los campos:
 
 ```json
 {
   "aprs": {
     "callsign": "TU_INDICATIVO",
-    "ssid": 11
+    "ssid": 11,
+    "symbol_table": "/",
+    "symbol_code": ">"
   },
-  "wifi": {
-    "ssid": "TU_SSID_AQUI",
-    "password": "TU_PASSWORD_AQUI",
-    "connect_timeout_s": 120
-  },
+  "wifi": [
+    {
+      "ssid": "TU_SSID_AQUI",
+      "password": "TU_PASSWORD_AQUI",
+      "connect_timeout_s": 20
+    }
+  ],
   "ap": {
     "enabled": true,
     "ssid": "APRS_AP",
@@ -250,9 +295,10 @@ Editar `main/spiffs_data/config.json`. Campos obligatorios:
   },
   "digi": {
     "enabled": false,
-    "alias": ["WIDE1-1", "WIDE2-2"],
+    "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
     "callsign": "TU_INDICATIVO",
-    "ssid": 0
+    "ssid": 0,
+    "comment": "ESP32-DIGI"
   },
   "morse": {
     "enabled": false,
@@ -260,22 +306,218 @@ Editar `main/spiffs_data/config.json`. Campos obligatorios:
     "tone_hz": 1000,
     "wpm": 20,
     "period_s": 600
+  },
+  "rx": {
+    "dual_modem_enabled": true,
+    "active_modem": "best",
+    "squelch_threshold": 64,
+    "deemphasis_enabled": false
   }
 }
 ```
+
+Notas:
+- `wifi` es un **array**: se puede añadir más de una red; el firmware intenta cada una en orden.
+- `aprs.symbol_table` / `aprs.symbol_code`: símbolo APRS (tabla primaria `/` o alternativa `\\`).
+- `rx.dual_modem_enabled`: activa un segundo demodulador AFSK con filtros diferentes para mayor tasa de decodificación.
+- `rx.active_modem`: `"v1"`, `"v2"` o `"best"` (usa el que tenga mejor calidad de señal en cada trama).
 
 `main/config.h` mantiene parámetros de compilación (`TNC_MODE`, `KISS_TRANSPORT`, `KISS_TCP_PORT`, GPIOs).
 
 ## Limitaciones actuales
 
-- **Gateway IP RFC 1226** — implementado y compila limpio; requiere verificación en hardware real.
+- **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
+- **Gateway IP RFC 1226** — implementado y compila limpio; pendiente verificación en hardware real.
+- **SSTV solo TX** — no hay decodificador RX. Tampoco se admite recepción SSTV.
+- **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 - **FIFOs internos** (report.md §2.6) — protegidos con `portMUX_TYPE`; riesgo residual bajo en escenarios de alta carga.
-- **Un solo cliente TCP a la vez** — el servidor KISS acepta reconexiones, pero no conexiones simultáneas.
-- **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build.
+- **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build innecesariamente.
 
 ## Indicativo y licencia de radioaficionado
 
 Editar `main/spiffs_data/config.json` (`aprs.callsign` y opcionalmente `aprs.ssid`) con tu propio indicativo antes de transmitir. También se puede cambiar en runtime desde la pestaña CONFIG de la UI sin reflashear. **Transmitir en la banda amateur requiere licencia válida**.
+
+## Pines
+### Mapeo de pines — Lolin32 Lite + placa ESPRI
+
+Según el esquema de la placa ESPRI y el pinout de la Lolin32 Lite, estos son los GPIO usados y los que quedarían disponibles.
+
+---
+
+### Pines del firmware (device.h / config.h)
+
+Estos son los GPIO **configurados en el código** y los que usa activamente el firmware:
+
+| GPIO | Definición | Función | Notas |
+|------|-----------|---------|-------|
+| GPIO25 | DAC_CHAN_0 | Audio TX — salida DAC a radio | DAC1 del ESP32, 8-bit |
+| GPIO35 | ADC1_CH7  | Audio RX — entrada ADC desde radio | Solo entrada; 12-bit; 0–3,1 V (atten 12 dB) |
+| GPIO26 | `GPIO_PTT_OUT` | PTT activo alto (1=TX, 0=reposo) | Comparte recurso con DAC2; ver trampas en CLAUDE.md |
+| GPIO22 | `GPIO_LED_RX`  | LED indicador de recepción | LED integrado Lolin32 Lite |
+| GPIO37 | `GPIO_AUDIO_TRIGGER` | Trigger de audio (sin uso activo) | Solo entrada |
+
+GPIO_LED_TX está desactivado (`-1`) en `config.h`. Para activar un LED de TX, asignar un GPIO libre.
+
+---
+
+### Pines usados por la ESPRI (esquema de placa)
+
+Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configuración del firmware.
+
+| GPIO ESP32 | Señal en esquema | Función |
+|---|---|---|
+| GPIO35 | `AUDIO IN PIN` | Entrada de audio desde radio (ADC1_CH7) |
+| GPIO34 | `BATTERY MEASURE PIN` | Lectura ADC de batería (no usada por firmware) |
+| GPIO32 | `LED PIN` | LED verde (no usado por firmware) |
+| GPIO33 | `LED2 PIN` | LED rojo (no usado por firmware) |
+| GPIO25 | `AUDIO OUT PIN` | Salida de audio a radio (DAC1) |
+| GPIO26 | `PTT PIN` | Control PTT radio |
+| GPIO27 | `RX PIN` | RX UART desde radio |
+| GPIO14 | `TX PIN` | TX UART hacia radio |
+| GPIO12 | `SD CARD CLK PIN` | SPI clock SD |
+| GPIO13 | `SD CARD DAT3 PIN` | SPI CS / DAT3 SD |
+| GPIO15 | `SD CARD CMD PIN` | SPI MOSI/CMD SD |
+| GPIO2  | `SD CARD DAT0 PIN` | SPI MISO/DAT0 SD |
+| GPIO0  | `TOUCH PAD 1` | Entrada táctil / libre auxiliar |
+| GPIO4  | `SD CARD DAT1 PIN` | DAT1 SD |
+| GPIO16 | `SD CARD DAT2 PIN` | DAT2 SD |
+| GPIO17 | `SD CARD ENABLE PIN` | Alimentación/enable SD |
+| GPIO18 | `BATTERY MEASURE ENABLE PIN` | Habilita medición batería |
+
+---
+
+### Interfaces funcionales
+
+#### Audio
+
+| Función | GPIO |
+|---|---|
+| Audio OUT (DAC) | GPIO25 |
+| Audio IN (ADC)  | GPIO35 |
+
+- GPIO25 usa el DAC1 interno del ESP32 (`dac_continuous`).
+- GPIO35 = ADC1_CH7; es solo entrada; rango 0–3,1 V con atenuación 12 dB.
+
+---
+
+#### UART radio
+
+| Función | GPIO |
+|---|---|
+| TX hacia radio | GPIO14 |
+| RX desde radio | GPIO27 |
+| PTT | GPIO26 |
+
+---
+
+#### Tarjeta SD
+
+La SD parece conectada en modo SDIO 4-bit:
+
+| Señal SD | GPIO |
+|---|---|
+| CLK | GPIO12 |
+| CMD | GPIO15 |
+| DAT0 | GPIO2 |
+| DAT1 | GPIO4 |
+| DAT2 | GPIO16 |
+| DAT3 | GPIO13 |
+| Enable | GPIO17 |
+
+> GPIO12, GPIO15, GPIO2 y GPIO0 son pines de strapping/boot. Hay que evitar niveles incorrectos al arrancar.
+
+---
+
+#### LEDs
+
+| LED | GPIO | Uso |
+|-----|------|-----|
+| RX activity | GPIO22 | Usado por firmware (`GPIO_LED_RX` en `config.h`) |
+| Verde (ESPRI) | GPIO32 | Disponible; no usado por firmware |
+| Rojo (ESPRI)  | GPIO33 | Disponible; no usado por firmware |
+
+---
+
+#### Batería
+
+| Función | GPIO |
+|---|---|
+| Medición batería ADC | GPIO34 |
+| Enable divisor medida | GPIO18 |
+
+---
+
+### Pines libres disponibles
+
+#### Pines probablemente libres y utilizables
+
+| GPIO | Comentarios |
+|---|---|
+| GPIO5  | Libre |
+| GPIO19 | Libre |
+| GPIO21 | Libre |
+| GPIO22 | **Usado por firmware** como LED_RX (`GPIO_LED_RX` en `config.h`) |
+| GPIO23 | Libre |
+
+#### Usos recomendados
+- I2C
+- SPI auxiliar
+- UART extra
+- PPS GPS
+- Controladores externos
+- Relés/transistores
+
+---
+
+### Pines con restricciones o no recomendados
+
+| GPIO | Motivo |
+|---|---|
+| GPIO0 | Strapping boot |
+| GPIO2 | Strapping boot + SD |
+| GPIO12 | Strapping boot |
+| GPIO15 | Strapping boot |
+| GPIO34 | Solo entrada |
+| GPIO35 | Solo entrada |
+| GPIO36 (VP) | Libre pero solo entrada |
+| GPIO39 (VN) | Libre pero solo entrada |
+
+---
+
+### Pines libres “solo entrada”
+
+| GPIO | Uso típico |
+|---|---|
+| GPIO36 (VP) | ADC/sensores |
+| GPIO39 (VN) | ADC/sensores |
+
+#### Limitaciones
+No sirven para:
+- I2C
+- SPI
+- UART TX
+- LEDs
+- Salidas digitales
+
+---
+
+### Resumen rápido
+
+#### Usados (ESPRI / hardware)
+- GPIO0, GPIO2, GPIO4, GPIO12, GPIO13, GPIO14, GPIO15, GPIO16, GPIO17, GPIO18
+- GPIO25 (DAC audio TX), GPIO26 (PTT), GPIO27 (RX UART)
+- GPIO32, GPIO33 (LEDs ESPRI — no usados por firmware)
+- GPIO34 (batería ADC), GPIO35 (audio ADC — activo en firmware)
+
+#### Usados por firmware
+- GPIO22 (LED_RX — `GPIO_LED_RX` en `config.h`)
+- GPIO25, GPIO26, GPIO35 (ver tabla firmware arriba)
+
+#### Libres “buenos”
+- GPIO5, GPIO19, GPIO21, GPIO23
+
+#### Libres solo entrada
+- GPIO36 (VP), GPIO39 (VN)
 
 ## Licencia
 
