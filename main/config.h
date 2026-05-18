@@ -2,10 +2,15 @@
 // Hardware
 // ---------------------------------------------------------------------------
 #define GPIO_PTT_OUT          GPIO_NUM_26
-#define GPIO_LED_RX           GPIO_NUM_22  // RX activity indicator (built-in LED)
+#define GPIO_LED_RX           GPIO_NUM_33  // RX activity — green LED (blinks on each decoded packet)
 #define GPIO_LED_TX          -1            // TX activity indicator (disabled)
+#define GPIO_LED_WARN         GPIO_NUM_23  // Volume warning — red LED (on when audio out of range)
 #define CONFIG_PTT_ON_DELAY_MS  10
 #define CONFIG_PTT_OFF_DELAY_MS 10
+
+// Audio level thresholds (int8_t, 0–127).  Used by audio_level_task and display.
+#define AUDIO_LEVEL_TOO_LOW    8
+#define AUDIO_LEVEL_TOO_HIGH   115
 
 // I2C bus (SSD1306 LCD and any future I2C peripherals)
 #define GPIO_I2C_SDA          GPIO_NUM_21

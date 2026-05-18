@@ -284,11 +284,28 @@ static void display_task(void *arg) {
         fb_hline(5, 0x08);
 
         // --- Row 6: RX audio level bar ---
-        int peak = (int)(uint8_t)audio_peak; // 0–255
-        fb_text(6, 0, "RX:");
-        int bar = (peak * 90) / 255; // max ~90 px
-        for (int x = 18; x < 18 + bar && x < DISPLAY_W; x++)
-            s_fb[6 * DISPLAY_W + x] = 0x3C; // 4-px tall bar in middle of page
+        // audio_peak is volatile int8_t, range 0–127 (absolute ADC peak).
+        int peak = (int)(int8_t)audio_peak; // 0–127
+        if (peak < 0) peak = 0;
+        bool loud = (peak > AUDIO_LEVEL_TOO_HIGH);
+
+        fb_text(6, 0, loud ? "RX!" : "RX:");
+
+        // Bar: columns 18–117 (100 px), full-scale = 127.
+        int bar_px = (peak * 100) / 127;
+        if (bar_px > 100) bar_px = 100;
+        uint8_t bar_fill = loud ? 0x7E : 0x3C; // taller fill when too loud
+        for (int x = 18; x < 18 + bar_px && x < 118; x++)
+            s_fb[6 * DISPLAY_W + x] = bar_fill;
+
+        // Thin vertical marker at the AUDIO_LEVEL_TOO_HIGH threshold.
+        int thr_x = 18 + (AUDIO_LEVEL_TOO_HIGH * 100) / 127; // ~108
+        if (thr_x < DISPLAY_W)
+            s_fb[6 * DISPLAY_W + thr_x] = 0x7F; // full-height line
+
+        // --- Row 7: "LOUD" warning label ---
+        if (loud)
+            fb_text(7, 80, "LOUD");
 
         ssd1306_flush();
         vTaskDelay(pdMS_TO_TICKS(500));

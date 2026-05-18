@@ -118,8 +118,6 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
 #define ADC_REFERENCE REF_3V3
 #define OPEN_SQUELCH  false
 
-#define AUDIO_LEVEL_TOO_LOW    8
-#define AUDIO_LEVEL_TOO_HIGH   115
 #define AUDIO_ALERT_BLINK_MS   100
 
 // ---------------------------------------------------------------------------
@@ -133,6 +131,22 @@ static void audio_level_task(void *arg)
     int log_div = 0;
     bool alarm_led_state = false;
     bool alarm_active = false;
+
+    // Configure the warning LED (red, GPIO_LED_WARN) as output.
+#if GPIO_LED_WARN >= 0
+    {
+        gpio_config_t io = {
+            .pin_bit_mask = 1ULL << GPIO_LED_WARN,
+            .mode         = GPIO_MODE_OUTPUT,
+            .pull_up_en   = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&io);
+        gpio_set_level(GPIO_LED_WARN, 0);
+    }
+#endif
+
     for (;;) {
         vTaskDelay(AUDIO_ALERT_BLINK_MS / portTICK_PERIOD_MS);
 
@@ -142,15 +156,15 @@ static void audio_level_task(void *arg)
         bool out_of_range = (peak < AUDIO_LEVEL_TOO_LOW) || (peak > AUDIO_LEVEL_TOO_HIGH);
         if (out_of_range) {
             alarm_active = true;
-#if GPIO_LED_RX >= 0
+#if GPIO_LED_WARN >= 0
             alarm_led_state = !alarm_led_state;
-            gpio_set_level(GPIO_LED_RX, alarm_led_state ? 1 : 0);
+            gpio_set_level(GPIO_LED_WARN, alarm_led_state ? 1 : 0);
 #endif
         } else if (alarm_active) {
             alarm_active = false;
             alarm_led_state = false;
-#if GPIO_LED_RX >= 0
-            gpio_set_level(GPIO_LED_RX, 0);
+#if GPIO_LED_WARN >= 0
+            gpio_set_level(GPIO_LED_WARN, 0);
 #endif
         }
 

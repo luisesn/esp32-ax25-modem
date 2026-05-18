@@ -125,7 +125,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO21/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
 10. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
 11. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
-12. `audio_level_task` genera barra de nivel y hace parpadeo rápido del LED RX cuando el pico queda fuera del rango permitido.
+12. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
 
 ## Interfaz web
 
@@ -474,8 +474,8 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 |---|---|---|
 | GPIO35 | `AUDIO IN PIN` | Entrada de audio desde radio (ADC1_CH7) |
 | GPIO34 | `BATTERY MEASURE PIN` | Lectura ADC de batería (no usada por firmware) |
-| GPIO32 | `LED PIN` | LED verde (no usado por firmware) |
-| GPIO33 | `LED2 PIN` | LED rojo (no usado por firmware) |
+| GPIO32 | `LED PIN` | LED verde — no usado por firmware |
+| GPIO33 | `LED2 PIN` | LED (verde en HW del usuario) — **usado como `GPIO_LED_RX`**: parpadea al decodificar cada paquete AX.25 |
 | GPIO25 | `AUDIO OUT PIN` | Salida de audio a radio (DAC1) |
 | GPIO26 | `PTT PIN` | Control PTT radio |
 | GPIO27 | `RX PIN` | RX UART desde radio |
@@ -524,7 +524,7 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 | SCL | GPIO19 |
 
 - Bus I2C0, 400 kHz. Dirección SSD1306: 0x3C (60) o 0x3D (61).
-- GPIO23 tiene un LED en la placa y no se usa como SCL.
+- GPIO23 tiene un LED en la placa; se usa como `GPIO_LED_WARN` (LED rojo de advertencia de volumen alto), por eso GPIO19 se usa como SCL en lugar de GPIO23.
 
 ---
 
@@ -635,7 +635,8 @@ No sirven para:
 #### Usados (ESPRI / hardware)
 - GPIO0, GPIO2, GPIO4\*, GPIO12, GPIO13, GPIO14, GPIO15, GPIO16\*, GPIO17, GPIO18
 - GPIO25 (DAC audio TX), GPIO26 (PTT), GPIO27 (RX UART)
-- GPIO32, GPIO33 (LEDs ESPRI — no usados por firmware)
+- GPIO32 (LED ESPRI — no usado por firmware)
+- GPIO33 (**`GPIO_LED_RX`** — LED verde RX, usado por firmware)
 - GPIO34 (batería ADC), GPIO35 (audio ADC — activo en firmware)
 
 \*GPIO4 y GPIO16 son pines SD reasignados a GPS UART2.
