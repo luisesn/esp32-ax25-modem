@@ -4,3 +4,5 @@ sdkconfig.old
 managed_components/
 doc/*
 dependencies.lock
+main/spiffs_data/sstv/*
+main/spiffs_data/config.json
