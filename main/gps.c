@@ -72,8 +72,6 @@ static void parse_rmc(char **f, int n) {
     // f[6]=EW, f[7]=speed, f[8]=course, f[9]=date
     if (n < 10) return;
     bool active = (f[2][0] == 'A');
-    double lat_snap = 0.0, lon_snap = 0.0;
-    char time_snap[7] = {0};
 
     gps_lock_pos();
     g_gps_pos.valid = active;
@@ -84,23 +82,17 @@ static void parse_rmc(char **f, int n) {
         g_gps_pos.course_deg  = (float)atof(f[8]);
         snprintf(g_gps_pos.time_utc, sizeof(g_gps_pos.time_utc), "%.6s", f[1]);
         snprintf(g_gps_pos.date_utc, sizeof(g_gps_pos.date_utc), "%.6s", f[9]);
-        lat_snap = g_gps_pos.lat;
-        lon_snap = g_gps_pos.lon;
-        strncpy(time_snap, g_gps_pos.time_utc, 6);
     }
     gps_unlock_pos();
 
     if (active && s_first_fix) {
         s_first_fix = false;
-        printf("GPS primer fix: %.6s UTC  lat=%.5f  lon=%.5f\n",
-               time_snap, lat_snap, lon_snap);
-    } else if (active) {
-        printf("GPS: %.6s UTC  lat=%.5f  lon=%.5f\n",
-               time_snap, lat_snap, lon_snap);
+        // printf("GPS primer fix: %s UTC  lat=%.5f  lon=%.5f\n", g_gps_pos.time_utc, g_gps_pos.lat, g_gps_pos.lon);
     }
+    // else if (active) { printf("GPS: %s UTC  lat=%.5f  lon=%.5f\n", g_gps_pos.time_utc, g_gps_pos.lat, g_gps_pos.lon); }
     if (!active && !s_first_fix) {
         s_first_fix = true;
-        printf("GPS: fix perdido\n");
+        // printf("GPS: fix perdido\n");
     }
 }
 
@@ -125,10 +117,8 @@ static void parse_gga(char **f, int n) {
     gps_unlock_pos();
 
     if (log_change) {
-        const char *fix_str = quality == 0 ? "sin fix"
-                            : sats < 4    ? "2D"
-                            :               "3D";
-        printf("GPS sats:%d  fix:%s  (quality=%d)\n", sats, fix_str, quality);
+        // const char *fix_str = quality == 0 ? "sin fix" : sats < 4 ? "2D" : "3D";
+        // printf("GPS sats:%d  fix:%s  (quality=%d)\n", sats, fix_str, quality);
         s_prev_quality = quality;
         s_prev_sats    = sats;
     }
@@ -156,7 +146,7 @@ static void gps_task(void *arg) {
                 if (pos > 6 && line[0] == '$' && checksum_ok(line)) {
                     if (!s_uart_active) {
                         s_uart_active = true;
-                        printf("GPS: primera trama NMEA válida recibida\n");
+                        // printf("GPS: primera trama NMEA válida recibida\n");
                     }
                     ESP_LOGD(TAG, "%s", line);
                     gps_lock_pos();

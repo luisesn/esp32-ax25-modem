@@ -535,14 +535,12 @@ function connectWS(){
   ws.onopen=()=>{setStatus('Conectado');
     document.getElementById('btn').disabled=false;
     document.getElementById('rec-btn').disabled=false;
-    if(s_last_log_seq>0){
-      fetch('/api/log?since='+s_last_log_seq)
-        .then(r=>r.json())
-        .then(d=>{
-          if(d.last_seq)s_last_log_seq=d.last_seq;
-          if(d.entries)d.entries.forEach(e=>{try{handleMsg(JSON.parse(e));}catch(_){}});
-        }).catch(()=>{});
-    }};
+    fetch('/api/log?since='+s_last_log_seq)
+      .then(r=>r.json())
+      .then(d=>{
+        if(d.last_seq)s_last_log_seq=d.last_seq;
+        if(d.entries)d.entries.forEach(e=>{try{handleMsg(JSON.parse(e));}catch(_){}});
+      }).catch(()=>{});};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
       if(e.data.byteLength===512){
