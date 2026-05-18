@@ -168,20 +168,23 @@ static void audio_level_task(void *arg)
 #endif
         }
 
-        int level = (int)peak * 10 / 127;
-        if (level > 10) level = 10;
-
-        bar[0] = '|';
-        for (int i = 1; i <= 10; i++)
-            bar[i] = (i <= level) ? '#' : '-';
-        bar[11] = '|';
-        bar[12] = '\0';
-
-        if (++log_div >= 3) {
-            log_div = 0;
-            printf("Audio: %s %3d%s\n", bar, (int)peak,
-                   out_of_range ? " [ALERT]" : "");
+#if 0
+        {
+            int level = (int)peak * 10 / 127;
+            if (level > 10) level = 10;
+            bar[0] = '|';
+            for (int i = 1; i <= 10; i++)
+                bar[i] = (i <= level) ? '#' : '-';
+            bar[11] = '|';
+            bar[12] = '\0';
+            if (++log_div >= 3) {
+                log_div = 0;
+                printf("Audio: %s %3d%s\n", bar, (int)peak,
+                       out_of_range ? " [ALERT]" : "");
+            }
         }
+#endif
+        (void)bar; (void)log_div;
     }
 }
 

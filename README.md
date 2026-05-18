@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-18): compila limpio (binary ~958 KB, 44 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con carga de JPEG vía web. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-18): compila limpio (binary ~960 KB, 43 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -64,7 +64,8 @@ esp32-aprs-modem/
 │   ├── ax25ip.h / ax25ip.c            gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
-│   ├── spiffs_data/config.json        configuración inicial (callsign, WiFi, AP, IP, digi, morse)
+│   ├── spiffs_data/config.json        configuración activa (credenciales reales — no subir a git)
+│   ├── spiffs_data/config.json.example  esqueleto de configuración con todos los campos
 │   ├── spiffs_data/index.html         UI web completa (log APRS, mensajes, baliza posición,
 │   │                                  audio IMA ADPCM, grabación WAV, editor de configuración)
 │   ├── idf_component.yml              declaración de dependencias (esp-dsp — pendiente eliminar)
@@ -154,6 +155,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `GET`    | `/api/sstv/list`        | Lista imágenes JPEG disponibles en `/spiffs/sstv/` |
 | `POST`   | `/api/sstv/send`        | Transmite imagen SSTV. Body: `{"name":"foto.jpg","mode":"martin_m1"}` |
 | `POST`   | `/api/sstv/test`        | Transmite patrón de prueba SMPTE. Body: `{"mode":"robot_36"}` |
+| `POST`   | `/api/sstv/stop`        | Aborta la transmisión SSTV en curso. El firmware termina la línea actual y envía `{"type":"sstv_aborted"}` por WebSocket |
 | `POST`   | `/api/sstv/upload`      | Sube JPEG vía `multipart/form-data` (partes: `name` + `image`; máx. 200 KB, 10 imágenes) |
 | `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
 
@@ -214,6 +216,7 @@ El firmware incluye un transmisor SSTV completo. Soporta los modos más habitual
 3. La petición se encola y se despacha desde `receive_audio_task` (propietaria del DAC I2S0).
 4. El firmware decodifica el JPEG on-the-fly usando el decodificador TJpgDec de la ROM del ESP32, convierte cada línea a FSK (1500–2300 Hz) a 48 kHz y lo escribe al DAC por DMA.
 5. El PTT se activa automáticamente durante la transmisión.
+6. El botón **■ Stop TX** de la UI (o `POST /api/sstv/stop`) aborta la transmisión al final de la línea en curso (≤ 450 ms para Martin M1). El firmware baja el PTT, vuelve al modo RX y envía `{"type":"sstv_aborted"}` por WebSocket.
 
 ### Configuración SPIFFS
 
@@ -250,16 +253,49 @@ gps_unlock_pos();
 if (pos.valid) { /* usar pos.lat, pos.lon, etc. */ }
 ```
 
+Campos relevantes de `GpsPosition`:
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `valid` | `bool` | `true` si el RMC tiene status `A` (posición válida) |
+| `data_received` | `bool` | `true` en cuanto se recibe la primera sentencia NMEA con checksum correcto |
+| `lat` / `lon` | `double` | Coordenadas en grados decimales (+N/+E) |
+| `satellites` | `uint8_t` | Número de satélites (del GGA) |
+| `fix_quality` | `uint8_t` | Calidad GGA (0=sin fix, 1=GPS, 2=DGPS) |
+| `time_utc` | `char[7]` | Hora UTC `"HHMMSS\0"` |
+| `date_utc` | `char[7]` | Fecha UTC `"DDMMYY\0"` |
+
+### Logging serie
+
+La tarea GPS produce los siguientes mensajes en el monitor serie:
+
+| Evento | Nivel | Mensaje ejemplo |
+|--------|-------|-----------------|
+| Primera sentencia NMEA válida | `printf` | `GPS: primera trama NMEA válida recibida` |
+| Cambio de satélites / calidad | `printf` | `GPS sats:8  fix:3D  (quality=1)` |
+| Primer fix | `printf` | `GPS primer fix: 123456 UTC  lat=40.41680  lon=-3.70380` |
+| Actualización de posición | `printf` | `GPS: 123456 UTC  lat=40.41680  lon=-3.70380` |
+| Pérdida de fix | `printf` | `GPS: fix perdido` |
+| Cada sentencia NMEA (debug) | `ESP_LOGD` | `$GPRMC,...*hh` |
+
+Para ver las sentencias NMEA crudas activa el nivel debug para el tag `gps`:
+```c
+esp_log_level_set("gps", ESP_LOG_DEBUG);
+```
+O establece `CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y` en `menuconfig`.
+
 ### Configuración
 
 ```json
 "gps": {
   "enabled": true,
-  "baud": 9600
+  "baud": 9600,
+  "use_for_beacon": false
 }
 ```
 
 - `enabled: false` deshabilita UART2 y la tarea GPS; el firmware arranca igualmente.
+- `use_for_beacon`: reservado para uso futuro (tomar lat/lon del GPS en balizas APRS automáticas).
 - La tarea GPS (`gps_task`) tiene prioridad 4, stack 2048 B.
 
 ---
@@ -280,18 +316,22 @@ Dirección I2C por defecto: `0x3C` (60 decimal). Algunos módulos usan `0x3D` (6
 ### Layout de pantalla
 
 ```
-+----------------------+
-| EA1JBS-11  192.168.1.x  |   callsign + IP WiFi
-|                      |
-| GPS: 40.4168 -3.7038 |   coordenadas (o "GPS: sin fix")
-| Sats:08  12:34:56UTC |   satélites + hora GPS
-|                      |
-|                      |
-| [████░░░░░░░░░░░░░░] |   barra de nivel de audio RX
-+----------------------+
++----------------------------+
+| EA1JBS-11                  |  fila 0 — callsign
+| 192.168.1.100              |  fila 1 — IP WiFi (o "no wifi")
+| 40.41680N   3.70380W       |  fila 2 — coords GPS (o "GPS: sin fix" / "GPS: sin datos")
+| Sats:08  12:34:56Z         |  fila 3 — satélites + hora UTC (vacía si no hay fix)
+| APRS:12/5 48/31            |  fila 4 — stats: CRC-ok v1/v2  HDLC-flags v1/v2
+|····························|  fila 5 — separador
+| RX: [████░] 87             |  fila 6 — barra 80 px + nivel numérico
+| (en silencio)              |  fila 7 — "LOUD" solo si pico > umbral alto
++----------------------------+
 ```
 
-La pantalla se actualiza automáticamente cada 500 ms. Si el SSD1306 no responde al arrancar (`i2c_master_probe` falla), el display se deshabilita y el firmware continúa sin bloquearse.
+- Fila 2 diferencia tres estados: coordenadas (fix válido), `"GPS: sin fix"` (sentencias NMEA recibidas pero sin posición), `"GPS: sin datos"` (UART mudo o módulo no conectado).
+- La pantalla se actualiza automáticamente cada 500 ms.
+- Mientras el WiFi está conectando se muestra una pantalla de estado con SSID, número de red (N/M si hay varias), tiempo restante y barra de progreso. Si se pasa al modo hotspot se muestra el SSID del AP y la IP `192.168.4.1`.
+- Si el SSD1306 no responde al arrancar (`i2c_master_probe` falla), el display se deshabilita y el firmware continúa sin bloquearse.
 
 ### Configuración
 
@@ -353,12 +393,13 @@ MYCALL NO0CAL-1
 direwolf -c direwolf.conf
 ```
 
-## Configuración mínima antes de flashear
+## Configuración antes de flashear
 
-Editar `main/spiffs_data/config.json`. Estructura completa con todos los campos:
+Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y rellena tus datos. La estructura completa con todos los campos es:
 
 ```json
 {
+  "version": "1",
   "aprs": {
     "callsign": "TU_INDICATIVO",
     "ssid": 11,
@@ -367,9 +408,9 @@ Editar `main/spiffs_data/config.json`. Estructura completa con todos los campos:
   },
   "wifi": [
     {
-      "ssid": "TU_SSID_AQUI",
-      "password": "TU_PASSWORD_AQUI",
-      "connect_timeout_s": 20
+      "ssid": "MI_RED_WIFI",
+      "password": "MI_PASSWORD",
+      "connect_timeout_s": 30
     }
   ],
   "ap": {
@@ -398,28 +439,48 @@ Editar `main/spiffs_data/config.json`. Estructura completa con todos los campos:
     "wpm": 20,
     "period_s": 600
   },
-  "rx": {
-    "dual_modem_enabled": true,
-    "active_modem": "best",
-    "squelch_threshold": 64,
-    "deemphasis_enabled": false
-  },
   "gps": {
     "enabled": true,
-    "baud": 9600
+    "baud": 9600,
+    "use_for_beacon": false
   },
   "display": {
     "enabled": true,
     "i2c_addr": 60
+  },
+  "rx": {
+    "dual_modem_enabled": true,
+    "active_modem": "best",
+    "squelch_threshold": 0,
+    "deemphasis_enabled": false
   }
 }
 ```
 
-Notas:
-- `wifi` es un **array**: se puede añadir más de una red; el firmware intenta cada una en orden.
-- `aprs.symbol_table` / `aprs.symbol_code`: símbolo APRS (tabla primaria `/` o alternativa `\\`).
-- `rx.dual_modem_enabled`: activa un segundo demodulador AFSK con filtros diferentes para mayor tasa de decodificación.
-- `rx.active_modem`: `"v1"`, `"v2"` o `"best"` (usa el que tenga mejor calidad de señal en cada trama).
+### Referencia de campos
+
+| Sección | Campo | Tipo | Descripción |
+|---------|-------|------|-------------|
+| `aprs` | `callsign` | string | Indicativo (máx. 6 chars) |
+| `aprs` | `ssid` | int 0–15 | SSID APRS |
+| `aprs` | `symbol_table` | `"/"` o `"\\"` | Tabla de símbolos APRS (primaria o alternativa) |
+| `aprs` | `symbol_code` | char | Código de símbolo APRS (p. ej. `">"` = coche) |
+| `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
+| `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
+| `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |
+| `ip` | `enabled` | bool | Activa gateway IP RFC 1226 sobre AX.25 |
+| `digi` | `alias` | array | Aliases a digipeatear (WIDEn-N y aliases legacy) |
+| `morse` | `callsign` | string | Indicativo CW (vacío → usa `aprs.callsign`) |
+| `morse` | `period_s` | int | Intervalo entre balizas CW (segundos) |
+| `gps` | `baud` | int | Velocidad UART del módulo GPS |
+| `gps` | `use_for_beacon` | bool | Reservado: usar posición GPS en balizas APRS (futuro) |
+| `display` | `i2c_addr` | int | Dirección I2C del SSD1306 en decimal (60 = 0x3C) |
+| `rx` | `dual_modem_enabled` | bool | Activa el segundo demodulador AFSK (V2) |
+| `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo, sin dedup) |
+| `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
+| `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
+
+> **Nota sobre `rx.active_modem: "best"`**: en este modo ambos demoduladores decodifican de forma independiente. Si el mismo paquete lo decodifican los dos, el host KISS recibirá dos tramas idénticas. El host (tncattach, direwolf) debe manejar los duplicados si es necesario.
 
 `main/config.h` mantiene parámetros de compilación (`TNC_MODE`, `KISS_TRANSPORT`, `KISS_TCP_PORT`, GPIOs).
 

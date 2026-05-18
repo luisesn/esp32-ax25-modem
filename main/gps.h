@@ -4,7 +4,8 @@
 #include "cJSON.h"
 
 typedef struct {
-    bool    valid;
+    bool    valid;          // RMC status A = true position fix
+    bool    data_received;  // at least one valid NMEA sentence parsed
     double  lat;            // decimal degrees, + = N, - = S
     double  lon;            // decimal degrees, + = E, - = W
     uint8_t satellites;

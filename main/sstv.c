@@ -24,6 +24,7 @@
 #define SSTV_BUF_SIZE   AFSK_DAC_FRAME_SIZE   /* 2048 bytes */
 
 QueueHandle_t s_sstv_queue = NULL;
+static volatile bool s_sstv_abort = false;
 
 // ---------------------------------------------------------------------------
 // 256-entry uint8_t sine table (DC=128, amplitude ~127).
@@ -316,7 +317,7 @@ static UINT jpeg_input_cb(JDEC *jdec, BYTE *buf, UINT nbytes) {
 
 static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
     JpegCtx *ctx = (JpegCtx *)jdec->device;
-    if (ctx->error) return 0;
+    if (ctx->error || s_sstv_abort) return 0;
 
     const uint8_t *pix = (const uint8_t *)bitmap;
     int bw  = (int)(rect->right  - rect->left + 1);
@@ -404,6 +405,7 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
     const SstvModeParams *mp = &sstv_modes[(int)mode];
     int bars_rows = (mp->rows * 3) / 4;   /* top 75% = color bars */
 
+    s_sstv_abort = false;
     afsk_switch_to_tx();
     gpio_set_level(GPIO_PTT_OUT, 1);
     s_dac_pos = 0;
@@ -420,6 +422,7 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
         tx_tone(&g, 1200.0f, mp->sync_us);
 
     for (int row = 0; row < mp->rows; row++) {
+        if (s_sstv_abort) break;
         uint8_t r_ch[320], g_ch[320], b_ch[320];
 
         if (row < bars_rows) {
@@ -464,8 +467,13 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
     dac_flush();
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
-    audio_stream_ws_send_text("{\"type\":\"sstv_done\",\"name\":\"test_pattern\"}");
-    ESP_LOGI(TAG, "SSTV test pattern TX done");
+    if (s_sstv_abort) {
+        audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
+        ESP_LOGI(TAG, "SSTV test pattern TX aborted");
+    } else {
+        audio_stream_ws_send_text("{\"type\":\"sstv_done\",\"name\":\"test_pattern\"}");
+        ESP_LOGI(TAG, "SSTV test pattern TX done");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +496,7 @@ void sstv_transmit(const SstvRequest *req) {
 
     const SstvModeParams *mp = &sstv_modes[(int)req->mode];
 
+    s_sstv_abort = false;
     afsk_switch_to_tx();
     gpio_set_level(GPIO_PTT_OUT, 1);
     s_dac_pos = 0;
@@ -529,11 +538,16 @@ done:
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
 
-    char ws_msg[96];
-    snprintf(ws_msg, sizeof(ws_msg),
-             "{\"type\":\"sstv_done\",\"name\":\"%s\"}", req->name);
-    audio_stream_ws_send_text(ws_msg);
-    ESP_LOGI(TAG, "SSTV TX done: %d lines", s_jctx.lines_done);
+    if (s_sstv_abort) {
+        audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
+        ESP_LOGI(TAG, "SSTV TX aborted after %d lines", s_jctx.lines_done);
+    } else {
+        char ws_msg[96];
+        snprintf(ws_msg, sizeof(ws_msg),
+                 "{\"type\":\"sstv_done\",\"name\":\"%s\"}", req->name);
+        audio_stream_ws_send_text(ws_msg);
+        ESP_LOGI(TAG, "SSTV TX done: %d lines", s_jctx.lines_done);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +901,14 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* ---- POST /api/sstv/stop ---- */
+static esp_err_t sstv_stop_handler(httpd_req_t *req) {
+    s_sstv_abort = true;
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
 /* ---- POST /api/sstv/test  {"mode":"robot_36"} ---- */
 static esp_err_t sstv_test_handler(httpd_req_t *req) {
     char buf[128] = {0};
@@ -955,12 +977,17 @@ void sstv_init(void) {
         .uri = "/api/sstv/test", .method = HTTP_POST,
         .handler = sstv_test_handler
     };
+    static const httpd_uri_t uri_stop = {
+        .uri = "/api/sstv/stop", .method = HTTP_POST,
+        .handler = sstv_stop_handler
+    };
 
     httpd_register_uri_handler(server, &uri_list);
     httpd_register_uri_handler(server, &uri_send);
     httpd_register_uri_handler(server, &uri_delete);
     httpd_register_uri_handler(server, &uri_upload);
     httpd_register_uri_handler(server, &uri_test);
+    httpd_register_uri_handler(server, &uri_stop);
 
     ESP_LOGI(TAG, "SSTV initialized (queue=%p, httpd=%p)", s_sstv_queue, server);
 }

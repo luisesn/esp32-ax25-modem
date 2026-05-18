@@ -10,6 +10,7 @@
 #include "driver/i2c_master.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"   // audio_peak
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h" // APRS_getCallsign
+#include "rx_stats.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -279,12 +280,14 @@ static void screen_hotspot(char *line) {
 }
 
 static void screen_normal(char *line) {
-    // --- Row 0: callsign + WiFi IP ---
+    // --- Page 0: callsign ---
     char call[8] = "?"; int ssid_n = 0;
     APRS_getCallsign(call, &ssid_n);
     char callssid[12];
     snprintf(callssid, sizeof(callssid), "%s-%d", call, ssid_n);
+    fb_text(0, 0, callssid);
 
+    // --- Page 1: IP address ---
     char ip_str[16] = "no wifi";
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (sta) {
@@ -292,12 +295,9 @@ static void screen_normal(char *line) {
         if (esp_netif_get_ip_info(sta, &ip_info) == ESP_OK && ip_info.ip.addr)
             esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
     }
-    snprintf(line, 32, "%-9s %s", callssid, ip_str);
-    fb_text(0, 0, line);
+    fb_text(1, 0, ip_str);
 
-    fb_hline(1, 0x08);
-
-    // --- Row 2-3: GPS ---
+    // --- Pages 2-3: GPS ---
     GpsPosition pos;
     gps_lock_pos();
     pos = g_gps_pos;
@@ -311,28 +311,43 @@ static void screen_normal(char *line) {
         const char *t = pos.time_utc;
         snprintf(line, 32, "Sats:%02d %c%c:%c%c:%c%cZ",
                  pos.satellites, t[0],t[1], t[2],t[3], t[4],t[5]);
-        fb_text(4, 0, line);
+        fb_text(3, 0, line);
+    } else if (pos.data_received) {
+        fb_text(2, 0, "GPS: sin fix");
     } else {
-        fb_text(2, 16, "GPS: sin fix");
+        fb_text(2, 0, "GPS: sin datos");
     }
+
+    // --- Page 4: APRS decoder stats ---
+    snprintf(line, 32, "APRS:%u/%u %u/%u",
+             (unsigned)(rx_stats_v1.frames_crc_ok % 1000),
+             (unsigned)(rx_stats_v2.frames_crc_ok % 1000),
+             (unsigned)(rx_stats_v1.hdlc_flags    % 1000),
+             (unsigned)(rx_stats_v2.hdlc_flags    % 1000));
+    fb_text(4, 0, line);
 
     fb_hline(5, 0x08);
 
-    // --- Row 6: RX audio level bar ---
+    // --- Page 6: RX audio bar (80 px) + numeric peak ---
     int peak = (int)(int8_t)audio_peak;
     if (peak < 0) peak = 0;
     bool loud = (peak > AUDIO_LEVEL_TOO_HIGH);
 
     fb_text(6, 0, loud ? "RX!" : "RX:");
-    int bar_px = (peak * 100) / 127;
-    if (bar_px > 100) bar_px = 100;
+    int bar_px = (peak * 80) / 127;
+    if (bar_px > 80) bar_px = 80;
     uint8_t bar_fill = loud ? 0x7E : 0x3C;
-    for (int x = 18; x < 18 + bar_px && x < 118; x++)
+    for (int x = 18; x < 18 + bar_px && x < 98; x++)
         s_fb[6 * DISPLAY_W + x] = bar_fill;
 
-    int thr_x = 18 + (AUDIO_LEVEL_TOO_HIGH * 100) / 127;
-    if (thr_x < DISPLAY_W)
+    // Threshold marker scaled to 80-px bar
+    int thr_x = 18 + (AUDIO_LEVEL_TOO_HIGH * 80) / 127;
+    if (thr_x < 98)
         s_fb[6 * DISPLAY_W + thr_x] = 0x7F;
+
+    // Numeric peak value at column 100
+    snprintf(line, 32, "%d", peak);
+    fb_text(6, 100, line);
 
     if (loud)
         fb_text(7, 80, "LOUD");

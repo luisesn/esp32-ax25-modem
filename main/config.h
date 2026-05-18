@@ -17,8 +17,8 @@
 #define GPIO_I2C_SCL          GPIO_NUM_19  // GPIO23 has a board LED
 
 // GPS UART2 — GPIO16 and GPIO4 are free GPIOs on the Lolin32 Lite (not SD pins)
-#define GPIO_GPS_RX           GPIO_NUM_16
-#define GPIO_GPS_TX           GPIO_NUM_4   // optional, for sending config to GPS module
+#define GPIO_GPS_RX           GPIO_NUM_4
+#define GPIO_GPS_TX           GPIO_NUM_16   // optional, for sending config to GPS module
 
 // ---------------------------------------------------------------------------
 // Modo de operación
