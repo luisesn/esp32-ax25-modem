@@ -18,6 +18,8 @@
 #include "digipeater.h"
 #include "morse.h"
 #include "sstv.h"
+#include "gps.h"
+#include "display.h"
 
 #include "device.h"
 
@@ -430,6 +432,9 @@ void app_main(void)
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
     afsk_set_dispatch_hook(project_dispatch_hook);
+
+    gps_init(config_get());
+    display_init(config_get());
 
 #elif TNC_MODE == TNC_MODE_APRS
 

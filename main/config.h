@@ -7,6 +7,14 @@
 #define CONFIG_PTT_ON_DELAY_MS  10
 #define CONFIG_PTT_OFF_DELAY_MS 10
 
+// I2C bus (SSD1306 LCD and any future I2C peripherals)
+#define GPIO_I2C_SDA          GPIO_NUM_21
+#define GPIO_I2C_SCL          GPIO_NUM_19  // GPIO23 has a board LED
+
+// GPS UART2 (freed SD-card pins; GPIO17 SD-Enable is NOT freed)
+#define GPIO_GPS_RX           GPIO_NUM_16  // was SD DAT2
+#define GPIO_GPS_TX           GPIO_NUM_4   // was SD DAT1 (optional, for GPS config)
+
 // ---------------------------------------------------------------------------
 // Modo de operación
 // ---------------------------------------------------------------------------

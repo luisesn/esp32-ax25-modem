@@ -16,6 +16,8 @@ idf_component_register(
         "morse.c"
         "rx_stats.c"
         "sstv.c"
+        "gps.c"
+        "display.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"
@@ -28,6 +30,8 @@ idf_component_register(
         driver
         esp_driver_dac
         esp_driver_gpio
+        esp_driver_uart
+        esp_driver_i2c
         esp_adc
         spiffs
         esp_http_server

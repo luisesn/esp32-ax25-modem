@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-18): compila limpio (binary ~904 KB, 46 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con carga de JPEG vía web. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-18): compila limpio (binary ~958 KB, 44 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con carga de JPEG vía web. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -18,6 +18,8 @@ Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-e
 - **Salida de audio (TX)**: DAC1 en GPIO 25 (`dac_continuous`, muestras 8-bit directas). Sin filtro externo necesario para la mayoría de transceptores.
 - **Entrada de audio (RX)**: GPIO 35 / ADC1_CH7 (`adc_continuous` DMA a 48 kHz, atenuación 12 dB → rango 0–3,1 V). Entrada AC-acoplada desde la salida de altavoz del transceptor.
 - **PTT**: GPIO 26, activo en nivel alto (1 = transmitir, 0 = reposo). Restricción de hardware (también es DAC2). Definido en `config.h`.
+- **GPS**: UART2 a 9600 baud. RX = GPIO 16 (pin SD DAT2 liberado), TX = GPIO 4 (pin SD DAT1 liberado, opcional para configurar el módulo GPS).
+- **Display LCD**: SSD1306 128×64 OLED por I2C. SDA = GPIO 21, SCL = GPIO 19.
 
 ## Modos de operación
 
@@ -55,6 +57,10 @@ esp32-aprs-modem/
 │   ├── sstv.h / sstv.c                TX SSTV (Martin M1/M2, Scottie S1, Robot 36/72);
 │   │                                  JPEG on-the-fly vía ROM TJpgDec; REST: /api/sstv/*
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
+│   ├── gps.h / gps.c                  receptor GPS por UART2 (NMEA $GPRMC/$GPGGA),
+│   │                                  struct g_gps_pos con mutex FreeRTOS
+│   ├── display.h / display.c          driver SSD1306 I2C 128×64 (sin librería externa),
+│   │                                  task de refresco 2 Hz con callsign, IP, GPS, audio
 │   ├── ax25ip.h / ax25ip.c            gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
@@ -82,7 +88,7 @@ esp32-aprs-modem/
 
 - **ESP-IDF v6.1** (usa `dac_continuous`, `adc_continuous`, `esp_wifi`, `esp_netif`, `spiffs`, `esp_http_server`, `esp_timer`).
 - Componentes IDF requeridos (declarados en `main/CMakeLists.txt`):
-  `esp_wifi`, `nvs_flash`, `esp_netif`, `lwip`, `driver`, `esp_driver_dac`, `esp_driver_gpio`, `esp_adc`, `spiffs`, `esp_http_server`, `vfs`, `espressif__cjson`, `esp_timer`.
+  `esp_wifi`, `nvs_flash`, `esp_netif`, `lwip`, `driver`, `esp_driver_dac`, `esp_driver_gpio`, `esp_driver_uart`, `esp_driver_i2c`, `esp_adc`, `spiffs`, `esp_http_server`, `vfs`, `espressif__cjson`, `esp_timer`.
 
 ## Compilación y flasheo
 
@@ -115,9 +121,11 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
    - Notifica a los clientes WebSocket con JSON `{"src":..., "dst":..., "path":..., "info":...}`.
 6. `digi_init()` configura el digipeater WIDEn-N desde `config.json`.
 7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. Ambos se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
-8. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
-9. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
-10. `audio_level_task` genera barra de nivel y hace parpadeo rápido del LED RX cuando el pico queda fuera del rango permitido.
+8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, GPIO16/GPIO4, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
+9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO21/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
+10. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
+11. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
+12. `audio_level_task` genera barra de nivel y hace parpadeo rápido del LED RX cuando el pico queda fuera del rango permitido.
 
 ## Interfaz web
 
@@ -217,6 +225,89 @@ Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El 
 - No se admite recepción SSTV (solo TX).
 - La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
 
+## GPS (NMEA por UART2)
+
+El firmware incluye un receptor GPS por UART2 que parsea sentencias NMEA estándar.
+
+### Conexión hardware
+
+| Señal | GPIO |
+|-------|------|
+| UART2 RX (datos del GPS) | GPIO 16 (pin SD DAT2 liberado) |
+| UART2 TX (configuración del GPS, opcional) | GPIO 4 (pin SD DAT1 liberado) |
+
+### Protocolo y parsing
+
+- Baud rate por defecto: 9600 (configurable en `config.json`).
+- Sentencias parseadas: `$GPRMC` / `$GNRMC` (posición, velocidad, rumbo, hora, fecha) y `$GPGGA` / `$GNGGA` (calidad de fix, número de satélites).
+- Checksum NMEA XOR verificado en cada sentencia antes de parsear.
+- Los datos se almacenan en la struct global `g_gps_pos` (definida en `gps.h`), protegida por un mutex FreeRTOS. Para leer desde otra tarea:
+
+```c
+gps_lock_pos();
+GpsPosition pos = g_gps_pos;   // copia bajo mutex
+gps_unlock_pos();
+if (pos.valid) { /* usar pos.lat, pos.lon, etc. */ }
+```
+
+### Configuración
+
+```json
+"gps": {
+  "enabled": true,
+  "baud": 9600
+}
+```
+
+- `enabled: false` deshabilita UART2 y la tarea GPS; el firmware arranca igualmente.
+- La tarea GPS (`gps_task`) tiene prioridad 4, stack 2048 B.
+
+---
+
+## Display LCD SSD1306 128×64 I2C
+
+El firmware incluye un driver SSD1306 propio (sin librería externa) y una tarea de refresco a 2 Hz que muestra el estado del sistema en pantalla.
+
+### Conexión hardware
+
+| Señal I2C | GPIO |
+|-----------|------|
+| SDA | GPIO 21 |
+| SCL | GPIO 19 |
+
+Dirección I2C por defecto: `0x3C` (60 decimal). Algunos módulos usan `0x3D` (61).
+
+### Layout de pantalla
+
+```
++----------------------+
+| EA1JBS-11  192.168.1.x  |   callsign + IP WiFi
+|                      |
+| GPS: 40.4168 -3.7038 |   coordenadas (o "GPS: sin fix")
+| Sats:08  12:34:56UTC |   satélites + hora GPS
+|                      |
+|                      |
+| [████░░░░░░░░░░░░░░] |   barra de nivel de audio RX
++----------------------+
+```
+
+La pantalla se actualiza automáticamente cada 500 ms. Si el SSD1306 no responde al arrancar (`i2c_master_probe` falla), el display se deshabilita y el firmware continúa sin bloquearse.
+
+### Configuración
+
+```json
+"display": {
+  "enabled": true,
+  "i2c_addr": 60
+}
+```
+
+- `i2c_addr`: dirección I2C en decimal (60 = 0x3C, 61 = 0x3D).
+- `enabled: false` omite la inicialización I2C y la tarea de refresco.
+- La tarea display (`display_task`) tiene prioridad 2, stack 2048 B.
+
+---
+
 ## Gateway IP RFC 1226 (opcional)
 
 El ESP32 puede actuar como gateway entre la red WiFi y la frecuencia de radio, encapsulando tráfico IP en tramas AX.25 UI con PID=0xCC según RFC 1226.
@@ -312,6 +403,14 @@ Editar `main/spiffs_data/config.json`. Estructura completa con todos los campos:
     "active_modem": "best",
     "squelch_threshold": 64,
     "deemphasis_enabled": false
+  },
+  "gps": {
+    "enabled": true,
+    "baud": 9600
+  },
+  "display": {
+    "enabled": true,
+    "i2c_addr": 60
   }
 }
 ```
@@ -329,6 +428,8 @@ Notas:
 - **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
 - **Gateway IP RFC 1226** — implementado y compila limpio; pendiente verificación en hardware real.
 - **SSTV solo TX** — no hay decodificador RX. Tampoco se admite recepción SSTV.
+- **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.
+- **SD y GPS comparten pines** — GPIO4 (DAT1) y GPIO16 (DAT2) ahora usados por UART2 GPS. La tarjeta SD no puede usarse simultáneamente.
 - **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 - **FIFOs internos** (report.md §2.6) — protegidos con `portMUX_TYPE`; riesgo residual bajo en escenarios de alta carga.
 - **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build innecesariamente.
@@ -353,10 +454,15 @@ Estos son los GPIO **configurados en el código** y los que usa activamente el f
 | GPIO25 | DAC_CHAN_0 | Audio TX — salida DAC a radio | DAC1 del ESP32, 8-bit |
 | GPIO35 | ADC1_CH7  | Audio RX — entrada ADC desde radio | Solo entrada; 12-bit; 0–3,1 V (atten 12 dB) |
 | GPIO26 | `GPIO_PTT_OUT` | PTT activo alto (1=TX, 0=reposo) | Comparte recurso con DAC2; ver trampas en CLAUDE.md |
-| GPIO22 | `GPIO_LED_RX`  | LED indicador de recepción | LED integrado Lolin32 Lite |
+| GPIO33 | `GPIO_LED_RX`  | LED verde — parpadea al decodificar un paquete AX.25 | Controlado por AFSK.cpp (LED_RX_ON/OFF) |
+| GPIO23 | `GPIO_LED_WARN` | LED rojo — señal de audio fuera de rango (demasiado alta) | Parpadeante mientras dure la condición |
 | GPIO37 | `GPIO_AUDIO_TRIGGER` | Trigger de audio (sin uso activo) | Solo entrada |
+| GPIO21 | `GPIO_I2C_SDA` | I2C SDA — bus SSD1306 y periféricos I2C | |
+| GPIO19 | `GPIO_I2C_SCL` | I2C SCL — bus SSD1306 y periféricos I2C | |
+| GPIO16 | `GPIO_GPS_RX`  | UART2 RX — datos NMEA del módulo GPS | Era SD DAT2 (no conectar SD si se usa GPS) |
+| GPIO4  | `GPIO_GPS_TX`  | UART2 TX — configuración módulo GPS (opcional) | Era SD DAT1 |
 
-GPIO_LED_TX está desactivado (`-1`) en `config.h`. Para activar un LED de TX, asignar un GPIO libre.
+GPIO_LED_TX está desactivado (`-1`) en `config.h`. GPIO22 (LED integrado Lolin32) está ahora libre.
 
 ---
 
@@ -379,8 +485,8 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 | GPIO15 | `SD CARD CMD PIN` | SPI MOSI/CMD SD |
 | GPIO2  | `SD CARD DAT0 PIN` | SPI MISO/DAT0 SD |
 | GPIO0  | `TOUCH PAD 1` | Entrada táctil / libre auxiliar |
-| GPIO4  | `SD CARD DAT1 PIN` | DAT1 SD |
-| GPIO16 | `SD CARD DAT2 PIN` | DAT2 SD |
+| GPIO4  | `SD CARD DAT1 PIN` | DAT1 SD — **ahora usado como GPS UART2 TX** |
+| GPIO16 | `SD CARD DAT2 PIN` | DAT2 SD — **ahora usado como GPS UART2 RX** |
 | GPIO17 | `SD CARD ENABLE PIN` | Alimentación/enable SD |
 | GPIO18 | `BATTERY MEASURE ENABLE PIN` | Habilita medición batería |
 
@@ -410,6 +516,30 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 
 ---
 
+#### I2C (SSD1306 y periféricos)
+
+| Función | GPIO |
+|---------|------|
+| SDA | GPIO21 |
+| SCL | GPIO19 |
+
+- Bus I2C0, 400 kHz. Dirección SSD1306: 0x3C (60) o 0x3D (61).
+- GPIO23 tiene un LED en la placa y no se usa como SCL.
+
+---
+
+#### GPS (UART2)
+
+| Función | GPIO |
+|---------|------|
+| UART2 RX (datos GPS) | GPIO16 |
+| UART2 TX (config GPS, opcional) | GPIO4 |
+
+- Velocidad por defecto: 9600 baud. Configurable en `config.json` (`gps.baud`).
+- GPIO16 y GPIO4 son los pines de SD DAT2 y DAT1. **No usar la SD si el GPS está conectado.**
+
+---
+
 #### Tarjeta SD
 
 La SD parece conectada en modo SDIO 4-bit:
@@ -432,9 +562,10 @@ La SD parece conectada en modo SDIO 4-bit:
 
 | LED | GPIO | Uso |
 |-----|------|-----|
-| RX activity | GPIO22 | Usado por firmware (`GPIO_LED_RX` en `config.h`) |
-| Verde (ESPRI) | GPIO32 | Disponible; no usado por firmware |
-| Rojo (ESPRI)  | GPIO33 | Disponible; no usado por firmware |
+| Verde (`GPIO_LED_RX`) | GPIO33 | Parpadea al decodificar cada paquete AX.25 |
+| Rojo (`GPIO_LED_WARN`) | GPIO23 | Enciende/parpadea cuando el audio de entrada está demasiado alto |
+| Lolin32 built-in | GPIO22 | Libre — no usado por firmware |
+| Verde ESPRI | GPIO32 | Libre — no usado por firmware |
 
 ---
 
@@ -454,17 +585,15 @@ La SD parece conectada en modo SDIO 4-bit:
 | GPIO | Comentarios |
 |---|---|
 | GPIO5  | Libre |
-| GPIO19 | Libre |
-| GPIO21 | Libre |
-| GPIO22 | **Usado por firmware** como LED_RX (`GPIO_LED_RX` en `config.h`) |
-| GPIO23 | Libre |
+| GPIO13 | Libre (era SD DAT3/CS) |
+| GPIO22 | Libre (LED integrado Lolin32 — ya no usado por firmware) |
+| GPIO32 | Libre (LED verde ESPRI — no usado por firmware) |
 
-#### Usos recomendados
-- I2C
+> GPIO33 → **LED verde RX** (`GPIO_LED_RX`). GPIO23 → **LED rojo WARN** (`GPIO_LED_WARN`). GPIO19 → **I2C SCL** (SSD1306). GPIO21 → **I2C SDA** (SSD1306). GPIO16 → **GPS UART2 RX**. GPIO4 → **GPS UART2 TX**. Todos asignados en `config.h`.
+
+#### Usos recomendados para los pines libres restantes
 - SPI auxiliar
 - UART extra
-- PPS GPS
-- Controladores externos
 - Relés/transistores
 
 ---
@@ -504,17 +633,22 @@ No sirven para:
 ### Resumen rápido
 
 #### Usados (ESPRI / hardware)
-- GPIO0, GPIO2, GPIO4, GPIO12, GPIO13, GPIO14, GPIO15, GPIO16, GPIO17, GPIO18
+- GPIO0, GPIO2, GPIO4\*, GPIO12, GPIO13, GPIO14, GPIO15, GPIO16\*, GPIO17, GPIO18
 - GPIO25 (DAC audio TX), GPIO26 (PTT), GPIO27 (RX UART)
 - GPIO32, GPIO33 (LEDs ESPRI — no usados por firmware)
 - GPIO34 (batería ADC), GPIO35 (audio ADC — activo en firmware)
 
+\*GPIO4 y GPIO16 son pines SD reasignados a GPS UART2.
+
 #### Usados por firmware
-- GPIO22 (LED_RX — `GPIO_LED_RX` en `config.h`)
-- GPIO25, GPIO26, GPIO35 (ver tabla firmware arriba)
+- GPIO25, GPIO26, GPIO35 (audio TX/PTT/RX — ver tabla firmware arriba)
+- GPIO33 (LED_RX verde — parpadea en cada paquete AX.25 decodificado)
+- GPIO23 (LED_WARN rojo — parpadea cuando el audio está demasiado alto)
+- GPIO21, GPIO19 (I2C SDA/SCL — SSD1306)
+- GPIO16, GPIO4 (GPS UART2 RX/TX)
 
 #### Libres “buenos”
-- GPIO5, GPIO19, GPIO21, GPIO23
+- GPIO5, GPIO13, GPIO22, GPIO32
 
 #### Libres solo entrada
 - GPIO36 (VP), GPIO39 (VN)
