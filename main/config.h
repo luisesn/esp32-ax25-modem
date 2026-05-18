@@ -13,12 +13,12 @@
 #define AUDIO_LEVEL_TOO_HIGH   115
 
 // I2C bus (SSD1306 LCD and any future I2C peripherals)
-#define GPIO_I2C_SDA          GPIO_NUM_21
+#define GPIO_I2C_SDA          GPIO_NUM_13
 #define GPIO_I2C_SCL          GPIO_NUM_19  // GPIO23 has a board LED
 
-// GPS UART2 (freed SD-card pins; GPIO17 SD-Enable is NOT freed)
-#define GPIO_GPS_RX           GPIO_NUM_16  // was SD DAT2
-#define GPIO_GPS_TX           GPIO_NUM_4   // was SD DAT1 (optional, for GPS config)
+// GPS UART2 — GPIO16 and GPIO4 are free GPIOs on the Lolin32 Lite (not SD pins)
+#define GPIO_GPS_RX           GPIO_NUM_16
+#define GPIO_GPS_TX           GPIO_NUM_4   // optional, for sending config to GPS module
 
 // ---------------------------------------------------------------------------
 // Modo de operación

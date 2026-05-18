@@ -13,20 +13,27 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "lwip/sockets.h"
 
 #define TAG "wifi_transport"
-#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_STOPPED_BIT    BIT1  // set by WIFI_EVENT_STA_STOP
 
-#define DEFAULT_CONNECT_TIMEOUT_S 120
+#define DEFAULT_CONNECT_TIMEOUT_S 30
+#define RECONNECT_DELAY_US  (3LL * 1000000LL)  // 3 s between retries
 
 static EventGroupHandle_t s_wifi_eg;
 
-// true mientras estamos intentando la conexión STA; false en cuanto
-// expira el timeout o nos pasamos a modo AP.
+WifiConnStatus g_wifi_status = {0};
+
+// true while we want automatic reconnects on disconnect.
 static volatile bool s_sta_active = false;
+
+// One-shot timer: fires RECONNECT_DELAY_US after a disconnect to retry.
+static esp_timer_handle_t s_reconnect_timer;
 
 // Acceso al fd del cliente sin mutex: en ESP32 (32-bit) leer/escribir un int
 // alineado es atómico. El peor caso es un send() sobre un fd recién cerrado,
@@ -37,21 +44,30 @@ static volatile int s_client_fd = -1;
 // WiFi event handler
 // ---------------------------------------------------------------------------
 
+static void reconnect_timer_cb(void *arg) {
+    if (s_sta_active) esp_wifi_connect();
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_STOP) {
+        xEventGroupSetBits(s_wifi_eg, WIFI_STOPPED_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_client_fd = -1;
         if (s_sta_active) {
-            ESP_LOGW(TAG, "Desconectado de WiFi, reintentando...");
-            esp_wifi_connect();
+            wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
+            ESP_LOGW(TAG, "Desconectado (reason=%d), reintentando en 3 s...", ev->reason);
+            esp_timer_stop(s_reconnect_timer);
+            esp_timer_start_once(s_reconnect_timer, RECONNECT_DELAY_US);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)data;
         char ip_str[16];
         esp_ip4addr_ntoa(&evt->ip_info.ip, ip_str, sizeof(ip_str));
         ESP_LOGI(TAG, "IP obtenida: %s", ip_str);
+        g_wifi_status.state = WIFI_STATUS_CONNECTED;
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
     }
 }
@@ -163,6 +179,13 @@ static void wifi_connect(void) {
 
     s_wifi_eg = xEventGroupCreate();
 
+    // Reconnect one-shot timer: fires 3 s after a disconnect.
+    esp_timer_create_args_t targs = {
+        .callback = reconnect_timer_cb,
+        .name     = "wifi_reconnect",
+    };
+    esp_timer_create(&targs, &s_reconnect_timer);
+
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                         wifi_event_handler, NULL, NULL);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
@@ -180,67 +203,82 @@ static void wifi_connect(void) {
 
     bool connected   = false;
     bool sta_started = false;
+    int  net_count   = 0;
+    if (wifi_j) net_count = cJSON_IsArray(wifi_j) ? cJSON_GetArraySize(wifi_j) : 1;
 
-    if (wifi_j) {
-        int net_count = cJSON_IsArray(wifi_j) ? cJSON_GetArraySize(wifi_j) : 1;
+    for (int ni = 0; ni < net_count && !connected; ni++) {
+        cJSON *net = cJSON_IsArray(wifi_j)
+                     ? cJSON_GetArrayItem(wifi_j, ni)
+                     : wifi_j;
+        if (!cJSON_IsObject(net)) continue;
 
-        for (int ni = 0; ni < net_count && !connected; ni++) {
-            cJSON *net = cJSON_IsArray(wifi_j)
-                         ? cJSON_GetArrayItem(wifi_j, ni)
-                         : wifi_j;
-            if (!cJSON_IsObject(net)) continue;
+        const char *ssid     = NULL;
+        const char *password = NULL;
+        int  timeout_s       = DEFAULT_CONNECT_TIMEOUT_S;
+        cJSON *it;
+        it = cJSON_GetObjectItem(net, "ssid");
+        if (cJSON_IsString(it)) ssid = it->valuestring;
+        it = cJSON_GetObjectItem(net, "password");
+        if (cJSON_IsString(it)) password = it->valuestring;
+        it = cJSON_GetObjectItem(net, "connect_timeout_s");
+        if (cJSON_IsNumber(it) && it->valuedouble > 0)
+            timeout_s = (int)it->valuedouble;
 
-            const char *ssid     = NULL;
-            const char *password = NULL;
-            int  timeout_s       = DEFAULT_CONNECT_TIMEOUT_S;
-            cJSON *it;
-            it = cJSON_GetObjectItem(net, "ssid");
-            if (cJSON_IsString(it)) ssid = it->valuestring;
-            it = cJSON_GetObjectItem(net, "password");
-            if (cJSON_IsString(it)) password = it->valuestring;
-            it = cJSON_GetObjectItem(net, "connect_timeout_s");
-            if (cJSON_IsNumber(it) && it->valuedouble > 0)
-                timeout_s = (int)it->valuedouble;
+        if (!ssid || !ssid[0]) continue;
 
-            if (!ssid || !ssid[0]) continue;
-
-            wifi_config_t sta_cfg = {};
-            snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),
-                     "%s", ssid);
-            snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password),
-                     "%s", password ? password : "");
-
-            if (sta_started) {
-                // Parar antes de reconfigurar para la siguiente red
-                s_sta_active = false;
-                esp_wifi_stop();
-                vTaskDelay(pdMS_TO_TICKS(300));
-            }
-            xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
-
-            s_sta_active = true;
-            esp_wifi_set_mode(WIFI_MODE_STA);
-            esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-            esp_wifi_start();
-            sta_started = true;
-
-            ESP_LOGI(TAG, "Conectando a '%s' (timeout %d s)...", ssid, timeout_s);
-            EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
-                                                   pdFALSE, pdTRUE,
-                                                   pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
+        // Stop previous attempt cleanly before reconfiguring.
+        if (sta_started) {
+            esp_timer_stop(s_reconnect_timer);
             s_sta_active = false;
-            connected = (bits & WIFI_CONNECTED_BIT) != 0;
-
-            if (!connected)
-                ESP_LOGW(TAG, "No se pudo conectar a '%s'%s", ssid,
-                         ni + 1 < net_count ? ". Probando siguiente..." : ".");
+            xEventGroupClearBits(s_wifi_eg, WIFI_STOPPED_BIT);
+            esp_wifi_stop();
+            // Wait for STA_STOP event instead of a fixed delay.
+            xEventGroupWaitBits(s_wifi_eg, WIFI_STOPPED_BIT,
+                                pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
         }
+        xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+
+        // Update shared status for display.
+        g_wifi_status.state           = WIFI_STATUS_CONNECTING;
+        g_wifi_status.net_index       = ni;
+        g_wifi_status.net_count       = net_count;
+        g_wifi_status.timeout_s       = timeout_s;
+        g_wifi_status.attempt_start_us = esp_timer_get_time();
+        snprintf(g_wifi_status.ssid, sizeof(g_wifi_status.ssid), "%s", ssid);
+
+        wifi_config_t sta_cfg = {};
+        snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),     "%s", ssid);
+        snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s",
+                 password ? password : "");
+
+        s_sta_active = true;
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        esp_wifi_start();
+        sta_started = true;
+
+        ESP_LOGI(TAG, "[%d/%d] Conectando a '%s' (timeout %d s)...",
+                 ni + 1, net_count, ssid, timeout_s);
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
+                                               pdFALSE, pdTRUE,
+                                               pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
+        // Disable auto-reconnect and cancel any pending retry timer.
+        s_sta_active = false;
+        esp_timer_stop(s_reconnect_timer);
+        connected = (bits & WIFI_CONNECTED_BIT) != 0;
+
+        if (!connected)
+            ESP_LOGW(TAG, "No se pudo conectar a '%s'%s", ssid,
+                     ni + 1 < net_count ? ". Probando siguiente..." : ".");
     }
 
     if (!connected) {
         if (sta_started) {
             ESP_LOGW(TAG, "No se pudo conectar a WiFi. Iniciando AP de respaldo...");
+            xEventGroupClearBits(s_wifi_eg, WIFI_STOPPED_BIT);
             esp_wifi_stop();
+            xEventGroupWaitBits(s_wifi_eg, WIFI_STOPPED_BIT,
+                                pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
         }
 
         // --- Leer sección ap ---
@@ -259,6 +297,8 @@ static void wifi_connect(void) {
         }
 
         if (ap_enabled) {
+            snprintf(g_wifi_status.ssid, sizeof(g_wifi_status.ssid), "%s", ap_ssid);
+            g_wifi_status.state = WIFI_STATUS_HOTSPOT;
             wifi_start_ap(ap_ssid, ap_pass);
         } else {
             ESP_LOGW(TAG, "AP de respaldo deshabilitado. Sin red.");

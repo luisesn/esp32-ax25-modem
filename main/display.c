@@ -1,8 +1,10 @@
 #include "display.h"
 #include "config.h"
 #include "gps.h"
+#include "transport_wifi.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
@@ -231,81 +233,132 @@ static int fb_text(int page, int col, const char *s) {
 // Display task
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Screen renderers
+// ---------------------------------------------------------------------------
+
+static void screen_wifi_connecting(char *line) {
+    WifiConnStatus ws = g_wifi_status; // snapshot (no mutex needed for display)
+
+    fb_text(0, 0, "WiFi conectando...");
+    fb_hline(1, 0x08);
+
+    // SSID (truncate to 21 chars)
+    snprintf(line, 32, "%.21s", ws.ssid);
+    fb_text(2, 0, line);
+
+    // Network index when multiple are configured
+    if (ws.net_count > 1) {
+        snprintf(line, 32, "Red %d/%d", ws.net_index + 1, ws.net_count);
+        fb_text(4, 0, line);
+    }
+
+    fb_hline(5, 0x08);
+
+    // Countdown: time remaining for this attempt
+    int64_t elapsed_s = (esp_timer_get_time() - ws.attempt_start_us) / 1000000LL;
+    int remaining = ws.timeout_s - (int)elapsed_s;
+    if (remaining < 0) remaining = 0;
+    snprintf(line, 32, "Espera: %ds", remaining);
+    fb_text(6, 0, line);
+
+    // Progress bar for remaining time
+    int bar_px = (remaining * 100) / (ws.timeout_s > 0 ? ws.timeout_s : 1);
+    if (bar_px > 100) bar_px = 100;
+    for (int x = 18; x < 18 + bar_px && x < 118; x++)
+        s_fb[7 * DISPLAY_W + x] = 0x18; // thin bar
+}
+
+static void screen_hotspot(char *line) {
+    fb_text(0, 0, "Modo hotspot");
+    fb_hline(1, 0x08);
+    snprintf(line, 32, "%.21s", g_wifi_status.ssid);
+    fb_text(2, 0, line);
+    fb_text(4, 0, "192.168.4.1");
+    fb_text(6, 0, "Sin WiFi externa");
+}
+
+static void screen_normal(char *line) {
+    // --- Row 0: callsign + WiFi IP ---
+    char call[8] = "?"; int ssid_n = 0;
+    APRS_getCallsign(call, &ssid_n);
+    char callssid[12];
+    snprintf(callssid, sizeof(callssid), "%s-%d", call, ssid_n);
+
+    char ip_str[16] = "no wifi";
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) {
+        esp_netif_ip_info_t ip_info = {0};
+        if (esp_netif_get_ip_info(sta, &ip_info) == ESP_OK && ip_info.ip.addr)
+            esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+    }
+    snprintf(line, 32, "%-9s %s", callssid, ip_str);
+    fb_text(0, 0, line);
+
+    fb_hline(1, 0x08);
+
+    // --- Row 2-3: GPS ---
+    GpsPosition pos;
+    gps_lock_pos();
+    pos = g_gps_pos;
+    gps_unlock_pos();
+
+    if (pos.valid) {
+        snprintf(line, 32, "%9.5f%c %9.5f%c",
+                 pos.lat >= 0 ? pos.lat : -pos.lat, pos.lat >= 0 ? 'N' : 'S',
+                 pos.lon >= 0 ? pos.lon : -pos.lon, pos.lon >= 0 ? 'E' : 'W');
+        fb_text(2, 0, line);
+        const char *t = pos.time_utc;
+        snprintf(line, 32, "Sats:%02d %c%c:%c%c:%c%cZ",
+                 pos.satellites, t[0],t[1], t[2],t[3], t[4],t[5]);
+        fb_text(4, 0, line);
+    } else {
+        fb_text(2, 16, "GPS: sin fix");
+    }
+
+    fb_hline(5, 0x08);
+
+    // --- Row 6: RX audio level bar ---
+    int peak = (int)(int8_t)audio_peak;
+    if (peak < 0) peak = 0;
+    bool loud = (peak > AUDIO_LEVEL_TOO_HIGH);
+
+    fb_text(6, 0, loud ? "RX!" : "RX:");
+    int bar_px = (peak * 100) / 127;
+    if (bar_px > 100) bar_px = 100;
+    uint8_t bar_fill = loud ? 0x7E : 0x3C;
+    for (int x = 18; x < 18 + bar_px && x < 118; x++)
+        s_fb[6 * DISPLAY_W + x] = bar_fill;
+
+    int thr_x = 18 + (AUDIO_LEVEL_TOO_HIGH * 100) / 127;
+    if (thr_x < DISPLAY_W)
+        s_fb[6 * DISPLAY_W + thr_x] = 0x7F;
+
+    if (loud)
+        fb_text(7, 80, "LOUD");
+}
+
+// ---------------------------------------------------------------------------
+// Display task
+// ---------------------------------------------------------------------------
+
 static void display_task(void *arg) {
-    char line[32]; // fb_text clips at 128 px; buffer large enough for all formats
+    char line[32];
 
     for (;;) {
         fb_clear();
 
-        // --- Row 0: callsign + WiFi IP ---
-        char call[8] = "?"; int ssid = 0;
-        APRS_getCallsign(call, &ssid);
-        char callssid[12];
-        snprintf(callssid, sizeof(callssid), "%s-%d", call, ssid);
-
-        char ip_str[16] = "no wifi";
-        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (sta) {
-            esp_netif_ip_info_t ip_info = {0};
-            if (esp_netif_get_ip_info(sta, &ip_info) == ESP_OK && ip_info.ip.addr) {
-                esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
-            }
+        switch (g_wifi_status.state) {
+            case WIFI_STATUS_CONNECTING:
+                screen_wifi_connecting(line);
+                break;
+            case WIFI_STATUS_HOTSPOT:
+                screen_hotspot(line);
+                break;
+            default:
+                screen_normal(line);
+                break;
         }
-        snprintf(line, sizeof(line), "%-9s %s", callssid, ip_str);
-        fb_text(0, 0, line);
-
-        // Thin separator
-        fb_hline(1, 0x08); // one dot row in the middle of the page
-
-        // --- Row 2-3: GPS ---
-        GpsPosition pos;
-        gps_lock_pos();
-        pos = g_gps_pos;
-        gps_unlock_pos();
-
-        if (pos.valid) {
-            // Lat: e.g. "40.41683N"
-            snprintf(line, sizeof(line), "%9.5f%c %9.5f%c",
-                     pos.lat  >= 0 ? pos.lat  : -pos.lat,  pos.lat  >= 0 ? 'N' : 'S',
-                     pos.lon  >= 0 ? pos.lon  : -pos.lon,  pos.lon  >= 0 ? 'E' : 'W');
-            fb_text(2, 0, line);
-
-            // Sats + UTC time "Sats:08 12:34:56Z"
-            const char *t = pos.time_utc;
-            snprintf(line, sizeof(line), "Sats:%02d %c%c:%c%c:%c%cZ",
-                     pos.satellites,
-                     t[0],t[1], t[2],t[3], t[4],t[5]);
-            fb_text(4, 0, line);
-        } else {
-            fb_text(2, 16, "GPS: sin fix");
-        }
-
-        // Thin separator
-        fb_hline(5, 0x08);
-
-        // --- Row 6: RX audio level bar ---
-        // audio_peak is volatile int8_t, range 0–127 (absolute ADC peak).
-        int peak = (int)(int8_t)audio_peak; // 0–127
-        if (peak < 0) peak = 0;
-        bool loud = (peak > AUDIO_LEVEL_TOO_HIGH);
-
-        fb_text(6, 0, loud ? "RX!" : "RX:");
-
-        // Bar: columns 18–117 (100 px), full-scale = 127.
-        int bar_px = (peak * 100) / 127;
-        if (bar_px > 100) bar_px = 100;
-        uint8_t bar_fill = loud ? 0x7E : 0x3C; // taller fill when too loud
-        for (int x = 18; x < 18 + bar_px && x < 118; x++)
-            s_fb[6 * DISPLAY_W + x] = bar_fill;
-
-        // Thin vertical marker at the AUDIO_LEVEL_TOO_HIGH threshold.
-        int thr_x = 18 + (AUDIO_LEVEL_TOO_HIGH * 100) / 127; // ~108
-        if (thr_x < DISPLAY_W)
-            s_fb[6 * DISPLAY_W + thr_x] = 0x7F; // full-height line
-
-        // --- Row 7: "LOUD" warning label ---
-        if (loud)
-            fb_text(7, 80, "LOUD");
 
         ssd1306_flush();
         vTaskDelay(pdMS_TO_TICKS(500));

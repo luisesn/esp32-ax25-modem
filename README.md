@@ -19,7 +19,7 @@ Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-e
 - **Entrada de audio (RX)**: GPIO 35 / ADC1_CH7 (`adc_continuous` DMA a 48 kHz, atenuación 12 dB → rango 0–3,1 V). Entrada AC-acoplada desde la salida de altavoz del transceptor.
 - **PTT**: GPIO 26, activo en nivel alto (1 = transmitir, 0 = reposo). Restricción de hardware (también es DAC2). Definido en `config.h`.
 - **GPS**: UART2 a 9600 baud. RX = GPIO 16 (pin SD DAT2 liberado), TX = GPIO 4 (pin SD DAT1 liberado, opcional para configurar el módulo GPS).
-- **Display LCD**: SSD1306 128×64 OLED por I2C. SDA = GPIO 21, SCL = GPIO 19.
+- **Display LCD**: SSD1306 128×64 OLED por I2C. SDA = GPIO 13, SCL = GPIO 19.
 
 ## Modos de operación
 
@@ -122,7 +122,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 6. `digi_init()` configura el digipeater WIDEn-N desde `config.json`.
 7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. Ambos se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
 8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, GPIO16/GPIO4, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
-9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO21/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
+9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO13/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
 10. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
 11. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
 12. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
@@ -272,7 +272,7 @@ El firmware incluye un driver SSD1306 propio (sin librería externa) y una tarea
 
 | Señal I2C | GPIO |
 |-----------|------|
-| SDA | GPIO 21 |
+| SDA | GPIO 13 |
 | SCL | GPIO 19 |
 
 Dirección I2C por defecto: `0x3C` (60 decimal). Algunos módulos usan `0x3D` (61).
@@ -429,7 +429,7 @@ Notas:
 - **Gateway IP RFC 1226** — implementado y compila limpio; pendiente verificación en hardware real.
 - **SSTV solo TX** — no hay decodificador RX. Tampoco se admite recepción SSTV.
 - **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.
-- **SD y GPS comparten pines** — GPIO4 (DAT1) y GPIO16 (DAT2) ahora usados por UART2 GPS. La tarjeta SD no puede usarse simultáneamente.
+- **SD e I2C comparten GPIO13** — GPIO13 es el CS/DAT3 de la SD y también el SDA del bus I2C (SSD1306). No se puede usar la tarjeta SD si el display está conectado.
 - **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 - **FIFOs internos** (report.md §2.6) — protegidos con `portMUX_TYPE`; riesgo residual bajo en escenarios de alta carga.
 - **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build innecesariamente.
@@ -457,7 +457,7 @@ Estos son los GPIO **configurados en el código** y los que usa activamente el f
 | GPIO33 | `GPIO_LED_RX`  | LED verde — parpadea al decodificar un paquete AX.25 | Controlado por AFSK.cpp (LED_RX_ON/OFF) |
 | GPIO23 | `GPIO_LED_WARN` | LED rojo — señal de audio fuera de rango (demasiado alta) | Parpadeante mientras dure la condición |
 | GPIO37 | `GPIO_AUDIO_TRIGGER` | Trigger de audio (sin uso activo) | Solo entrada |
-| GPIO21 | `GPIO_I2C_SDA` | I2C SDA — bus SSD1306 y periféricos I2C | |
+| GPIO13 | `GPIO_I2C_SDA` | I2C SDA — bus SSD1306 y periféricos I2C | |
 | GPIO19 | `GPIO_I2C_SCL` | I2C SCL — bus SSD1306 y periféricos I2C | |
 | GPIO16 | `GPIO_GPS_RX`  | UART2 RX — datos NMEA del módulo GPS | Era SD DAT2 (no conectar SD si se usa GPS) |
 | GPIO4  | `GPIO_GPS_TX`  | UART2 TX — configuración módulo GPS (opcional) | Era SD DAT1 |
@@ -480,15 +480,17 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 | GPIO26 | `PTT PIN` | Control PTT radio |
 | GPIO27 | `RX PIN` | RX UART desde radio |
 | GPIO14 | `TX PIN` | TX UART hacia radio |
-| GPIO12 | `SD CARD CLK PIN` | SPI clock SD |
-| GPIO13 | `SD CARD DAT3 PIN` | SPI CS / DAT3 SD |
-| GPIO15 | `SD CARD CMD PIN` | SPI MOSI/CMD SD |
-| GPIO2  | `SD CARD DAT0 PIN` | SPI MISO/DAT0 SD |
-| GPIO0  | `TOUCH PAD 1` | Entrada táctil / libre auxiliar |
-| GPIO4  | `SD CARD DAT1 PIN` | DAT1 SD — **ahora usado como GPS UART2 TX** |
-| GPIO16 | `SD CARD DAT2 PIN` | DAT2 SD — **ahora usado como GPS UART2 RX** |
-| GPIO17 | `SD CARD ENABLE PIN` | Alimentación/enable SD |
-| GPIO18 | `BATTERY MEASURE ENABLE PIN` | Habilita medición batería |
+| GPIO12 | — | Strapping boot (flash voltage) — no conectado a SD |
+| GPIO13 | `SD CARD DAT3 / CS` | SD en modo SPI — **ahora usado como `GPIO_I2C_SDA`** |
+| GPIO15 | `SD CARD CMD / MOSI` | SD en modo SPI — strapping boot |
+| GPIO2  | `SD CARD DAT0 / MISO` | SD en modo SPI — strapping boot |
+| GPIO18 | `SD CARD CLK / SCK` | SD en modo SPI |
+| GPIO5  | `SD CARD ENABLE` | Alimentación/enable SD — no libre |
+| GPIO0  | `TOUCH PAD 1` | Entrada táctil / strapping boot |
+| GPIO4  | — | GPIO libre — **usado como GPS UART2 TX** |
+| GPIO6  | `TOUCH SENSOR` | Sensor táctil — no libre |
+| GPIO16 | — | GPIO libre — **usado como GPS UART2 RX** |
+| GPIO17 | `TOUCH SENSOR` | Sensor táctil — no libre |
 
 ---
 
@@ -520,7 +522,7 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 
 | Función | GPIO |
 |---------|------|
-| SDA | GPIO21 |
+| SDA | GPIO13 |
 | SCL | GPIO19 |
 
 - Bus I2C0, 400 kHz. Dirección SSD1306: 0x3C (60) o 0x3D (61).
@@ -536,25 +538,23 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 | UART2 TX (config GPS, opcional) | GPIO4 |
 
 - Velocidad por defecto: 9600 baud. Configurable en `config.json` (`gps.baud`).
-- GPIO16 y GPIO4 son los pines de SD DAT2 y DAT1. **No usar la SD si el GPS está conectado.**
+- GPIO16 y GPIO4 son GPIOs libres en la Lolin32 Lite (no forman parte del circuito SD de la ESPRI).
 
 ---
 
 #### Tarjeta SD
 
-La SD parece conectada en modo SDIO 4-bit:
+La SD está conectada en modo SPI:
 
 | Señal SD | GPIO |
 |---|---|
-| CLK | GPIO12 |
-| CMD | GPIO15 |
-| DAT0 | GPIO2 |
-| DAT1 | GPIO4 |
-| DAT2 | GPIO16 |
-| DAT3 | GPIO13 |
-| Enable | GPIO17 |
+| Enable (alimentación) | GPIO5 |
+| CS / DAT3 | GPIO13 |
+| MOSI / CMD | GPIO15 |
+| MISO / DAT0 | GPIO2 |
+| SCK / CLK | GPIO18 |
 
-> GPIO12, GPIO15, GPIO2 y GPIO0 son pines de strapping/boot. Hay que evitar niveles incorrectos al arrancar.
+> GPIO15, GPIO2 y GPIO0 son pines de strapping/boot. GPIO13 está reasignado a I2C SDA en el firmware — no se puede usar la SD si el display SSD1306 está conectado.
 
 ---
 
@@ -584,12 +584,10 @@ La SD parece conectada en modo SDIO 4-bit:
 
 | GPIO | Comentarios |
 |---|---|
-| GPIO5  | Libre |
-| GPIO13 | Libre (era SD DAT3/CS) |
-| GPIO22 | Libre (LED integrado Lolin32 — ya no usado por firmware) |
+| GPIO22 | Libre (LED integrado Lolin32 — no usado por firmware) |
 | GPIO32 | Libre (LED verde ESPRI — no usado por firmware) |
 
-> GPIO33 → **LED verde RX** (`GPIO_LED_RX`). GPIO23 → **LED rojo WARN** (`GPIO_LED_WARN`). GPIO19 → **I2C SCL** (SSD1306). GPIO21 → **I2C SDA** (SSD1306). GPIO16 → **GPS UART2 RX**. GPIO4 → **GPS UART2 TX**. Todos asignados en `config.h`.
+> GPIO33 → **LED verde RX** (`GPIO_LED_RX`). GPIO23 → **LED rojo WARN** (`GPIO_LED_WARN`). GPIO19 → **I2C SCL** (SSD1306). GPIO13 → **I2C SDA** (SSD1306). GPIO16 → **GPS UART2 RX**. GPIO4 → **GPS UART2 TX**. Todos asignados en `config.h`.
 
 #### Usos recomendados para los pines libres restantes
 - SPI auxiliar
@@ -602,14 +600,18 @@ La SD parece conectada en modo SDIO 4-bit:
 
 | GPIO | Motivo |
 |---|---|
-| GPIO0 | Strapping boot |
-| GPIO2 | Strapping boot + SD |
-| GPIO12 | Strapping boot |
-| GPIO15 | Strapping boot |
+| GPIO0 | Strapping boot + SD touch pad |
+| GPIO2 | Strapping boot + SD MISO |
+| GPIO5 | SD Enable — no libre |
+| GPIO6 | Sensor táctil ESPRI — no libre |
+| GPIO12 | Strapping boot (flash voltage) |
+| GPIO15 | Strapping boot + SD MOSI |
+| GPIO17 | Sensor táctil ESPRI — no libre |
+| GPIO21 | No expuesto en la Lolin32 Lite |
 | GPIO34 | Solo entrada |
 | GPIO35 | Solo entrada |
-| GPIO36 (VP) | Libre pero solo entrada |
-| GPIO39 (VN) | Libre pero solo entrada |
+| GPIO36 (VP) | Solo entrada |
+| GPIO39 (VN) | Solo entrada |
 
 ---
 
@@ -632,24 +634,25 @@ No sirven para:
 
 ### Resumen rápido
 
-#### Usados (ESPRI / hardware)
-- GPIO0, GPIO2, GPIO4\*, GPIO12, GPIO13, GPIO14, GPIO15, GPIO16\*, GPIO17, GPIO18
-- GPIO25 (DAC audio TX), GPIO26 (PTT), GPIO27 (RX UART)
-- GPIO32 (LED ESPRI — no usado por firmware)
-- GPIO33 (**`GPIO_LED_RX`** — LED verde RX, usado por firmware)
+#### Usados / ocupados (ESPRI / hardware)
+- GPIO0 (strapping/touch), GPIO2 (strapping + SD MISO), GPIO5 (SD Enable)
+- GPIO6 (touch sensor), GPIO12 (strapping), GPIO13\* (SD CS → I2C SDA), GPIO14 (TX radio)
+- GPIO15 (strapping + SD MOSI), GPIO17 (touch sensor), GPIO18 (SD CLK)
+- GPIO21 (no expuesto en Lolin32 Lite)
+- GPIO25 (DAC audio TX), GPIO26 (PTT), GPIO27 (RX UART radio)
+- GPIO32 (LED ESPRI — no usado por firmware), GPIO33 (**`GPIO_LED_RX`**, usado por firmware)
 - GPIO34 (batería ADC), GPIO35 (audio ADC — activo en firmware)
 
-\*GPIO4 y GPIO16 son pines SD reasignados a GPS UART2.
+\*GPIO13 es SD CS reasignado a I2C SDA. GPIO4 y GPIO16 son GPIOs libres usados por GPS UART2.
 
 #### Usados por firmware
-- GPIO25, GPIO26, GPIO35 (audio TX/PTT/RX — ver tabla firmware arriba)
-- GPIO33 (LED_RX verde — parpadea en cada paquete AX.25 decodificado)
-- GPIO23 (LED_WARN rojo — parpadea cuando el audio está demasiado alto)
-- GPIO21, GPIO19 (I2C SDA/SCL — SSD1306)
+- GPIO25, GPIO26, GPIO35 (audio TX/PTT/RX)
+- GPIO33 (LED_RX verde), GPIO23 (LED_WARN rojo)
+- GPIO13, GPIO19 (I2C SDA/SCL — SSD1306)
 - GPIO16, GPIO4 (GPS UART2 RX/TX)
 
 #### Libres “buenos”
-- GPIO5, GPIO13, GPIO22, GPIO32
+- GPIO22, GPIO32
 
 #### Libres solo entrada
 - GPIO36 (VP), GPIO39 (VN)

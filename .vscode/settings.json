@@ -6,5 +6,6 @@
     "target/esp32.cfg"
   ],
   "idf.port": "/dev/ttyUSB0",
-  "idf.currentSetup": "/opt/esp/idf"
+  "idf.currentSetup": "/opt/esp/idf",
+  "idf.adapterTargetName": "esp32"
 }

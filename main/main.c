@@ -391,16 +391,13 @@ void app_main(void)
     file_management_init();
     // Cargamos aquí la configuración por primera vez
     config_load();
-    /*
-    // test ptt
-    for (int i = 0; i < 5; i++) {
-        PTT_Press();
-        vTaskDelay(2500 / portTICK_PERIOD_MS);
-        PTT_Release();
-        vTaskDelay(2500 / portTICK_PERIOD_MS);
-    }*/
 
 #if TNC_MODE == TNC_MODE_KISS
+
+    // GPS y display se inician antes del WiFi para que la pantalla muestre
+    // el estado de conexión durante el proceso.
+    gps_init(config_get());
+    display_init(config_get());
 
 #  if KISS_TRANSPORT == KISS_TRANSPORT_WIFI
     transport_init(&transport_wifi_ops);
@@ -446,9 +443,6 @@ void app_main(void)
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
     afsk_set_dispatch_hook(project_dispatch_hook);
-
-    gps_init(config_get());
-    display_init(config_get());
 
 #elif TNC_MODE == TNC_MODE_APRS
 
