@@ -346,6 +346,14 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
         uint8_t pid  = (p + 1 < buf + len) ? p[1] : 0;
         ESP_LOGI(TAG, "frame %u B  %s>%s  ctrl=0x%02X pid=0x%02X",
                  (unsigned)len, src, dst, ctrl, pid);
+        // Raw hex dump of first 20 bytes: identifies address encoding, is_last bits, ctrl position.
+        // DST[0..5]=callsign(<<1), DST[6]=SSID(bit0=is_last), SRC[7..12], SRC[13], ctrl[14], pid[15].
+        if (len >= 20)
+            ESP_LOGI(TAG, "  hex: %02X%02X%02X%02X%02X%02X%02X "
+                     "%02X%02X%02X%02X%02X%02X%02X %02X %02X  %02X%02X%02X%02X",
+                     buf[0],buf[1],buf[2],buf[3],buf[4],buf[5],buf[6],
+                     buf[7],buf[8],buf[9],buf[10],buf[11],buf[12],buf[13],
+                     buf[14],buf[15],buf[16],buf[17],buf[18],buf[19]);
     }
 
     kiss_send_frame(buf, len);

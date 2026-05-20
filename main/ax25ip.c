@@ -28,7 +28,10 @@
 // ── Module state ─────────────────────────────────────────────────────────────
 
 static struct netif s_netif;
-static bool         s_enabled = false;
+static bool         s_enabled  = false;
+// TUN mode: frames are raw TUN packets (4-byte PI header + IP), no AX.25 headers.
+// Set by ip.mode="tun" in config.json (matches markqvist's tncattach default).
+static bool         s_tun_mode = false;
 
 // Our callsign (6-char, space-padded NUL-terminated) and AX.25 SSID for IP.
 static char    s_call[7];
@@ -57,6 +60,21 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
     if (ip_len > AX25IP_MTU) {
         ESP_LOGW(TAG, "drop: IP frame too large (%u > %d)", ip_len, AX25IP_MTU);
         return ERR_MEM;
+    }
+
+    if (s_tun_mode) {
+        // TUN mode: prepend Linux TUN PI header (flags=0x0000, proto=IPv4 0x0800).
+        // tncattach reads this 4-byte header from the TUN fd before the IP packet.
+        uint8_t frame[4 + AX25IP_MTU];
+        frame[0] = 0x00; frame[1] = 0x00; frame[2] = 0x08; frame[3] = 0x00;
+        uint16_t offset = 4;
+        for (struct pbuf *q = p; q != NULL; q = q->next) {
+            memcpy(frame + offset, q->payload, q->len);
+            offset += q->len;
+        }
+        ESP_LOGI(TAG, "TX %u bytes TUN→RF", ip_len);
+        afsk_queue_tx_frame(frame, (size_t)offset);
+        return ERR_OK;
     }
 
     // AX.25 UI frame layout:
@@ -134,6 +152,9 @@ bool ax25ip_init(cJSON *cfg)
     memcpy(s_call, callsign, (size_t)clen);
     s_ssid = (uint8_t)(cJSON_IsNumber(j_ssid) ? (int)j_ssid->valueint : 0);
 
+    cJSON *j_mode = cJSON_GetObjectItem(ip_obj, "mode");
+    s_tun_mode = cJSON_IsString(j_mode) && strcmp(j_mode->valuestring, "tun") == 0;
+
     // Add netif under lwIP core lock (lwIP already running via WiFi stack).
     LOCK_TCPIP_CORE();
     struct netif *r = netif_add(&s_netif, &addr, &mask, &gw,
@@ -146,9 +167,10 @@ bool ax25ip_init(cJSON *cfg)
     }
 
     s_enabled = true;
-    ESP_LOGI(TAG, "AX.25 IP gateway up: %s/%s  (call=%s-%d  MTU=%d)",
+    ESP_LOGI(TAG, "AX.25 IP gateway up: %s/%s  (call=%s-%d  MTU=%d  mode=%s)",
              j_addr->valuestring, j_mask->valuestring,
-             callsign, (int)s_ssid, AX25IP_MTU);
+             callsign, (int)s_ssid, AX25IP_MTU,
+             s_tun_mode ? "tun" : "ax25");
     ESP_LOGI(TAG, "Add host route:  ip route add %s/%s via <ESP32-WiFi-IP>",
              j_addr->valuestring, j_mask->valuestring);
     return true;
@@ -157,6 +179,36 @@ bool ax25ip_init(cJSON *cfg)
 void ax25ip_rx_frame(const uint8_t *buf, size_t len)
 {
     if (!s_enabled) return;
+
+    // TUN mode: tncattach sends Linux TUN PI header (4 bytes) + raw IPv4.
+    // No AX.25 DST/SRC/CTRL/PID headers are present.
+    if (s_tun_mode) {
+        // Expect: 00 00 08 00 (PI: flags=0, proto=IPv4) + IPv4 header (≥20 bytes)
+        if (len < 8 || buf[0] != 0x00 || buf[1] != 0x00 ||
+            buf[2] != 0x08 || buf[3] != 0x00 || (buf[4] & 0xF0u) != 0x40u) {
+            ESP_LOGW(TAG, "TUN: drop: unexpected frame (len=%u hdr=%02X%02X%02X%02X)",
+                     (unsigned)len, buf[0], buf[1], buf[2], buf[3]);
+            return;
+        }
+        size_t ip_len = len - 4;
+        if (ip_len < 20) {
+            ESP_LOGW(TAG, "TUN: drop: IP payload too short (%u bytes)", (unsigned)ip_len);
+            return;
+        }
+        struct pbuf *q = pbuf_alloc(PBUF_RAW, (uint16_t)ip_len, PBUF_RAM);
+        if (!q) {
+            ESP_LOGW(TAG, "TUN: pbuf_alloc failed (%u bytes)", (unsigned)ip_len);
+            return;
+        }
+        memcpy(q->payload, buf + 4, ip_len);
+        ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP", (unsigned)ip_len);
+        if (s_netif.input(q, &s_netif) != ERR_OK) {
+            ESP_LOGW(TAG, "TUN: lwIP input rejected pbuf");
+            pbuf_free(q);
+        }
+        return;
+    }
+
     if (len < 18) {
         ESP_LOGD(TAG, "drop: frame too short (%u bytes)", (unsigned)len);
         return;
@@ -191,8 +243,10 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
         ESP_LOGW(TAG, "drop: not UI frame (ctrl=0x%02X)", ctrl);
         return;
     }
-    if (pid != AX25_PID_IP) {
-        ESP_LOGD(TAG, "skip: pid=0x%02X (not IP 0xCC)", pid);
+    // Accept both RFC 1226 IP PID (0xCC) and AX.25 no-layer-3 PID (0xF0).
+    // tncattach (markqvist) uses 0xF0 by default; kissattach and some APRS TNCs use 0xCC.
+    if (pid != AX25_PID_IP && pid != 0xF0u) {
+        ESP_LOGW(TAG, "skip: pid=0x%02X (not IP 0xCC or 0xF0)", pid);
         return;
     }
 
