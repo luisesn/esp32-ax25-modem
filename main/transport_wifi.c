@@ -40,12 +40,23 @@ static esp_timer_handle_t s_reconnect_timer;
 // que falla con EBADF de forma inocua.
 static volatile int s_client_fd = -1;
 
+// Cached network credentials (populated at init, used by reconnect task).
+#define MAX_WIFI_NETS 5
+typedef struct { char ssid[32]; char pass[64]; int timeout_s; } wifi_net_t;
+static wifi_net_t   s_nets[MAX_WIFI_NETS];
+static int          s_net_count  = 0;
+static bool         s_ap_enabled = false;
+static char         s_ap_ssid[32] = "APRS-TNC";
+static char         s_ap_pass[64] = "";
+static TaskHandle_t s_reconnect_task_handle = NULL;
+
 // ---------------------------------------------------------------------------
 // WiFi event handler
 // ---------------------------------------------------------------------------
 
 static void reconnect_timer_cb(void *arg) {
-    if (s_sta_active) esp_wifi_connect();
+    if (s_reconnect_task_handle)
+        xTaskNotifyGive(s_reconnect_task_handle);
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t base,
@@ -201,6 +212,17 @@ static void wifi_connect(void) {
     cJSON *wifi_j = cJSON_GetObjectItem(config, "wifi");
     cJSON *ap_j   = cJSON_GetObjectItem(config, "ap");
 
+    // Cache AP config for reconnect task (read before STA loop so it's always populated).
+    if (ap_j) {
+        cJSON *it;
+        it = cJSON_GetObjectItem(ap_j, "enabled");
+        if (cJSON_IsBool(it)) s_ap_enabled = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItem(ap_j, "ssid");
+        if (cJSON_IsString(it)) snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", it->valuestring);
+        it = cJSON_GetObjectItem(ap_j, "password");
+        if (cJSON_IsString(it)) snprintf(s_ap_pass, sizeof(s_ap_pass), "%s", it->valuestring);
+    }
+
     bool connected   = false;
     bool sta_started = false;
     int  net_count   = 0;
@@ -225,6 +247,14 @@ static void wifi_connect(void) {
             timeout_s = (int)it->valuedouble;
 
         if (!ssid || !ssid[0]) continue;
+
+        // Cache credentials for the reconnect task.
+        if (s_net_count < MAX_WIFI_NETS) {
+            snprintf(s_nets[s_net_count].ssid, sizeof(s_nets[s_net_count].ssid), "%s", ssid);
+            snprintf(s_nets[s_net_count].pass, sizeof(s_nets[s_net_count].pass), "%s", password ? password : "");
+            s_nets[s_net_count].timeout_s = timeout_s;
+            s_net_count++;
+        }
 
         // Stop previous attempt cleanly before reconfiguring.
         if (sta_started) {
@@ -262,10 +292,11 @@ static void wifi_connect(void) {
         EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
                                                pdFALSE, pdTRUE,
                                                pdMS_TO_TICKS((uint32_t)timeout_s * 1000UL));
-        // Disable auto-reconnect and cancel any pending retry timer.
-        s_sta_active = false;
-        esp_timer_stop(s_reconnect_timer);
+        // Keep s_sta_active=true on success so disconnect events trigger reconnect.
+        // Only clear it on timeout (failed attempt).
         connected = (bits & WIFI_CONNECTED_BIT) != 0;
+        if (!connected) s_sta_active = false;
+        esp_timer_stop(s_reconnect_timer);
 
         if (!connected)
             ESP_LOGW(TAG, "No se pudo conectar a '%s'%s", ssid,
@@ -368,10 +399,89 @@ static void server_task(void *arg) {
 }
 
 // ---------------------------------------------------------------------------
+// Reconexión automática: cicla todas las redes y cae a AP si todas fallan
+// ---------------------------------------------------------------------------
+
+static void wifi_reconnect_task(void *arg) {
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        if (g_wifi_status.state == WIFI_STATUS_HOTSPOT) continue;
+
+        ESP_LOGI(TAG, "Reconexión: probando %d red(es)...", s_net_count);
+        s_sta_active = false;
+        esp_timer_stop(s_reconnect_timer);
+
+        // Stop current WiFi cleanly before reconfiguring.
+        xEventGroupClearBits(s_wifi_eg, WIFI_STOPPED_BIT);
+        esp_wifi_stop();
+        xEventGroupWaitBits(s_wifi_eg, WIFI_STOPPED_BIT, pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
+
+        bool connected = false;
+        for (int ni = 0; ni < s_net_count && !connected; ni++) {
+            xEventGroupClearBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+            g_wifi_status.state            = WIFI_STATUS_CONNECTING;
+            g_wifi_status.net_index        = ni;
+            g_wifi_status.net_count        = s_net_count;
+            g_wifi_status.timeout_s        = s_nets[ni].timeout_s;
+            g_wifi_status.attempt_start_us = esp_timer_get_time();
+            snprintf(g_wifi_status.ssid, sizeof(g_wifi_status.ssid), "%s", s_nets[ni].ssid);
+
+            wifi_config_t sta_cfg = {};
+            snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),     "%s", s_nets[ni].ssid);
+            snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s", s_nets[ni].pass);
+
+            s_sta_active = true;
+            esp_wifi_set_mode(WIFI_MODE_STA);
+            esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+            esp_wifi_start();  // STA_START event calls esp_wifi_connect() automatically
+
+            ESP_LOGI(TAG, "[%d/%d] Reconect: '%s' (timeout %ds)...",
+                     ni + 1, s_net_count, s_nets[ni].ssid, s_nets[ni].timeout_s);
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_eg, WIFI_CONNECTED_BIT,
+                                                    pdFALSE, pdTRUE,
+                                                    pdMS_TO_TICKS((uint32_t)s_nets[ni].timeout_s * 1000UL));
+            connected = (bits & WIFI_CONNECTED_BIT) != 0;
+            if (!connected) {
+                s_sta_active = false;
+                esp_timer_stop(s_reconnect_timer);
+                ESP_LOGW(TAG, "Reconect: '%s' falló%s", s_nets[ni].ssid,
+                         ni + 1 < s_net_count ? ", probando siguiente..." : ".");
+                if (ni + 1 < s_net_count) {
+                    xEventGroupClearBits(s_wifi_eg, WIFI_STOPPED_BIT);
+                    esp_wifi_stop();
+                    xEventGroupWaitBits(s_wifi_eg, WIFI_STOPPED_BIT, pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
+                }
+            } else {
+                ESP_LOGI(TAG, "Reconectado a '%s'", s_nets[ni].ssid);
+                // s_sta_active stays true to allow future reconnects
+            }
+        }
+
+        if (!connected) {
+            xEventGroupClearBits(s_wifi_eg, WIFI_STOPPED_BIT);
+            esp_wifi_stop();
+            xEventGroupWaitBits(s_wifi_eg, WIFI_STOPPED_BIT, pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
+            if (s_ap_enabled) {
+                ESP_LOGW(TAG, "Todas las redes fallaron. Iniciando AP de respaldo...");
+                g_wifi_status.state = WIFI_STATUS_HOTSPOT;
+                snprintf(g_wifi_status.ssid, sizeof(g_wifi_status.ssid), "%s", s_ap_ssid);
+                wifi_start_ap(s_ap_ssid, s_ap_pass);
+            } else {
+                ESP_LOGW(TAG, "Todas las redes fallaron. AP deshabilitado, sin red.");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Operaciones del transporte
 // ---------------------------------------------------------------------------
 
 static void wifi_transport_init(void) {
+    // Create reconnect task before wifi_connect() so the handle is valid
+    // before any disconnect event can fire.
+    xTaskCreate(wifi_reconnect_task, "wifi_reconn", 3072, NULL, 5, &s_reconnect_task_handle);
     wifi_connect();
     xTaskCreate(server_task, "kiss_tcp_srv", 4096, NULL, 7, NULL);
 }

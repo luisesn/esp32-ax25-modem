@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-18): compila limpio (binary ~960 KB, 43 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 implementado. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-20): compila limpio (binary ~965 KB, 43 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -61,7 +61,7 @@ esp32-aprs-modem/
 │   │                                  struct g_gps_pos con mutex FreeRTOS
 │   ├── display.h / display.c          driver SSD1306 I2C 128×64 (sin librería externa),
 │   │                                  task de refresco 2 Hz con callsign, IP, GPS, audio
-│   ├── ax25ip.h / ax25ip.c            gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
+│   ├── ax25ip.h / ax25ip.c            gateway IP sobre radio; modo TUN (tncattach) o AX.25 RFC 1226
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
 │   ├── spiffs_data/config.json        configuración activa (credenciales reales — no subir a git)
@@ -111,7 +111,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 ## Qué hace el firmware (modo KISS TNC)
 
 1. `config_load()` lee `config.json` desde la partición SPIFFS (callsign, WiFi, AP, IP, digi, morse).
-2. `transport_init(&transport_wifi_ops)` conecta a la red WiFi configurada e imprime la IP asignada.
+2. `transport_init(&transport_wifi_ops)` conecta a la red WiFi configurada e imprime la IP asignada. Si la conexión se pierde en cualquier momento, la tarea `wifi_reconn` cicla automáticamente por todas las redes configuradas (en orden) y cae al modo AP si todas fallan.
 3. `ax25ip_init()` activa el gateway IP RFC 1226 si `ip.enabled: true` en config.json.
 4. `kiss_init(on_kiss_frame)` registra el callback que transmite por radio las tramas recibidas del host.
 5. `APRS_init()` + `APRS_set_raw_hook(on_ax25_raw_frame)` arranca el demodulador AFSK y registra el callback que:
@@ -348,36 +348,53 @@ Dirección I2C por defecto: `0x3C` (60 decimal). Algunos módulos usan `0x3D` (6
 
 ---
 
-## Gateway IP RFC 1226 (opcional)
+## Gateway IP sobre radio (opcional)
 
-El ESP32 puede actuar como gateway entre la red WiFi y la frecuencia de radio, encapsulando tráfico IP en tramas AX.25 UI con PID=0xCC según RFC 1226.
+El ESP32 puede actuar como gateway entre la red WiFi y la frecuencia de radio. Soporta dos modos:
+
+| Modo | `ip.mode` | Descripción |
+|------|-----------|-------------|
+| **TUN** (por defecto) | `"tun"` | Compatible con `tncattach` de markqvist (TCP). El payload KISS es la cabecera TUN de Linux (`00 00 08 00`) + paquete IPv4 raw. **Verificado en hardware.** |
+| **AX.25** | `"ax25"` | RFC 1226 clásico: encapsula IP en tramas AX.25 UI con PID=0xCC. Compatible con `kissattach` (ax25-tools). |
 
 Para activarlo: editar `config.json` vía la pestaña CONFIG de la UI (o reflashear SPIFFS):
 ```json
-"ip": {"enabled": true, "addr": "44.61.3.71", "netmask": "255.255.255.0", "gateway": "44.61.3.1", "ssid": 1}
+"ip": {
+  "enabled": true,
+  "mode": "tun",
+  "addr": "44.61.3.75",
+  "netmask": "255.255.255.0",
+  "gateway": "44.61.3.1",
+  "ssid": 1
+}
 ```
 
-En el PC host:
-```bash
-ip route add 44.61.3.0/24 via <IP-WiFi-del-ESP32>
-```
-
-**Nota**: requiere `CONFIG_LWIP_IP_FORWARD=y` (incluido en `sdkconfig.defaults`). MTU máximo: 300 bytes (AX25_MAX_FRAME_LEN limitado a 600 por `CUSTOM_FRAME_SIZE`).
+**Nota**: requiere `CONFIG_LWIP_IP_FORWARD=y` (incluido en `sdkconfig.defaults`). MTU máximo: 300 bytes.
 
 ## Conectar al host
 
-### Con tncattach (IP sobre AX.25)
+### Con tncattach (gateway IP bidireccional, verificado)
+
+Usa la versión TCP de [markqvist/tncattach](https://github.com/markqvist/tncattach) con modo `"tun"` activo en `config.json`:
 
 ```bash
 # Instalar tncattach
 git clone https://github.com/markqvist/tncattach && cd tncattach && make && sudo make install
 
-# Crear interfaz de red AX.25
-sudo tncattach --tcp <ip_del_esp32> 8001 --nosmall --ipv4 44.61.3.72/24
+# Crear interfaz TUN (asigna IP al host en la misma /24 que el ESP32)
+sudo ./tncattach -T -H <ip_wifi_del_esp32> -P 8001 --mtu 250 --noipv6 --ipv4 44.61.3.73/24
 
-# Verificar
-ip link show tnc0
-sudo tcpdump -i tnc0 -n    # capturar tramas AX.25 recibidas por radio
+# El ESP32 tiene 44.61.3.75 → ping de prueba:
+ping 44.61.3.75
+
+# Capturar tráfico RF
+sudo tcpdump -i tnc0 -n
+```
+
+El log del ESP32 mostrará por cada ping:
+```
+I ax25ip: RX 84 bytes TUN-IP←RF → lwIP
+I ax25ip: TX 84 bytes TUN→RF
 ```
 
 ### Con direwolf (iGate / gateway APRS)
@@ -420,7 +437,8 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
   },
   "ip": {
     "enabled": false,
-    "addr": "44.61.3.71",
+    "mode": "tun",
+    "addr": "44.61.3.75",
     "netmask": "255.255.255.0",
     "gateway": "44.61.3.1",
     "ssid": 1
@@ -453,6 +471,9 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "active_modem": "best",
     "squelch_threshold": 0,
     "deemphasis_enabled": false
+  },
+  "remote_cmd": {
+    "enabled": true
   }
 }
 ```
@@ -468,7 +489,8 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
 | `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
 | `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |
-| `ip` | `enabled` | bool | Activa gateway IP RFC 1226 sobre AX.25 |
+| `ip` | `enabled` | bool | Activa gateway IP sobre radio |
+| `ip` | `mode` | string | `"tun"` (tncattach, verificado) o `"ax25"` (RFC 1226 / kissattach) |
 | `digi` | `alias` | array | Aliases a digipeatear (WIDEn-N y aliases legacy) |
 | `morse` | `callsign` | string | Indicativo CW (vacío → usa `aprs.callsign`) |
 | `morse` | `period_s` | int | Intervalo entre balizas CW (segundos) |
@@ -479,6 +501,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo, sin dedup) |
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
+| `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo |
 
 > **Nota sobre `rx.active_modem: "best"`**: en este modo ambos demoduladores decodifican de forma independiente. Si el mismo paquete lo decodifican los dos, el host KISS recibirá dos tramas idénticas. El host (tncattach, direwolf) debe manejar los duplicados si es necesario.
 
@@ -487,8 +510,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 ## Limitaciones actuales
 
 - **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
-- **Gateway IP RFC 1226** — implementado y compila limpio; pendiente verificación en hardware real.
-- **SSTV solo TX** — no hay decodificador RX. Tampoco se admite recepción SSTV.
+- **SSTV solo TX** — no hay decodificador RX.
 - **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.
 - **SD e I2C comparten GPIO13** — GPIO13 es el CS/DAT3 de la SD y también el SDA del bus I2C (SSD1306). No se puede usar la tarjeta SD si el display está conectado.
 - **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
