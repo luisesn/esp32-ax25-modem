@@ -18,6 +18,7 @@ idf_component_register(
         "sstv.c"
         "gps.c"
         "display.c"
+        "remote_cmd.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

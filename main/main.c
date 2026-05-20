@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "esp_system.h"
+#include "esp_log.h"
 
 #include "config.h"
 #include "aux_config.h"
@@ -326,8 +327,27 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
     audio_stream_ws_send_text(ack_json);
 }
 
+static const char *TAG = "ax25rx";
+
 // Trama AX.25 recibida por radio → codificar en KISS → enviar al host.
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
+    // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
+    // If nothing appears here, the modem is not decoding (audio/RF issue).
+    if (len >= 16) {
+        bool il;
+        char dst[10], src[10];
+        const uint8_t *p = buf;
+        p = ax25_decode_addr(p, dst, &il);
+        p = ax25_decode_addr(p, src, &il);
+        while (!il && (p + 7) <= buf + len) {
+            char rpt[10]; p = ax25_decode_addr(p, rpt, &il);
+        }
+        uint8_t ctrl = (p     < buf + len) ? p[0] : 0;
+        uint8_t pid  = (p + 1 < buf + len) ? p[1] : 0;
+        ESP_LOGI(TAG, "frame %u B  %s>%s  ctrl=0x%02X pid=0x%02X",
+                 (unsigned)len, src, dst, ctrl, pid);
+    }
+
     kiss_send_frame(buf, len);
     try_auto_ack(buf, len);
     bool digipeated = digi_process_frame(buf, len);

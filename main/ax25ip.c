@@ -156,7 +156,11 @@ bool ax25ip_init(cJSON *cfg)
 
 void ax25ip_rx_frame(const uint8_t *buf, size_t len)
 {
-    if (!s_enabled || len < 18) return;  // 16-byte header + at least 2 bytes IP
+    if (!s_enabled) return;
+    if (len < 18) {
+        ESP_LOGD(TAG, "drop: frame too short (%u bytes)", (unsigned)len);
+        return;
+    }
 
     const uint8_t *p   = buf;
     const uint8_t *end = buf + len;
@@ -175,12 +179,28 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
         p += 7;
     }
 
-    if (p + 2 > end) return;
-    if (*p++ != AX25_CTRL_UI) return;    // not a UI frame
-    if (*p++ != AX25_PID_IP)  return;    // not IP
+    if (p + 2 > end) {
+        ESP_LOGW(TAG, "drop: no room for ctrl+pid after addresses");
+        return;
+    }
+
+    uint8_t ctrl = *p++;
+    uint8_t pid  = *p++;
+
+    if (ctrl != AX25_CTRL_UI) {
+        ESP_LOGW(TAG, "drop: not UI frame (ctrl=0x%02X)", ctrl);
+        return;
+    }
+    if (pid != AX25_PID_IP) {
+        ESP_LOGD(TAG, "skip: pid=0x%02X (not IP 0xCC)", pid);
+        return;
+    }
 
     size_t ip_len = (size_t)(end - p);
-    if (ip_len < 20) return;             // shorter than minimum IP header
+    if (ip_len < 20) {
+        ESP_LOGW(TAG, "drop: IP payload too short (%u bytes)", (unsigned)ip_len);
+        return;
+    }
 
     // Allocate pbuf and copy IP payload
     struct pbuf *q = pbuf_alloc(PBUF_RAW, (uint16_t)ip_len, PBUF_RAM);
@@ -190,9 +210,11 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     }
     memcpy(q->payload, p, ip_len);
 
-    ESP_LOGD(TAG, "RX %u bytes IP←AX.25", (unsigned)ip_len);
+    ESP_LOGI(TAG, "RX %u bytes IP←AX.25 → lwIP", (unsigned)ip_len);
 
     // Inject into lwIP (tcpip_input is task-safe; sends msg to tcpip task).
-    if (s_netif.input(q, &s_netif) != ERR_OK)
+    if (s_netif.input(q, &s_netif) != ERR_OK) {
+        ESP_LOGW(TAG, "lwIP input rejected pbuf");
         pbuf_free(q);
+    }
 }
