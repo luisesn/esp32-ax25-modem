@@ -20,6 +20,7 @@
 #include "sstv.h"
 #include "gps.h"
 #include "display.h"
+#include "remote_cmd.h"
 
 #include "device.h"
 
@@ -272,7 +273,19 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
     const uint8_t *brace = NULL;
     for (const uint8_t *q = txt + tlen - 1; q >= txt; q--)
         if (*q == '{') { brace = q; break; }
-    if (!brace) return;
+
+    if (!brace) {
+        // No message ID — can't ACK, but still dispatch remote commands
+        size_t cmd_len = tlen > 67 ? 67 : tlen;
+        char cmd_text[68]; char src_b[7]; int src_s = 0;
+        memcpy(cmd_text, txt, cmd_len); cmd_text[cmd_len] = '\0';
+        char *d = strchr(src_call, '-');
+        if (d) { int l = (int)(d - src_call); if (l > 6) l = 6;
+                 strncpy(src_b, src_call, (size_t)l); src_b[l] = '\0'; src_s = atoi(d + 1); }
+        else   { strncpy(src_b, src_call, 6); src_b[6] = '\0'; }
+        remote_cmd_handle(src_b, src_s, cmd_text);
+        return;
+    }
 
     char msg_id[6]; size_t id_len = 0;
     const uint8_t *q = brace + 1;
@@ -290,6 +303,16 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
         src_ssid_num = atoi(dash + 1);
     } else {
         strncpy(src_base, src_call, 6); src_base[6] = '\0';
+    }
+
+    // Remote command hook for messages with {NNN} ID
+    {
+        size_t cmd_len = (size_t)(brace - txt);
+        if (cmd_len > 67) cmd_len = 67;
+        char cmd_text[68];
+        memcpy(cmd_text, txt, cmd_len);
+        cmd_text[cmd_len] = '\0';
+        remote_cmd_handle(src_base, src_ssid_num, cmd_text);
     }
 
     printf("AUTO-ACK → %s-%d ack%s\n", src_base, src_ssid_num, msg_id);
@@ -439,6 +462,7 @@ void app_main(void)
 
     digi_init(config_get());
     morse_init(config_get());
+    remote_cmd_init(config_get());
 
     // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
     // Debe llamarse después de transport_init (WiFi ya conectado).
