@@ -507,7 +507,7 @@ void app_main(void)
     AFSK_set_leds(GPIO_LED_TX, GPIO_LED_RX);
 
     const char *callsign = "NO0CALL";
-    int ssid = 1;
+    int ssid = 0;
     cJSON *cfg = config_get();
     if (cfg) {
         cJSON *aprs_obj = cJSON_GetObjectItem(cfg, "aprs");
@@ -515,11 +515,8 @@ void app_main(void)
             cJSON *cs = cJSON_GetObjectItem(aprs_obj, "callsign");
             if (cJSON_IsString(cs) && cs->valuestring[0] != '\0')
                 callsign = cs->valuestring;
-        }
-        cJSON *ip_obj = cJSON_GetObjectItem(cfg, "ip");
-        if (ip_obj) {
-            cJSON *s = cJSON_GetObjectItem(ip_obj, "ssid");
-            if (cJSON_IsNumber(s)) ssid = (int)s->valueint;
+            cJSON *ss = cJSON_GetObjectItem(aprs_obj, "ssid");
+            if (cJSON_IsNumber(ss)) ssid = (int)ss->valueint;
         }
     }
     APRS_setCallsign(callsign, ssid);

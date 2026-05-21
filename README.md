@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-20): compila limpio (binary ~965 KB, 43 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración y grabación de audio. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-21): compila limpio (binary ~958 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio y actualización OTA de firmware. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -56,6 +56,8 @@ esp32-aprs-modem/
 │   ├── morse.h / morse.c              baliza morse CW periódica (tono, WPM, periodo, one-shot)
 │   ├── sstv.h / sstv.c                TX SSTV (Martin M1/M2, Scottie S1, Robot 36/72);
 │   │                                  JPEG on-the-fly vía ROM TJpgDec; REST: /api/sstv/*
+│   ├── ota.h / ota.c                  actualización OTA de firmware vía HTTP
+│   │                                  (POST /api/ota/upload, validación magic 0xE9, reboot 3 s)
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
 │   ├── gps.h / gps.c                  receptor GPS por UART2 (NMEA $GPRMC/$GPGGA),
 │   │                                  struct g_gps_pos con mutex FreeRTOS
@@ -87,9 +89,9 @@ esp32-aprs-modem/
 
 ## Dependencias
 
-- **ESP-IDF v6.1** (usa `dac_continuous`, `adc_continuous`, `esp_wifi`, `esp_netif`, `spiffs`, `esp_http_server`, `esp_timer`).
+- **ESP-IDF v6.1** (usa `dac_continuous`, `adc_continuous`, `esp_wifi`, `esp_netif`, `spiffs`, `esp_http_server`, `esp_timer`, `app_update`).
 - Componentes IDF requeridos (declarados en `main/CMakeLists.txt`):
-  `esp_wifi`, `nvs_flash`, `esp_netif`, `lwip`, `driver`, `esp_driver_dac`, `esp_driver_gpio`, `esp_driver_uart`, `esp_driver_i2c`, `esp_adc`, `spiffs`, `esp_http_server`, `vfs`, `espressif__cjson`, `esp_timer`.
+  `esp_wifi`, `nvs_flash`, `esp_netif`, `lwip`, `driver`, `esp_driver_dac`, `esp_driver_gpio`, `esp_driver_uart`, `esp_driver_i2c`, `esp_adc`, `spiffs`, `esp_http_server`, `vfs`, `espressif__cjson`, `esp_timer`, `app_update`.
 
 ## Compilación y flasheo
 
@@ -121,7 +123,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
    - Inyecta paquetes IP en la pila lwIP si PID=0xCC (`ax25ip_rx_frame`).
    - Notifica a los clientes WebSocket con JSON `{"src":..., "dst":..., "path":..., "info":...}`.
 6. `digi_init()` configura el digipeater WIDEn-N desde `config.json`.
-7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. Ambos se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
+7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. `ota_init()` registra el endpoint `POST /api/ota/upload`. Los dos primeros se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
 8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, GPIO16/GPIO4, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
 9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO13/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
 10. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
@@ -136,6 +138,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 - **Pestaña MENSAJE**: formulario para transmitir mensajes APRS directamente desde el navegador.
 - **Pestaña POSICIÓN**: formulario para transmitir baliza de posición APRS (lat/lon decimal, símbolo, comentario). Botón de baliza Morse on-demand.
 - **Pestaña CONFIG**: editor JSON del `config.json` completo. Guardar recarga el digipeater y la baliza morse sin reiniciar el firmware.
+- **Pestaña OTA**: sube un `.bin` generado por ESP-IDF para actualizar el firmware via OTA. Barra de progreso de subida, validación del magic byte del ESP32 (0xE9), y reinicio automático a los 3 s tras un flash exitoso.
 - **Audio**: streaming de audio de recepción en tiempo real vía WebSocket (IMA ADPCM, 9600 Hz). Botón de grabación para capturar audio y descargar como WAV. También disponible como stream WAV en `http://<IP>:8080/`.
 
 ## REST API
@@ -158,6 +161,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/sstv/stop`        | Aborta la transmisión SSTV en curso. El firmware termina la línea actual y envía `{"type":"sstv_aborted"}` por WebSocket |
 | `POST`   | `/api/sstv/upload`      | Sube JPEG vía `multipart/form-data` (partes: `name` + `image`; máx. 200 KB, 10 imágenes) |
 | `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
+| `POST`   | `/api/ota/upload`       | Actualización OTA. Body: binario raw (`application/octet-stream`). Valida magic 0xE9, flashea partición inactiva y reinicia en 3 s |
 
 ## Digipeater WIDEn-N
 
@@ -167,8 +171,7 @@ El firmware incluye un digipeater AX.25 compatible WIDEn-N configurado desde `co
 "digi": {
   "enabled": true,
   "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
-  "callsign": "TU_INDICATIVO",
-  "ssid": 0
+  "comment": "ESP32-DIGI"
 }
 ```
 
@@ -186,14 +189,13 @@ Identificación CW periódica configurable desde `config.json`:
 ```json
 "morse": {
   "enabled": true,
-  "callsign": "",
   "tone_hz": 1000,
   "wpm": 20,
   "period_s": 600
 }
 ```
 
-- `callsign` vacío usa `aprs.callsign` como fallback.
+- El indicativo CW siempre se toma de `aprs.callsign`.
 - Se despacha desde `receive_audio_task` (propietaria del I2S0) para respetar el mutex ADC/DAC. El mecanismo de despacho usa `afsk_set_dispatch_hook()` para mantener la librería LibAPRS libre de dependencias del proyecto.
 - Activable on-demand con `POST /api/morse/trigger` o el botón "Morse" en la UI web.
 
@@ -227,6 +229,36 @@ Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El 
 - El JPEG debe caber en la partición SPIFFS (704 KB total, compartida con `index.html` y `config.json`).
 - No se admite recepción SSTV (solo TX).
 - La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
+
+## Actualización OTA de firmware
+
+El firmware soporta actualización Over-The-Air desde el navegador o con `curl`, sin necesidad de cable serie ni reflashear SPIFFS.
+
+### Desde la UI web
+
+1. Abre `http://<IP-del-ESP32>/` y ve a la pestaña **OTA**.
+2. Selecciona el `.bin` generado por ESP-IDF (`build/esp32-aprs-modem.bin`).
+3. Pulsa **Flashear** — la barra de progreso refleja la subida. Los eventos `ota_progress` llegan por WebSocket.
+4. El firmware valida el magic byte (`0xE9`), escribe en la partición inactiva y reinicia automáticamente en 3 s.
+
+### Con curl
+
+```bash
+curl -X POST http://<IP-del-ESP32>/api/ota/upload \
+     -H "Content-Type: application/octet-stream" \
+     --data-binary @build/esp32-aprs-modem.bin
+```
+
+Respuesta en caso de éxito: `{"ok":true}`. El ESP32 reinicia 3 s después.
+
+### Detalles de implementación
+
+- La partición SPIFFS (`config.json`, imágenes SSTV) **no se toca**; solo cambia la partición de aplicación inactiva.
+- Si el `.bin` no empieza por el magic byte ESP32 (`0xE9`), la subida se rechaza antes de escribir nada.
+- No se admiten subidas concurrentes: una segunda petición mientras hay OTA en curso recibe `503`.
+- No hay rollback automático configurado (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` no activo); si el nuevo firmware no arranca, hay que reflashear por serie.
+
+---
 
 ## GPS (NMEA por UART2)
 
@@ -364,8 +396,7 @@ Para activarlo: editar `config.json` vía la pestaña CONFIG de la UI (o reflash
   "mode": "tun",
   "addr": "44.61.3.75",
   "netmask": "255.255.255.0",
-  "gateway": "44.61.3.1",
-  "ssid": 1
+  "gateway": "44.61.3.1"
 }
 ```
 
@@ -440,19 +471,15 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "mode": "tun",
     "addr": "44.61.3.75",
     "netmask": "255.255.255.0",
-    "gateway": "44.61.3.1",
-    "ssid": 1
+    "gateway": "44.61.3.1"
   },
   "digi": {
     "enabled": false,
     "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
-    "callsign": "TU_INDICATIVO",
-    "ssid": 0,
     "comment": "ESP32-DIGI"
   },
   "morse": {
     "enabled": false,
-    "callsign": "",
     "tone_hz": 1000,
     "wpm": 20,
     "period_s": 600
@@ -492,7 +519,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `ip` | `enabled` | bool | Activa gateway IP sobre radio |
 | `ip` | `mode` | string | `"tun"` (tncattach, verificado) o `"ax25"` (RFC 1226 / kissattach) |
 | `digi` | `alias` | array | Aliases a digipeatear (WIDEn-N y aliases legacy) |
-| `morse` | `callsign` | string | Indicativo CW (vacío → usa `aprs.callsign`) |
+| `digi` | `comment` | string | Comentario libre (informativo, no transmitido) |
 | `morse` | `period_s` | int | Intervalo entre balizas CW (segundos) |
 | `gps` | `baud` | int | Velocidad UART del módulo GPS |
 | `gps` | `use_for_beacon` | bool | Reservado: usar posición GPS en balizas APRS (futuro) |

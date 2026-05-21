@@ -122,7 +122,6 @@ bool ax25ip_init(cJSON *cfg)
     cJSON *j_addr = cJSON_GetObjectItem(ip_obj, "addr");
     cJSON *j_mask = cJSON_GetObjectItem(ip_obj, "netmask");
     cJSON *j_gw   = cJSON_GetObjectItem(ip_obj, "gateway");
-    cJSON *j_ssid = cJSON_GetObjectItem(ip_obj, "ssid");
 
     if (!cJSON_IsString(j_addr) || !cJSON_IsString(j_mask)) {
         ESP_LOGE(TAG, "ip.addr / ip.netmask missing or invalid");
@@ -138,19 +137,22 @@ bool ax25ip_init(cJSON *cfg)
     ip4_addr_set_zero(&gw);
     if (cJSON_IsString(j_gw)) ip4addr_aton(j_gw->valuestring, &gw);
 
-    // Callsign from aprs section; SSID from ip section.
+    // Callsign and SSID from aprs section (same identity as the rest of the station).
     cJSON *aprs_obj = cJSON_GetObjectItem(cfg, "aprs");
     const char *callsign = "NOCALL";
+    int aprs_ssid = 0;
     if (aprs_obj) {
         cJSON *cs = cJSON_GetObjectItem(aprs_obj, "callsign");
         if (cJSON_IsString(cs) && cs->valuestring[0]) callsign = cs->valuestring;
+        cJSON *ss = cJSON_GetObjectItem(aprs_obj, "ssid");
+        if (cJSON_IsNumber(ss)) aprs_ssid = (int)ss->valueint;
     }
 
     // Build padded 6-char callsign
     memset(s_call, ' ', 6); s_call[6] = '\0';
     int clen = (int)strlen(callsign); if (clen > 6) clen = 6;
     memcpy(s_call, callsign, (size_t)clen);
-    s_ssid = (uint8_t)(cJSON_IsNumber(j_ssid) ? (int)j_ssid->valueint : 0);
+    s_ssid = (uint8_t)aprs_ssid;
 
     cJSON *j_mode = cJSON_GetObjectItem(ip_obj, "mode");
     s_tun_mode = cJSON_IsString(j_mode) && strcmp(j_mode->valuestring, "tun") == 0;
