@@ -1,6 +1,7 @@
 #include "audio_stream.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -671,6 +672,21 @@ void audio_stream_ws_send_text(const char *text) {
     // wrapped queda en el ring buffer — no liberar aquí
 }
 
+// ─── Reboot endpoint ──────────────────────────────────────────────────────────
+
+static void reboot_delay_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(800));
+    esp_restart();
+}
+
+static esp_err_t reboot_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    xTaskCreate(reboot_delay_task, "reboot", 1024, NULL, 3, NULL);
+    return ESP_OK;
+}
+
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {
@@ -739,6 +755,11 @@ void audio_stream_init(void) {
         .method  = HTTP_GET,
         .handler = rx_stats_handler,
     };
+    static const httpd_uri_t uri_reboot = {
+        .uri     = "/api/reboot",
+        .method  = HTTP_POST,
+        .handler = reboot_handler,
+    };
 
     s_log_mutex = xSemaphoreCreateMutex();
 
@@ -752,6 +773,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_morse_trigger);
     httpd_register_uri_handler(s_httpd, &uri_log);
     httpd_register_uri_handler(s_httpd, &uri_rx_stats);
+    httpd_register_uri_handler(s_httpd, &uri_reboot);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

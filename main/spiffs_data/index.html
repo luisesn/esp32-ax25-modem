@@ -19,10 +19,12 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   color:#7ecfff;border:1px solid #7ecfff;border-radius:4px;cursor:pointer;transition:background .2s}
 #btn:hover{background:#254f80}
 #btn:disabled{opacity:.4;cursor:default}
-#meter-wrap{width:260px;height:12px;background:#1a1a1a;border:1px solid #333;
-            border-radius:2px;overflow:hidden}
+#meter-wrap{width:260px;height:12px;
+            background:linear-gradient(90deg,#3a1010 0%,#3a1010 6.3%,#0d2a0d 6.3%,#0d2a0d 90.6%,#3a1010 90.6%,#3a1010 100%);
+            border:1px solid #333;border-radius:2px;overflow:hidden;position:relative}
 #meter{height:100%;width:0;
-       background:linear-gradient(90deg,#2a8a2a,#8a8a2a,#8a2a2a);transition:width .05s}
+       background:linear-gradient(90deg,#8a3030 0%,#8a3030 6.3%,#2a9a2a 9%,#2a9a2a 88%,#8a3030 92%,#8a3030 100%);
+       background-size:260px 100%;background-repeat:no-repeat;transition:width .05s}
 #log-hdr{padding:.35rem .6rem;font-size:.7rem;color:#4a9a4a;
          border-bottom:1px solid #1a2a1a;letter-spacing:.08em;
          display:flex;align-items:center;justify-content:space-between}
@@ -126,8 +128,11 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .stats-grid td:first-child{text-align:left;color:#888;padding-left:0}
 .stats-grid tr:not(:last-child) td,.stats-grid tr:not(:last-child) th{border-bottom:1px solid #191919}
 .stats-v1{color:#7ecfff}.stats-v2{color:#4fc84f}
-#agc-wrap{flex:1;height:8px;background:#1a1a1a;border:1px solid #333;border-radius:2px;overflow:hidden;margin:0 .5rem}
-#agc-bar{height:100%;width:0;background:linear-gradient(90deg,#2a8a2a,#8a8a2a,#8a2a2a);transition:width .3s}
+#agc-wrap{flex:1;height:8px;
+          background:linear-gradient(90deg,#3a1010 0%,#3a1010 6.3%,#0d2a0d 6.3%,#0d2a0d 90.6%,#3a1010 90.6%,#3a1010 100%);
+          border:1px solid #333;border-radius:2px;overflow:hidden;margin:0 .5rem;position:relative}
+#agc-bar{height:100%;width:0;background:#2a8a2a;transition:width .3s}
+.agc-thr{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,200,80,.65);pointer-events:none;z-index:1}
 .stats-badges{display:flex;gap:.4rem;flex-wrap:wrap}
 .bdg{display:inline-block;font-size:.6rem;padding:.05rem .3rem;border-radius:2px}
 .bdg-ok{background:#0a280a;border:1px solid #4a9a4a;color:#4fc84f}
@@ -234,6 +239,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div class="send-row" style="flex-shrink:0">
         <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
         <button id="morse-btn" onclick="triggerMorse()" title="Enviar baliza morse ahora">&#x2D9; Morse</button>
+        <button id="reboot-btn" onclick="rebootDevice()" title="Reiniciar el ESP32" style="background:#2a0a0a;color:#c04040;border:1px solid #c04040">&#x21BA; Reiniciar</button>
         <span id="cfg-status"></span>
       </div>
     </div>
@@ -255,7 +261,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       </table>
       <div class="send-row">
         <span style="font-size:.7rem;color:#888;min-width:4.5rem">AGC Peak</span>
-        <div id="agc-wrap"><div id="agc-bar"></div></div>
+        <div id="agc-wrap"><div id="agc-bar"></div><div class="agc-thr" style="left:6.3%"></div><div class="agc-thr" style="left:90.6%"></div></div>
         <span id="agc-val" style="font-size:.7rem;color:#555;min-width:2rem;text-align:right">—</span>
       </div>
       <div class="stats-badges">
@@ -674,9 +680,13 @@ function loadStats(){
     document.getElementById('s-v2-err').textContent   = d.v2_enabled ? d.v2.frames_err : '—';
     document.getElementById('s-v2-flags').textContent = d.v2_enabled ? d.v2.hdlc_flags : '—';
     document.getElementById('s-v2-ov').textContent    = d.v2_enabled ? d.v2.fifo_ov    : '—';
-    const pct=Math.min(Math.abs(d.v2_agc_peak)/127*100,100);
-    document.getElementById('agc-bar').style.width=pct+'%';
-    document.getElementById('agc-val').textContent=d.v2_enabled?d.v2_agc_peak:'—';
+    const agcPeak=d.v2_agc_peak, pct=Math.min(Math.abs(agcPeak)/127*100,100);
+    const agcBarEl=document.getElementById('agc-bar'),agcValEl=document.getElementById('agc-val');
+    agcBarEl.style.width=pct+'%';
+    if(!d.v2_enabled){agcBarEl.style.background='#2a5a2a';agcValEl.textContent='—';agcValEl.style.color='#555';}
+    else{const ok=agcPeak>=8&&agcPeak<=115;
+         agcBarEl.style.background=ok?'#2a8a2a':'#8a3030';
+         agcValEl.textContent=agcPeak;agcValEl.style.color=ok?'#4fc84f':'#c04040';}
     const v2b=document.getElementById('v2-badge');
     v2b.textContent=d.v2_enabled?'V2 activo':'V2 desactivado';
     v2b.className='bdg '+(d.v2_enabled?'bdg-ok':'bdg-off');
@@ -789,6 +799,16 @@ function triggerMorse(){
     st.textContent=d.ok?'Morse TX encolado ✓':'Error';
   }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
   ).finally(()=>{btn.disabled=false;});
+}
+function rebootDevice(){
+  if(!confirm('¿Reiniciar el ESP32?'))return;
+  const btn=document.getElementById('reboot-btn');
+  const st=document.getElementById('cfg-status');
+  btn.disabled=true;st.style.color='#888';st.textContent='Reiniciando…';
+  fetch('/api/reboot',{method:'POST'}).then(r=>r.json()).then(()=>{
+    st.style.color='#c8a04a';st.textContent='Reiniciando — reconectando en 5 s…';
+    setTimeout(()=>{btn.disabled=false;st.textContent='';},8000);
+  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';btn.disabled=false;});
 }
 // ── SSTV ───────────────────────────────────────────────────────────────────
 const sstvModeDims={martin:[320,256],robot:[320,240]};

@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-21): compila limpio (binary ~958 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio y actualización OTA de firmware. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-21): compila limpio (binary ~982 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -137,9 +137,9 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 - **Log APRS**: muestra paquetes recibidos por radio en tiempo real (newest-first). Badges: `PARA MÍ` si el mensaje va dirigido a tu indicativo, `ACK` para confirmaciones, `TX` para los enviados, `DIGI` (azul) para los retransmitidos por el digipeater. Click en callsign rellena el destino.
 - **Pestaña MENSAJE**: formulario para transmitir mensajes APRS directamente desde el navegador.
 - **Pestaña POSICIÓN**: formulario para transmitir baliza de posición APRS (lat/lon decimal, símbolo, comentario). Botón de baliza Morse on-demand.
-- **Pestaña CONFIG**: editor JSON del `config.json` completo. Guardar recarga el digipeater y la baliza morse sin reiniciar el firmware.
+- **Pestaña CONFIG**: editor JSON del `config.json` completo. Guardar recarga el digipeater y la baliza morse sin reiniciar el firmware. Botón **↺ Reiniciar** para reiniciar el ESP32 de forma remota (pide confirmación; el firmware responde, espera 800 ms y ejecuta `esp_restart()`).
 - **Pestaña OTA**: sube un `.bin` generado por ESP-IDF para actualizar el firmware via OTA. Barra de progreso de subida, validación del magic byte del ESP32 (0xE9), y reinicio automático a los 3 s tras un flash exitoso.
-- **Audio**: streaming de audio de recepción en tiempo real vía WebSocket (IMA ADPCM, 9600 Hz). Botón de grabación para capturar audio y descargar como WAV. También disponible como stream WAV en `http://<IP>:8080/`.
+- **Audio**: streaming de audio de recepción en tiempo real vía WebSocket (IMA ADPCM, 9600 Hz). La barra de nivel usa un gradiente rojo/verde/rojo con las zonas de rango correcto visibles incluso sin señal: rojo si la señal es demasiado débil (< 6,3 % ≈ AGC 8) o demasiado fuerte (> 90,6 % ≈ AGC 115), verde en el rango óptimo. La barra AGC de la pestaña STATS muestra el mismo rango con marcadores de umbral y el valor numérico cambia de color (verde/rojo) según si está en rango. Botón de grabación para capturar audio y descargar como WAV. También disponible como stream WAV en `http://<IP>:8080/`.
 
 ## REST API
 
@@ -162,6 +162,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/sstv/upload`      | Sube JPEG vía `multipart/form-data` (partes: `name` + `image`; máx. 200 KB, 10 imágenes) |
 | `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
 | `POST`   | `/api/ota/upload`       | Actualización OTA. Body: binario raw (`application/octet-stream`). Valida magic 0xE9, flashea partición inactiva y reinicia en 3 s |
+| `POST`   | `/api/reboot`           | Reinicia el ESP32. Responde `{"ok":true}` y ejecuta `esp_restart()` 800 ms después |
 
 ## Digipeater WIDEn-N
 

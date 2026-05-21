@@ -317,7 +317,7 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
         remote_cmd_handle(src_base, src_ssid_num, cmd_text);
     }
 
-    printf("AUTO-ACK → %s-%d ack%s\n", src_base, src_ssid_num, msg_id);
+    ESP_LOGI("ax25rx", "AUTO-ACK %s-%d ack%s", src_base, src_ssid_num, msg_id);
     APRS_queue_ack(src_base, src_ssid_num, msg_id);
 
     // Notificar al frontend via WebSocket
@@ -387,6 +387,7 @@ static void on_kiss_frame(const uint8_t *buf, size_t len) {
 
 #elif TNC_MODE == TNC_MODE_APRS
 
+static const char *TAG = "aprs";
 static bool      gotPacket = false;
 static AX25Msg   incomingPacket;
 static uint8_t  *packetData;
@@ -409,19 +410,25 @@ static void processPacket(void *arg) {
     while (1) {
         if (gotPacket) {
             gotPacket = false;
-            printf("SRC: %s-%d DST: %s-%d",
-                   incomingPacket.src.call, incomingPacket.src.ssid,
-                   incomingPacket.dst.call, incomingPacket.dst.ssid);
-            for (int i = 0; i < incomingPacket.rpt_count; i++)
-                printf(" via %s-%d", incomingPacket.rpt_list[i].call,
-                       incomingPacket.rpt_list[i].ssid);
-            printf(" data(%u): ", (unsigned)incomingPacket.len);
-            for (size_t i = 0; i < incomingPacket.len; i++) {
+            char pkt_buf[256];
+            int  pkt_pos = 0;
+            pkt_pos += snprintf(pkt_buf + pkt_pos, sizeof(pkt_buf) - pkt_pos,
+                                "SRC:%s-%d DST:%s-%d",
+                                incomingPacket.src.call, incomingPacket.src.ssid,
+                                incomingPacket.dst.call, incomingPacket.dst.ssid);
+            for (int i = 0; i < incomingPacket.rpt_count && pkt_pos < (int)sizeof(pkt_buf) - 1; i++)
+                pkt_pos += snprintf(pkt_buf + pkt_pos, sizeof(pkt_buf) - pkt_pos,
+                                    " via %s-%d", incomingPacket.rpt_list[i].call,
+                                    incomingPacket.rpt_list[i].ssid);
+            pkt_pos += snprintf(pkt_buf + pkt_pos, sizeof(pkt_buf) - pkt_pos,
+                                " data(%u):", (unsigned)incomingPacket.len);
+            for (size_t i = 0; i < incomingPacket.len && pkt_pos < (int)sizeof(pkt_buf) - 5; i++) {
                 uint8_t c = incomingPacket.info[i];
-                if (c >= 0x20 && c < 0x7F) putchar(c);
-                else printf("\\x%02X", c);
+                if (c >= 0x20 && c < 0x7F) pkt_buf[pkt_pos++] = (char)c;
+                else pkt_pos += snprintf(pkt_buf + pkt_pos, sizeof(pkt_buf) - pkt_pos, "\\x%02X", c);
             }
-            printf("\r\n");
+            pkt_buf[pkt_pos] = '\0';
+            ESP_LOGI(TAG, "%s", pkt_buf);
             free(packetData);
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
