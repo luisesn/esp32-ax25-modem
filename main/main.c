@@ -22,6 +22,7 @@
 #include "gps.h"
 #include "display.h"
 #include "remote_cmd.h"
+#include "ota.h"
 
 #include "device.h"
 
@@ -497,6 +498,7 @@ void app_main(void)
     audio_stream_init();
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
+    ota_init();
     afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS

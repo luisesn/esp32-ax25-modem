@@ -19,6 +19,7 @@ idf_component_register(
         "gps.c"
         "display.c"
         "remote_cmd.c"
+        "ota.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"
@@ -39,6 +40,7 @@ idf_component_register(
         vfs
         espressif__cjson
         esp_timer
+        app_update
 )
 # AX25_MAX_FRAME_LEN por defecto es 330 (suficiente para APRS pero no para IP).
 # 600 cubre el MTU típico de tncattach (512 B payload + 16 B cabecera AX.25 + 2 B CRC).
