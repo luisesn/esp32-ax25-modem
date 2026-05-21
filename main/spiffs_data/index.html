@@ -129,7 +129,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .stats-grid tr:not(:last-child) td,.stats-grid tr:not(:last-child) th{border-bottom:1px solid #191919}
 .stats-v1{color:#7ecfff}.stats-v2{color:#4fc84f}
 #agc-wrap{flex:1;height:8px;
-          background:linear-gradient(90deg,#3a1010 0%,#3a1010 6.3%,#0d2a0d 6.3%,#0d2a0d 90.6%,#3a1010 90.6%,#3a1010 100%);
+          background:linear-gradient(90deg,#3a1010 0%,#3a1010 3.9%,#0d2a0d 3.9%,#0d2a0d 78.1%,#3a1010 78.1%,#3a1010 100%);
           border:1px solid #333;border-radius:2px;overflow:hidden;margin:0 .5rem;position:relative}
 #agc-bar{height:100%;width:0;background:#2a8a2a;transition:width .3s}
 .agc-thr{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,200,80,.65);pointer-events:none;z-index:1}
@@ -260,8 +260,8 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         </tbody>
       </table>
       <div class="send-row">
-        <span style="font-size:.7rem;color:#888;min-width:4.5rem">AGC Peak</span>
-        <div id="agc-wrap"><div id="agc-bar"></div><div class="agc-thr" style="left:6.3%"></div><div class="agc-thr" style="left:90.6%"></div></div>
+        <span style="font-size:.7rem;color:#888;min-width:4.5rem" title="Amplitud de entrada al AGC en cuentas ADC (rango 4–512). Verde: señal correcta (20–400).">AGC Peak</span>
+        <div id="agc-wrap"><div id="agc-bar"></div><div class="agc-thr" style="left:3.9%"></div><div class="agc-thr" style="left:78.1%"></div></div>
         <span id="agc-val" style="font-size:.7rem;color:#555;min-width:2rem;text-align:right">—</span>
       </div>
       <div class="stats-badges">
@@ -680,11 +680,14 @@ function loadStats(){
     document.getElementById('s-v2-err').textContent   = d.v2_enabled ? d.v2.frames_err : '—';
     document.getElementById('s-v2-flags').textContent = d.v2_enabled ? d.v2.hdlc_flags : '—';
     document.getElementById('s-v2-ov').textContent    = d.v2_enabled ? d.v2.fifo_ov    : '—';
-    const agcPeak=d.v2_agc_peak, pct=Math.min(Math.abs(agcPeak)/127*100,100);
+    // v2_agc_peak is in ADC counts, range 4–512 (not 0–127).
+    // too-weak < 20 (noise floor / no signal), too-loud > 400 (ADC near saturation).
+    const AGC_MAX=512, AGC_LO=20, AGC_HI=400;
+    const agcPeak=d.v2_agc_peak, pct=Math.min(Math.abs(agcPeak)/AGC_MAX*100,100);
     const agcBarEl=document.getElementById('agc-bar'),agcValEl=document.getElementById('agc-val');
     agcBarEl.style.width=pct+'%';
     if(!d.v2_enabled){agcBarEl.style.background='#2a5a2a';agcValEl.textContent='—';agcValEl.style.color='#555';}
-    else{const ok=agcPeak>=8&&agcPeak<=115;
+    else{const ok=agcPeak>=AGC_LO&&agcPeak<=AGC_HI;
          agcBarEl.style.background=ok?'#2a8a2a':'#8a3030';
          agcValEl.textContent=agcPeak;agcValEl.style.color=ok?'#4fc84f':'#c04040';}
     const v2b=document.getElementById('v2-badge');
