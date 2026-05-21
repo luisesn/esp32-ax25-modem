@@ -7,11 +7,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_http_server.h>
+#include <sys/socket.h>
 
 #include "audio_stream.h"
 
 #define TAG "ota"
-#define OTA_BUF_SIZE 1024
+#define OTA_BUF_SIZE    4096
+#define OTA_SOCK_TIMEOUT_S 60
 
 static bool s_ota_in_progress = false;
 
@@ -67,6 +69,15 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     }
 
     s_ota_in_progress = true;
+
+    // Raise socket recv timeout: sector erases stall both cores for ~30-50ms each;
+    // with ~240 sectors in a 1 MB image the cumulative delay can exceed 5 s default.
+    int ota_fd = httpd_req_to_sockfd(req);
+    if (ota_fd >= 0) {
+        struct timeval tv = { .tv_sec = OTA_SOCK_TIMEOUT_S, .tv_usec = 0 };
+        setsockopt(ota_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
     ESP_LOGI(TAG, "OTA start: %d bytes → %s", total, update_part->label);
 
     {
@@ -78,16 +89,19 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     static uint8_t buf[OTA_BUF_SIZE];
     int received = 0;
     bool magic_ok = false;
-    int next_report = 16 * 1024;
+    int next_report = 4 * 1024;
 
     while (received < total) {
         int want = total - received;
         if (want > OTA_BUF_SIZE) want = OTA_BUF_SIZE;
 
         int got = httpd_req_recv(req, (char *)buf, want);
-        if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "recv timeout at %d/%d — retrying", received, total);
+            continue;
+        }
         if (got <= 0) {
-            ESP_LOGE(TAG, "recv failed at %d/%d (ret=%d)", received, total, got);
+            ESP_LOGE(TAG, "recv failed at %d/%d (ret=%d, errno=%d)", received, total, got, errno);
             goto abort_ota;
         }
 
@@ -110,12 +124,14 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         received += got;
 
         if (received >= next_report) {
+            ESP_LOGI(TAG, "OTA progress: %d/%d bytes (%.0f%%)",
+                     received, total, (float)received * 100.0f / (float)total);
             char msg[96];
             snprintf(msg, sizeof(msg),
                      "{\"type\":\"ota_progress\",\"received\":%d,\"total\":%d}",
                      received, total);
             audio_stream_ws_send_text(msg);
-            next_report += 16 * 1024;
+            next_report += 4 * 1024;
         }
     }
 

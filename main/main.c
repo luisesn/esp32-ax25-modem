@@ -332,6 +332,7 @@ static const char *TAG = "ax25rx";
 
 // Trama AX.25 recibida por radio → codificar en KISS → enviar al host.
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
+    afsk_notify_rx_frame();  // restart post-RX TX inhibit window
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
     if (len >= 16) {
@@ -488,6 +489,9 @@ void app_main(void)
                 cJSON *ssid_item = cJSON_GetObjectItem(aprs_obj, "ssid");
                 if (cJSON_IsNumber(ssid_item))
                     cs_ssid = (int)ssid_item->valueint;
+                cJSON *delay_j = cJSON_GetObjectItem(aprs_obj, "post_rx_tx_delay_ms");
+                if (cJSON_IsNumber(delay_j) && delay_j->valueint > 0)
+                    afsk_set_post_rx_tx_delay_ms((uint32_t)delay_j->valueint);
             }
         }
         APRS_setCallsign((char *)cs, cs_ssid);
