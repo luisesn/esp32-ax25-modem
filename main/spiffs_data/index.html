@@ -176,6 +176,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('stats',this)">STATS</button>
       <button class="tab-btn" onclick="showTab('sstv',this)">SSTV</button>
       <button class="tab-btn" onclick="showTab('ota',this)">OTA</button>
+      <button class="tab-btn" onclick="showTab('spiffs',this)">SPIFFS</button>
     </div>
     <div id="tab-log" class="tab-pane active">
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
@@ -344,6 +345,21 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <div id="ota-pct" style="font-size:.6rem;color:#666;text-align:right">0%</div>
       </div>
       <div id="ota-status" style="font-size:.65rem;min-height:1rem"></div>
+    </div>
+    <div id="tab-spiffs" class="tab-pane" style="justify-content:flex-start;gap:.8rem">
+      <div style="font-size:.65rem;color:#888">Sube cualquier fichero a la partición SPIFFS (p.ej. <code>index.html</code>, <code>config.json</code>). El nombre en el dispositivo se toma del campo inferior.</div>
+      <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+        <input type="file" id="spiffs-file" style="font-size:.65rem;color:#888;max-width:14rem" onchange="document.getElementById('spiffs-name').value=this.files[0]?this.files[0].name:''">
+        <input type="text" id="spiffs-name" placeholder="nombre en SPIFFS" style="font-size:.65rem;font-family:monospace;background:#111;color:#ccc;border:1px solid #333;border-radius:3px;padding:.2rem .4rem;width:10rem">
+        <button onclick="spiffsUpload()" id="spiffs-btn" style="padding:.3rem .7rem;font-size:.65rem;font-family:monospace;background:#1a2a3a;color:#a0c8e8;border:1px solid #2a4a6a;border-radius:3px;cursor:pointer">&#x2B06; Subir</button>
+      </div>
+      <div id="spiffs-progress-wrap" style="display:none;flex-direction:column;gap:.3rem">
+        <div style="background:#111;border:1px solid #333;border-radius:3px;height:10px;overflow:hidden">
+          <div id="spiffs-bar" style="height:100%;width:0%;background:#2a6a2a;transition:width .2s"></div>
+        </div>
+        <div id="spiffs-pct" style="font-size:.6rem;color:#666;text-align:right">0%</div>
+      </div>
+      <div id="spiffs-status" style="font-size:.65rem;min-height:1rem"></div>
     </div>
   </div>
 </div>
@@ -961,6 +977,40 @@ function otaUpload(){
     }
   };
   xhr.onerror=()=>{otaSetStatus('✗ Error de red','#c04040');btn.disabled=false;};
+  xhr.send(file);
+}
+function spiffsUpload(){
+  const file=document.getElementById('spiffs-file').files[0];
+  const name=document.getElementById('spiffs-name').value.trim();
+  if(!file){alert('Elige un fichero');return;}
+  if(!name){alert('Indica el nombre de destino en SPIFFS');return;}
+  if(name.includes('/')||name.includes('..')){alert('Nombre inválido');return;}
+  const btn=document.getElementById('spiffs-btn');
+  const st=document.getElementById('spiffs-status');
+  const wrap=document.getElementById('spiffs-progress-wrap');
+  const bar=document.getElementById('spiffs-bar');
+  const pct=document.getElementById('spiffs-pct');
+  btn.disabled=true;
+  st.textContent='Subiendo '+name+' ('+Math.round(file.size/1024)+' KB)…';st.style.color='#888';
+  wrap.style.display='flex';bar.style.width='0%';pct.textContent='0%';
+  const xhr=new XMLHttpRequest();
+  xhr.open('POST','/api/spiffs/upload?name='+encodeURIComponent(name));
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
+  xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);bar.style.width=p+'%';pct.textContent=p+'%';}};
+  xhr.onload=()=>{
+    btn.disabled=false;
+    if(xhr.status===200){
+      let sz=file.size;
+      try{const r=JSON.parse(xhr.responseText);sz=r.size||sz;}catch(e){}
+      st.textContent='✓ '+name+' guardado ('+sz+' bytes)';st.style.color='#4a9a4a';
+      bar.style.width='100%';pct.textContent='100%';
+    } else {
+      let msg='Error HTTP '+xhr.status;
+      try{const r=JSON.parse(xhr.responseText);if(r.error)msg=r.error;}catch(e){}
+      st.textContent='✗ '+msg;st.style.color='#c04040';
+    }
+  };
+  xhr.onerror=()=>{btn.disabled=false;st.textContent='✗ Error de red';st.style.color='#c04040';};
   xhr.send(file);
 }
 window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});});

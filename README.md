@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-21): compila limpio (binary ~982 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-21): compila limpio (binary ~982 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -163,6 +163,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
 | `POST`   | `/api/ota/upload`       | Actualización OTA. Body: binario raw (`application/octet-stream`). Valida magic 0xE9, flashea partición inactiva y reinicia en 3 s |
 | `POST`   | `/api/reboot`           | Reinicia el ESP32. Responde `{"ok":true}` y ejecuta `esp_restart()` 800 ms después |
+| `POST`   | `/api/spiffs/upload?name=<fichero>` | Sube un fichero a SPIFFS. Body: binario raw. Escribe en `/spiffs/<fichero>`. Responde `{"ok":true,"name":"...","size":N}`. Útil para actualizar `index.html` sin reflashear todo el firmware |
 
 ## Digipeater WIDEn-N
 
@@ -230,6 +231,44 @@ Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El 
 - El JPEG debe caber en la partición SPIFFS (704 KB total, compartida con `index.html` y `config.json`).
 - No se admite recepción SSTV (solo TX).
 - La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
+
+## Subida de ficheros a SPIFFS
+
+La partición SPIFFS (704 KB) contiene `index.html`, `config.json` e imágenes SSTV. Se puede actualizar cualquier fichero por red sin cable serie.
+
+### Desde la UI web
+
+1. Abre `http://<IP-del-ESP32>/` y ve a la pestaña **SPIFFS**.
+2. Elige el fichero local (p. ej. `index.html`).
+3. Verifica o edita el nombre de destino en el campo de texto (se rellena automáticamente con el nombre del fichero seleccionado).
+4. Pulsa **↑ Subir** — la barra de progreso refleja la subida y el estado final confirma los bytes escritos.
+
+> Tras actualizar `index.html` recarga la página en el navegador (Ctrl+F5) para ver la nueva versión.
+
+### Con curl
+
+```bash
+# Actualizar la UI web
+curl -X POST "http://<IP-del-ESP32>/api/spiffs/upload?name=index.html" \
+     -H "Content-Type: application/octet-stream" \
+     --data-binary @main/spiffs_data/index.html
+
+# Subir un fichero de configuración
+curl -X POST "http://<IP-del-ESP32>/api/spiffs/upload?name=config.json" \
+     -H "Content-Type: application/octet-stream" \
+     --data-binary @main/spiffs_data/config.json
+```
+
+Respuesta en caso de éxito: `{"ok":true,"name":"index.html","size":98432}`.
+
+### Notas
+
+- Tamaño máximo por fichero: **512 KB** (limitado por RAM del handler; la partición total es 704 KB compartida).
+- El nombre de destino solo puede contener caracteres sin `/` ni `..`. No hace falta incluir `/spiffs/` — se añade automáticamente.
+- El fichero se sobrescribe si ya existe.
+- La partición de firmware **no se toca** (para eso existe la pestaña OTA).
+
+---
 
 ## Actualización OTA de firmware
 
@@ -403,6 +442,46 @@ Para activarlo: editar `config.json` vía la pestaña CONFIG de la UI (o reflash
 
 **Nota**: requiere `CONFIG_LWIP_IP_FORWARD=y` (incluido en `sdkconfig.defaults`). MTU máximo: 300 bytes.
 
+## Retardo TX tras recepción (`post_rx_tx_delay_ms`)
+
+Cuando el ESP32 recibe una trama y necesita responder (ACK automático, paquete IP de vuelta, trama KISS reencolada), la radio remota acaba de terminar de transmitir y necesita tiempo para soltar el PTT y conmutar su electrónica de TX a RX. Si el ESP32 responde inmediatamente, la radio remota aún no está escuchando y la respuesta se pierde.
+
+El parámetro `aprs.post_rx_tx_delay_ms` en `config.json` introduce una ventana de inhibición: el dispatcher de TX de `receive_audio_task` no despacha **ninguna** trama encolada hasta que hayan transcurrido N ms desde la última trama decodificada. Los beacons periódicos (Morse, SSTV) **no** se ven afectados — solo las respuestas a tráfico recibido.
+
+### Desglose del tiempo con dos Baofeng UV-5R
+
+Ensayado con dos ESP32 + Baofeng UV-5R, modo `ip.mode: "tun"` y `ping 44.61.3.71 -W 5 -i 10`:
+
+| Contribución | Tiempo | Origen |
+|---|---|---|
+| Flags de cola pendientes (tail) | ~47 ms | La radio remota detecta fin de trama en el **primer** flag 0x7E de cierre, pero el firmware envía 8 flags de cola (`custom_tail = 50 → DIV_ROUND = 8 bytes`); quedan ~7 × 6,7 ms en el aire |
+| Drenado DMA (`wait_dac_drain`) | ~84–168 ms | El pipeline DMA del DAC drena el bloque de silencio extra antes de que caiga el PTT |
+| Conmutación firmware DAC→ADC | ~10 ms | `dac_continuous_del_channels` + `adc_peripheral_start` |
+| **Conmutación hardware TX→RX del Baofeng UV-5R** | **~650–750 ms** | Término dominante: liberación del PA, relé de antena, encendido de la cadena RX y asentamiento del squelch |
+| **Total** | **~800–975 ms** | Tiempo desde que el callback `on_ax25_raw_frame` se ejecuta hasta que la radio remota puede recibir |
+
+El preámbulo que envía nuestro ESP32 antes de la respuesta (53 flags × 6,7 ms ≈ **353 ms**) actúa como margen de sincronización: la radio remota solo necesita recibir ~4–5 flags (27 ms) para sincronizar su PLL. Con `post_rx_tx_delay_ms = 950` el margen total disponible es ~436 ms.
+
+Con `post_rx_tx_delay_ms = 500` el preámbulo termina ~57 ms antes de que el Baofeng complete su conmutación TX→RX → la sincronización falla de forma intermitente.
+
+### Valores recomendados
+
+| Radio | Valor recomendado |
+|-------|------------------|
+| Baofeng UV-5R / UV-82 y similares | **950 ms** |
+| Radios con conmutación rápida (< 200 ms) | 200–300 ms |
+| Sin radio externa (pruebas en banco) | 0 (deshabilitar) |
+
+```json
+"aprs": {
+  "post_rx_tx_delay_ms": 950
+}
+```
+
+Ponlo a `0` para deshabilitar el retardo completamente.
+
+---
+
 ## Conectar al host
 
 ### Con tncattach (gateway IP bidireccional, verificado)
@@ -429,6 +508,14 @@ I ax25ip: RX 84 bytes TUN-IP←RF → lwIP
 I ax25ip: TX 84 bytes TUN→RF
 ```
 
+> **⚠️ Usa siempre `/24`, no `/32`.**  
+> Con `--ipv4 44.61.3.73/32` el kernel solo añade una ruta de host para `44.61.3.73`; no hay ruta para ninguna otra dirección `44.61.3.x`, así que los paquetes al ESP32 remoto (`44.61.3.71`, por ejemplo) se envían por el gateway por defecto (WiFi/Ethernet) en lugar de por `tnc0` y el ping nunca llega.  
+> Con `/24` el kernel añade automáticamente `44.61.3.0/24 dev tnc0` y todo el bloque queda accesible por radio.  
+> Si necesitas `/32` por alguna razón, añade la ruta manualmente:
+> ```bash
+> sudo ip route add 44.61.3.71 dev tnc0
+> ```
+
 ### Con direwolf (iGate / gateway APRS)
 
 ```
@@ -453,7 +540,8 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "callsign": "TU_INDICATIVO",
     "ssid": 11,
     "symbol_table": "/",
-    "symbol_code": ">"
+    "symbol_code": ">",
+    "post_rx_tx_delay_ms": 950
   },
   "wifi": [
     {
@@ -514,6 +602,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `aprs` | `ssid` | int 0–15 | SSID APRS |
 | `aprs` | `symbol_table` | `"/"` o `"\\"` | Tabla de símbolos APRS (primaria o alternativa) |
 | `aprs` | `symbol_code` | char | Código de símbolo APRS (p. ej. `">"` = coche) |
+| `aprs` | `post_rx_tx_delay_ms` | int | Retardo TX tras recepción (ms). Tiempo mínimo desde que se decodifica una trama hasta que se despacha la siguiente TX. Compensa el tiempo de conmutación TX→RX de la radio remota. `0` = deshabilitado. Valor recomendado con Baofeng UV-5R: **950** |
 | `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
 | `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
 | `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |

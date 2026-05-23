@@ -687,6 +687,85 @@ static esp_err_t reboot_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t spiffs_upload_handler(httpd_req_t *req)
+{
+    // ?name=<filename> — must be a bare name, no slashes, no '..'
+    char qs[128] = {0};
+    char name[64] = {0};
+    if (httpd_req_get_url_query_str(req, qs, sizeof(qs)) != ESP_OK ||
+        httpd_query_key_value(qs, "name", name, sizeof(name)) != ESP_OK ||
+        name[0] == '\0') {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"missing ?name= param\"}");
+        return ESP_OK;
+    }
+    if (strchr(name, '/') || strstr(name, "..")) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"invalid filename\"}");
+        return ESP_OK;
+    }
+
+    int total = (int)req->content_len;
+    if (total <= 0 || total > 512 * 1024) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"invalid content-length (max 512 KB)\"}");
+        return ESP_OK;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "/spiffs/%s", name);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "spiffs_upload: fopen(%s) failed", path);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"cannot open file for writing\"}");
+        return ESP_OK;
+    }
+
+    static char buf[1024];
+    int received = 0;
+    bool ok = true;
+    while (received < total) {
+        int want = total - received;
+        if (want > (int)sizeof(buf)) want = (int)sizeof(buf);
+        int got = httpd_req_recv(req, buf, (size_t)want);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (got <= 0) {
+            ESP_LOGE(TAG, "spiffs_upload: recv error at %d/%d (ret=%d)", received, total, got);
+            ok = false;
+            break;
+        }
+        if (fwrite(buf, 1, (size_t)got, f) != (size_t)got) {
+            ESP_LOGE(TAG, "spiffs_upload: fwrite failed (disk full?)");
+            ok = false;
+            break;
+        }
+        received += got;
+    }
+    fclose(f);
+
+    if (!ok) {
+        remove(path);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"upload aborted\"}");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "spiffs_upload: %s (%d bytes)", path, received);
+    char resp[96];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"name\":\"%s\",\"size\":%d}", name, received);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {
@@ -697,7 +776,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 18;
+    cfg.max_uri_handlers = 20;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -760,6 +839,11 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = reboot_handler,
     };
+    static const httpd_uri_t uri_spiffs_upload = {
+        .uri     = "/api/spiffs/upload",
+        .method  = HTTP_POST,
+        .handler = spiffs_upload_handler,
+    };
 
     s_log_mutex = xSemaphoreCreateMutex();
 
@@ -774,6 +858,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_log);
     httpd_register_uri_handler(s_httpd, &uri_rx_stats);
     httpd_register_uri_handler(s_httpd, &uri_reboot);
+    httpd_register_uri_handler(s_httpd, &uri_spiffs_upload);
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
