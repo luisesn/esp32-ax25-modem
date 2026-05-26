@@ -46,6 +46,12 @@ static TickType_t s_hold_until = 0;
 static volatile bool s_rep_active = false;   // set by repeater_set_enabled()
 static volatile bool s_mon_active = false;   // set by UI monitor switch / REST
 
+// Flags consumed by push_sample (always in receive_audio_task context).
+// Avoids calling reset_state()/send_ws() from httpd handler, which would
+// race on Goertzel state and block the httpd task on a WebSocket send.
+static volatile bool s_reset_needed  = false;
+static volatile bool s_send_ws_once  = false;
+
 // WS throttle
 static uint32_t s_block_count = 0;
 #define WS_EVERY_BLOCKS 8              // ~100 ms
@@ -108,7 +114,12 @@ void squelch_sf_init(cJSON *config)
 
 void squelch_sf_push_sample(int8_t sample)
 {
-    if (!s_rep_active && !s_mon_active) return;
+    if (s_reset_needed) { s_reset_needed = false; reset_state(); }
+
+    if (!s_rep_active && !s_mon_active) {
+        if (s_send_ws_once) { s_send_ws_once = false; send_ws(); }
+        return;
+    }
 
     int32_t x = (int32_t)sample;
     for (int i = 0; i < HFNE_NBINS; i++) {
@@ -161,16 +172,20 @@ void squelch_sf_push_sample(int8_t sample)
 
 void squelch_sf_set_repeater_active(bool en)
 {
+    bool was_active = s_rep_active || s_mon_active;
     s_rep_active = en;
-    if (!en && !s_mon_active) reset_state();
-    send_ws();
+    bool now_active = s_rep_active || s_mon_active;
+    if (!en && !now_active && was_active) s_reset_needed = true;
+    s_send_ws_once = true;
 }
 
 void squelch_sf_set_monitor_active(bool en)
 {
+    bool was_active = s_rep_active || s_mon_active;
     s_mon_active = en;
-    if (!en && !s_rep_active) reset_state();
-    send_ws();
+    bool now_active = s_rep_active || s_mon_active;
+    if (!en && !now_active && was_active) s_reset_needed = true;
+    s_send_ws_once = true;
 }
 
 bool squelch_sf_is_active(void)         { return s_rep_active || s_mon_active; }

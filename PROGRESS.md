@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-05-01
+Última actualización: 2026-05-26
 
 ---
 
@@ -52,6 +52,12 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | nuevo | `freeMemory()` → `esp_get_free_heap_size()` en modo APRS | ✅ 2026-05-01 |
 | 2.2 | `freeMemory()` constante ficticia en FakeArduino | ✅ solo queda en `.ino` de ejemplo (no compilado); `main.c` usa `esp_get_free_heap_size()` |
 | nuevo | Eliminar `esp-dsp` de `idf_component.yml` y `managed_components/` | ✅ 2026-05-01 |
+| nuevo | Repetidor de voz analógico (`repeater.c`) | ✅ 2026-05-26 (HW pendiente) |
+| nuevo | Squelch HFNE 4-bin Goertzel (`squelch_sf.c`) | ✅ 2026-05-26 |
+| nuevo | Buffer ADPCM + malloc dinámico + teardown WAV server | ✅ 2026-05-26 |
+| nuevo | Ventana mínima de grabación 500 ms | ✅ 2026-05-26 |
+| nuevo | Modo monitor HFNE sin repetidor | ✅ 2026-05-26 |
+| nuevo | REST: `/api/repeater/*`, `/api/squelch/*` | ✅ 2026-05-26 |
 
 Pendientes prioritarios:
 1. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
@@ -373,3 +379,56 @@ Smallest app partition: 0x1a0000 bytes
    - Badge DIGI (azul, `.pkt-digi`) para paquetes con `type:'digipeated'` en WebSocket.
    - Botón "Grabar" (`.rec-btn`): captura bloques IMA ADPCM del WebSocket, los decodifica y descarga como archivo WAV PCM 16-bit 9600 Hz.
    - `appendLog` acepta 5º param `isDigi`; CSV incluye `type='digi'` para estas filas.
+
+---
+
+### 2026-05-26 — repetidor de voz analógico + squelch HFNE
+
+**Nuevos ficheros:**
+
+- [main/repeater.h](main/repeater.h) / [main/repeater.c](main/repeater.c) — repetidor de voz analógico completo. Máquina de estados IDLE→RECORDING→TAIL→PENDING→TX. Buffer ADPCM asignado dinámicamente al habilitar; liberado al deshabilitar. Parámetros configurables: `max_record_s`, `tail_delay_ms`, `lockout_ms`, `courtesy_tone_hz/ms`, `cw_id`. Ventana mínima de grabación de 500 ms: la transición a TAIL solo se produce cuando el squelch lleva al menos 500 ms cerrado desde la última apertura; cada reapertura reinicia el temporizador. Registro de estado en WebSocket `{"type":"repeater","state":"..."}` cada ~0,5 s.
+
+- [main/squelch_sf.h](main/squelch_sf.h) / [main/squelch_sf.c](main/squelch_sf.c) — squelch HFNE (_High-Frequency Noise Energy_) basado en 4 bins Goertzel sobre los 128 muestras a 9 600 Hz (13,3 ms/bloque): bins k=42, 47, 53, 58 → 3 150–4 350 Hz (por encima del espectro de audio FM). La energía normalizada cae cuando una portadora FM suprime el ruido de discriminador. Umbral configurable (`hfne_threshold`). Hold de cierre 500 ms. EMA del suelo de ruido (solo se actualiza mientras la señal parece ruido). Dos fuentes de activación: `s_rep_active` (repetidor habilitado) y `s_mon_active` (monitor UI). El procesado Goertzel solo corre cuando al menos una fuente está activa. Estado publicado por WebSocket `{"type":"squelch_sf","hfne":float,"open":bool,"active":bool,"manual":bool}` cada ~100 ms.
+
+**Cambios en ficheros existentes:**
+
+1. **`main/audio_stream.c`** — nuevos handlers REST:
+   - `GET /api/repeater/status` → `{"enabled":bool,"state":"idle|recording|..."}`.
+   - `POST /api/repeater/enable` → body `{"enabled":bool}`; llama `repeater_set_enabled()`.
+   - `POST /api/squelch/sf_config` → body `{"hfne_threshold":float}`; llama `squelch_hfne_set_threshold()`.
+   - `GET /api/squelch/status` → `{"active":bool,"manual":bool,"hfne":float,"open":bool,"thr":float}`.
+   - `POST /api/squelch/monitor` → body `{"active":bool}`; llama `squelch_sf_set_monitor_active()`.
+   - `max_uri_handlers` subido de 23 a 28.
+   - `encode_block()` hecha no-estática; `adpcm_state_t` movida a la cabecera; añadida `decode_block()` y `audio_stream_stop_wav_server()` (cierra el fd de escucha del servidor WAV para liberar ~5 KB de heap antes del malloc del buffer ADPCM).
+
+2. **`main/main.c`** — añadidas llamadas a `repeater_init(config_get())` y `squelch_sf_init(config_get())` en `app_main`; `squelch_sf_push_sample(sample)` en `audio_sample_hook`.
+
+3. **`main/CMakeLists.txt`** — añadidos `repeater.c` y `squelch_sf.c` a SRCS.
+
+4. **`main/spiffs_data/index.html`** — panel HFNE en la pestaña REPEATER: barra de nivel HFNE (0 = tonal/verde/abierto, 1 = plano/rojo/cerrado) con marcador de umbral, badge SQL ABIERTO/cerrado, slider de umbral → `POST /api/squelch/sf_config`, interruptor **Monitor** → `POST /api/squelch/monitor`. El panel se opaca cuando el squelch está inactivo. Manejador WS `squelch_sf`.
+
+**Bug fixes:**
+
+- **httpd handler bloqueado en WebSocket send**: `squelch_sf_set_repeater_active()` y `set_monitor_active()` llamaban `send_ws()` / `reset_state()` directamente desde el handler HTTP, lo que podía bloquear el handler task en `httpd_ws_send_data()` y crear una carrera con el estado Goertzel desde `receive_audio_task`. Corrección: se usan flags diferidos `s_reset_needed` y `s_send_ws_once` consumidos por `push_sample()` desde `receive_audio_task`.
+
+- **Buffer ADPCM insuficiente**: el malloc original fallaba por heap fragmentado. Soluciones aplicadas: (a) parar el servidor WAV antes del malloc, (b) compresión ADPCM reduce el buffer de ~96 KB a ~49 KB, (c) retry loop de malloc con granularidad `ADPCM_BLOCK_BYTES` (512 B).
+
+**Resultado del build (2026-05-26):**
+```
+build/esp32-aprs-modem.bin  0xda560 bytes (~874 KB)
+Smallest app partition: 0x1a0000 bytes
+0xc5aa0 bytes (48%) free
+```
+
+**Nuevas entradas en tabla de progreso:**
+
+| # | Característica | Estado |
+|---|----------------|--------|
+| nuevo | Repetidor de voz analógico (`repeater.c`) | ✅ 2026-05-26 (verificación HW pendiente) |
+| nuevo | Squelch HFNE 4-bin Goertzel (`squelch_sf.c`) | ✅ 2026-05-26 |
+| nuevo | Buffer ADPCM con malloc dinámico + teardown WAV server | ✅ 2026-05-26 |
+| nuevo | Ventana mínima de grabación 500 ms con reinicio en reapertura | ✅ 2026-05-26 |
+| nuevo | Modo monitor HFNE independiente del repetidor | ✅ 2026-05-26 |
+| nuevo | REST: `/api/repeater/*`, `/api/squelch/*` | ✅ 2026-05-26 |
+| nuevo | UI: panel HFNE con barra, slider y monitor toggle | ✅ 2026-05-26 |
+| nuevo | Fix httpd handler bloqueado en WS send (flags diferidos) | ✅ 2026-05-26 |

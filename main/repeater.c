@@ -44,6 +44,12 @@ static volatile repeater_state_t s_state = REPEATER_STATE_IDLE;
 static TickType_t s_lockout_until = 0;
 static uint32_t   s_lockout_ms    = 3000;
 
+// Minimum recording window: even if the squelch closes early, keep recording
+// until at least MIN_REC_MS have elapsed since the squelch was last open.
+// Resets each time the squelch reopens during recording.
+#define MIN_REC_MS 500
+static TickType_t s_min_rec_until = 0;
+
 static uint32_t   s_tail_delay_ms = 2000;
 static TickType_t s_tail_start    = 0;
 static uint32_t   s_courtesy_hz   = 1000;
@@ -167,6 +173,7 @@ void repeater_set_enabled(bool en)
         s_rec_blocks = 0;
         s_stage_pos  = 0;
         s_lockout_until = 0;
+        s_min_rec_until = 0;
         free(s_buf);
         s_buf = NULL;
     }
@@ -186,8 +193,9 @@ void repeater_audio_hook(int8_t sample)
 {
     if (!s_enabled || !s_buf) return;
 
+    TickType_t now = xTaskGetTickCount();
     bool in_lockout = (s_lockout_until != 0) &&
-                      ((int32_t)(s_lockout_until - xTaskGetTickCount()) > 0);
+                      ((int32_t)(s_lockout_until - now) > 0);
     bool squelch_open = squelch_hfne_is_open() && !in_lockout;
 
     // Push state to web UI ~every 0.5 s
@@ -207,6 +215,7 @@ void repeater_audio_hook(int8_t sample)
                 s_stage_pos  = 0;
                 s_enc_state.predictor  = 0;
                 s_enc_state.step_index = 0;
+                s_min_rec_until = now + pdMS_TO_TICKS(MIN_REC_MS);
                 s_state = REPEATER_STATE_RECORDING;
                 ESP_LOGI(TAG, "RECORDING");
                 send_ws_state("recording");
@@ -229,17 +238,23 @@ void repeater_audio_hook(int8_t sample)
                                  / REPEATER_SAMPLE_RATE_HZ);
                 }
             }
-            if (!squelch_open) {
-                s_tail_start = xTaskGetTickCount();
+            if (squelch_open) {
+                // Signal still present: keep refreshing the minimum recording window.
+                s_min_rec_until = now + pdMS_TO_TICKS(MIN_REC_MS);
+            } else if ((int32_t)(now - s_min_rec_until) >= 0) {
+                // Signal gone AND minimum window expired → move to tail.
+                s_tail_start = now;
                 s_state = REPEATER_STATE_TAIL;
             }
+            // else: signal gone but minimum window still active — keep recording.
             break;
         }
 
         case REPEATER_STATE_TAIL:
             if (squelch_open) {
+                s_min_rec_until = now + pdMS_TO_TICKS(MIN_REC_MS);
                 s_state = REPEATER_STATE_RECORDING;
-            } else if ((xTaskGetTickCount() - s_tail_start) >= pdMS_TO_TICKS(s_tail_delay_ms)) {
+            } else if ((now - s_tail_start) >= pdMS_TO_TICKS(s_tail_delay_ms)) {
                 flush_staging();
                 s_state = REPEATER_STATE_PENDING;
                 ESP_LOGI(TAG, "PENDING (%u blocks, %.1f s)", s_rec_blocks,

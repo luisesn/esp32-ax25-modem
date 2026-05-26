@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-21): compila limpio (binary ~982 KB, 42 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-26): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -58,6 +58,12 @@ esp32-aprs-modem/
 │   │                                  JPEG on-the-fly vía ROM TJpgDec; REST: /api/sstv/*
 │   ├── ota.h / ota.c                  actualización OTA de firmware vía HTTP
 │   │                                  (POST /api/ota/upload, validación magic 0xE9, reboot 3 s)
+│   ├── repeater.h / repeater.c        repetidor de voz analógico: squelch HFNE, grabación
+│   │                                  ADPCM IMA, retransmisión con tono de cortesía y CW ID,
+│   │                                  ventana mínima de grabación 500 ms; REST: /api/repeater/*
+│   ├── squelch_sf.h / squelch_sf.c    squelch HFNE (High-Frequency Noise Energy) sobre 4 bins
+│   │                                  Goertzel (3150–4350 Hz); fuentes: repetidor y monitor UI;
+│   │                                  REST: /api/squelch/*; WS: {"type":"squelch_sf",...}
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
 │   ├── gps.h / gps.c                  receptor GPS por UART2 (NMEA $GPRMC/$GPGGA),
 │   │                                  struct g_gps_pos con mutex FreeRTOS
@@ -163,6 +169,11 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `DELETE` | `/api/sstv/image?name=` | Elimina imagen de la galería SSTV |
 | `POST`   | `/api/ota/upload`       | Actualización OTA. Body: binario raw (`application/octet-stream`). Valida magic 0xE9, flashea partición inactiva y reinicia en 3 s |
 | `POST`   | `/api/reboot`           | Reinicia el ESP32. Responde `{"ok":true}` y ejecuta `esp_restart()` 800 ms después |
+| `GET`    | `/api/repeater/status`  | Estado del repetidor: `{"enabled":bool,"state":"idle|recording|tail|pending|tx"}` |
+| `POST`   | `/api/repeater/enable`  | Activa o desactiva el repetidor. Body JSON: `{"enabled":true}` |
+| `GET`    | `/api/squelch/status`   | Estado del squelch HFNE: `{"active":bool,"manual":bool,"hfne":float,"open":bool,"thr":float}` |
+| `POST`   | `/api/squelch/monitor`  | Activa/desactiva modo monitor (squelch sin repetidor). Body JSON: `{"active":true}` |
+| `POST`   | `/api/squelch/sf_config`| Ajusta umbral HFNE en runtime. Body JSON: `{"hfne_threshold":0.25}` |
 | `POST`   | `/api/spiffs/upload?name=<fichero>` | Sube un fichero a SPIFFS. Body: binario raw. Escribe en `/spiffs/<fichero>`. Responde `{"ok":true,"name":"...","size":N}`. Útil para actualizar `index.html` sin reflashear todo el firmware |
 
 ## Digipeater WIDEn-N
@@ -231,6 +242,74 @@ Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El 
 - El JPEG debe caber en la partición SPIFFS (704 KB total, compartida con `index.html` y `config.json`).
 - No se admite recepción SSTV (solo TX).
 - La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
+
+## Repetidor de voz analógico
+
+El firmware incluye un repetidor de voz analógico completo para FM/VHF. Graba el audio de entrada, lo retransmite cuando el canal queda libre y envía una identificación CW tras la retransmisión.
+
+### Principio de funcionamiento
+
+1. El **squelch HFNE** (_High-Frequency Noise Energy_) monitoriza la energía en cuatro bins Goertzel (3 150–4 350 Hz, por encima del espectro de audio útil). La energía en esa banda es alta con solo ruido (sin portadora) y cae al recibir una señal FM: apertura del squelch → inicio de grabación.
+2. La señal recibida se codifica en **IMA ADPCM** (512 B por 1 017 muestras, ratio 2:1) y se almacena en el buffer de grabación (≈ 49 KB para 10 s, según heap disponible).
+3. Una vez cerrado el squelch, el firmware espera `tail_delay_ms` ms antes de retransmitir, para descartar dropouts breves.
+4. La retransmisión decodifica el ADPCM, remuestrea 9 600 Hz → 48 000 Hz (×5) y lo escribe al DAC con PTT activo.
+5. Opcionalmente envía un **tono de cortesía** (Hz y duración configurables) y dispara la **identificación CW** (si `cw_id: true`).
+6. Un periodo de **lockout** post-TX (`lockout_ms`) evita que el eco de la propia transmisión reabra el squelch.
+
+### Ventana mínima de grabación
+
+Al abrirse el squelch se inicia un temporizador de 500 ms. Incluso si el squelch se cierra antes de que expire, la grabación continúa hasta que transcurran al menos 500 ms desde la última muestra con squelch abierto. Cada vez que el squelch se reabre durante la grabación, el temporizador se reinicia desde ese instante.
+
+### Estados
+
+| Estado | Descripción |
+|--------|-------------|
+| `idle` | Escuchando; squelch cerrado |
+| `recording` | Squelch abierto; grabando audio |
+| `tail` | Squelch cerrado; esperando `tail_delay_ms` antes de TX |
+| `pending` | Buffer listo; esperando a que el canal quede libre |
+| `tx` | Retransmitiendo + tono de cortesía |
+
+### Configuración
+
+```json
+"repeater": {
+  "enabled": false,
+  "max_record_s": 10,
+  "tail_delay_ms": 2000,
+  "lockout_ms": 3000,
+  "courtesy_tone_hz": 1000,
+  "courtesy_tone_ms": 200,
+  "cw_id": true
+}
+```
+
+```json
+"squelch_sf": {
+  "hfne_threshold": 0.25
+}
+```
+
+| Campo | Descripción |
+|-------|-------------|
+| `enabled` | Activa el repetidor al arrancar |
+| `max_record_s` | Máximo de grabación (según heap disponible; típicamente 10 s → ≈ 49 KB ADPCM) |
+| `tail_delay_ms` | Tiempo de espera tras cerrar el squelch antes de retransmitir |
+| `lockout_ms` | Período de lockout post-TX para ignorar el eco propio |
+| `courtesy_tone_hz` | Frecuencia del tono de cortesía (0 = sin tono) |
+| `courtesy_tone_ms` | Duración del tono de cortesía |
+| `cw_id` | Si `true`, dispara identificación morse CW tras cada retransmisión |
+| `hfne_threshold` | Umbral HFNE [0.01–0.99]; valores más bajos → squelch más sensible |
+
+### Modo monitor
+
+La sección HFNE de la UI web incluye un interruptor **Monitor** que activa el squelch de forma independiente (sin habilitar el repetidor). Útil para visualizar la actividad de señal en la pestaña REPEATER sin que el firmware retransmita.
+
+### Notas de memoria
+
+El buffer ADPCM se asigna dinámicamente al habilitar el repetidor. Para maximizar el heap disponible, el servidor WAV (port 8080) se detiene automáticamente antes del malloc. Si el heap libre no alcanza los 28 KB de reserva operativa, el buffer se recorta al máximo allocable alineado a bloque ADPCM (512 B).
+
+---
 
 ## Subida de ficheros a SPIFFS
 
@@ -627,6 +706,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 ## Limitaciones actuales
 
 - **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
+- **Repetidor sin verificación en hardware real** — implementado y compilado limpio; pendiente prueba con radio FM real.
 - **SSTV solo TX** — no hay decodificador RX.
 - **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.
 - **SD e I2C comparten GPIO13** — GPIO13 es el CS/DAT3 de la SD y también el SDA del bus I2C (SSD1306). No se puede usar la tarjeta SD si el display está conectado.
