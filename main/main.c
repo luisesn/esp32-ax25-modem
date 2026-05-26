@@ -23,6 +23,8 @@
 #include "display.h"
 #include "remote_cmd.h"
 #include "ota.h"
+#include "repeater.h"
+#include "esp_heap_caps.h"
 
 #include "device.h"
 
@@ -40,6 +42,18 @@
 static void project_dispatch_hook(void) {
     morse_check_and_dispatch();
     sstv_dispatch_if_pending();
+    repeater_dispatch_if_pending();
+
+    // Periodic free-heap log (~every 5 s)
+    static TickType_t s_last_heap_log = 0;
+    TickType_t now = xTaskGetTickCount();
+    if ((now - s_last_heap_log) >= pdMS_TO_TICKS(5000)) {
+        s_last_heap_log = now;
+        ESP_LOGI("heap", "free=%u B, min=%u B, largest=%u B",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +461,7 @@ static void processPacket(void *arg) {
 static void audio_sample_hook(int8_t sample) {
     if (audio_stream_q)
         xQueueSendToBack(audio_stream_q, &sample, 0);
+    repeater_audio_hook(sample);
 }
 
 void app_main(void)
@@ -510,6 +525,7 @@ void app_main(void)
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
     ota_init();
+    repeater_init(config_get());
     afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS

@@ -20,6 +20,7 @@ idf_component_register(
         "display.c"
         "remote_cmd.c"
         "ota.c"
+        "repeater.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

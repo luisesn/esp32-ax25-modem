@@ -11,6 +11,7 @@
 #include "LibAPRS-esp32-i2s/src/AFSK.h"   // audio_peak
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h" // APRS_getCallsign
 #include "rx_stats.h"
+#include "repeater.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -351,6 +352,23 @@ static void screen_normal(char *line) {
 
     if (loud)
         fb_text(7, 80, "LOUD");
+
+    // --- Page 7 left: repeater state + level (when enabled) ---
+    if (repeater_is_enabled()) {
+        const char *rep_label = NULL;
+        switch (repeater_get_state()) {
+            case REPEATER_STATE_RECORDING: rep_label = "REC "; break;
+            case REPEATER_STATE_TAIL:      rep_label = "TAIL"; break;
+            case REPEATER_STATE_PENDING:   rep_label = "WAIT"; break;
+            case REPEATER_STATE_TX:        rep_label = "RPT!"; break;
+            default:                       rep_label = "RPT:"; break;
+        }
+        // Show state label + numeric level + threshold marker
+        uint32_t lv  = repeater_get_level();
+        uint32_t thr = repeater_get_threshold();
+        snprintf(line, 32, "%s%2u/%u", rep_label, (unsigned)(lv > 99 ? 99 : lv), (unsigned)thr);
+        fb_text(7, 0, line);
+    }
 }
 
 // ---------------------------------------------------------------------------

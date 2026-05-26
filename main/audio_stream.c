@@ -18,6 +18,7 @@
 #include "morse.h"
 #include "rx_stats.h"
 #include "AFSK.h"
+#include "repeater.h"
 
 #define TAG "audio_stream"
 
@@ -766,6 +767,88 @@ static esp_err_t spiffs_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── GET /api/repeater/status ─────────────────────────────────────────────────
+
+static const char *repeater_state_str(repeater_state_t st)
+{
+    switch (st) {
+        case REPEATER_STATE_IDLE:      return "idle";
+        case REPEATER_STATE_RECORDING: return "recording";
+        case REPEATER_STATE_TAIL:      return "tail";
+        case REPEATER_STATE_PENDING:   return "pending";
+        case REPEATER_STATE_TX:        return "tx";
+        default:                       return "unknown";
+    }
+}
+
+static esp_err_t repeater_status_handler(httpd_req_t *req)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"enabled\":%s,\"state\":\"%s\",\"level\":%u,\"threshold\":%u}",
+             repeater_is_enabled() ? "true" : "false",
+             repeater_state_str(repeater_get_state()),
+             (unsigned)repeater_get_level(),
+             (unsigned)repeater_get_threshold());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
+// ─── POST /api/repeater/config ────────────────────────────────────────────────
+
+static esp_err_t repeater_config_handler(httpd_req_t *req)
+{
+    char body[128] = {0};
+    int got = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
+    if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
+
+    cJSON *thr = cJSON_GetObjectItem(j, "squelch_threshold");
+    if (cJSON_IsNumber(thr) && thr->valueint >= 0)
+        repeater_set_threshold((uint32_t)thr->valueint);
+
+    cJSON_Delete(j);
+    char resp[96];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"threshold\":%lu}", (unsigned long)repeater_get_threshold());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// ─── POST /api/repeater/enable ────────────────────────────────────────────────
+
+static esp_err_t repeater_enable_handler(httpd_req_t *req)
+{
+    char body[64] = {0};
+    int got = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (got <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body");
+        return ESP_FAIL;
+    }
+    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
+    if (!j) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    cJSON *en = cJSON_GetObjectItem(j, "enabled");
+    if (cJSON_IsBool(en)) repeater_set_enabled(cJSON_IsTrue(en));
+    cJSON_Delete(j);
+
+    char resp[96];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"enabled\":%s}",
+             repeater_is_enabled() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {
@@ -776,7 +859,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 23;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -859,6 +942,26 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_rx_stats);
     httpd_register_uri_handler(s_httpd, &uri_reboot);
     httpd_register_uri_handler(s_httpd, &uri_spiffs_upload);
+
+    static const httpd_uri_t uri_rep_status = {
+        .uri     = "/api/repeater/status",
+        .method  = HTTP_GET,
+        .handler = repeater_status_handler,
+    };
+    static const httpd_uri_t uri_rep_enable = {
+        .uri     = "/api/repeater/enable",
+        .method  = HTTP_POST,
+        .handler = repeater_enable_handler,
+    };
+    static const httpd_uri_t uri_rep_config = {
+        .uri     = "/api/repeater/config",
+        .method  = HTTP_POST,
+        .handler = repeater_config_handler,
+    };
+    httpd_register_uri_handler(s_httpd, &uri_rep_status);
+    httpd_register_uri_handler(s_httpd, &uri_rep_enable);
+    httpd_register_uri_handler(s_httpd, &uri_rep_config);
+
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

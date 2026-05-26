@@ -1,40 +1,77 @@
 {
-    "version": "1",
-    "aprs": {
-        "callsign": "EA1JBS",
-        "ssid": 11,
-        "symbol_table": "/",
-        "symbol_code": ">"
+  "version": "1",
+  "aprs": {
+    "callsign": "EA1JBS",
+    "ssid": 12,
+    "symbol_table": "/",
+    "symbol_code": ">",
+    "post_rx_tx_delay_ms": 950
+  },
+  "wifi": [
+    {
+      "ssid": "DIGIFIBRA-8E8F",
+      "password": "XKHGBFTLRK",
+      "connect_timeout_s": 30
     },
-    "wifi": {
-        "ssid": "DIGIFIBRA-8E8F",
-        "password": "XKHGBFTLRK",
-        "connect_timeout_s": 120
-    },
-    "ap": {
-        "enabled": true,
-        "ssid": "APRS_AP",
-        "password": "12345678"
-    },
-    "ip": {
-        "enabled": false,
-        "addr": "44.61.3.71",
-        "netmask": "255.255.255.0",
-        "gateway": "44.61.3.1",
-        "ssid": 1
-    },
-    "digi": {
-        "enabled": false,
-        "alias": ["WIDE1-1", "WIDE2-2", "RELAY"],
-        "callsign": "EA1JBS",
-        "ssid": 0,
-        "comment": "ESP32-DIGI"
-    },
-    "morse": {
-        "enabled": true,
-        "callsign": "",
-        "tone_hz": 1000,
-        "wpm": 20,
-        "period_s": 600
+    {
+      "ssid": "DIGIFIBRA-CNdR",
+      "password": "UQtP2yu779cs",
+      "connect_timeout_s": 30
     }
+  ],
+  "ap": {
+    "enabled": true,
+    "ssid": "APRS_AP",
+    "password": "12345678"
+  },
+  "ip": {
+    "enabled": true,
+    "mode": "tun",
+    "addr": "44.61.3.75",
+    "netmask": "255.255.255.0",
+    "gateway": "44.61.3.1"
+  },
+  "digi": {
+    "enabled": false,
+    "alias": [
+      "WIDE1-1",
+      "WIDE2-2",
+      "RELAY"
+    ],
+    "comment": "ESP32-DIGI"
+  },
+  "morse": {
+    "enabled": false,
+    "tone_hz": 1000,
+    "wpm": 20,
+    "period_s": 600
+  },
+  "gps": {
+    "enabled": true,
+    "baud": 9600,
+    "use_for_beacon": false
+  },
+  "display": {
+    "enabled": true,
+    "i2c_addr": 60
+  },
+  "rx": {
+    "dual_modem_enabled": true,
+    "active_modem": "best",
+    "squelch_threshold": 0,
+    "deemphasis_enabled": false
+  },
+  "remote_cmd": {
+    "enabled": true
+  },
+  "repeater": {
+    "enabled": false,
+    "squelch_threshold": 15,
+    "lockout_ms": 3000,
+    "max_record_s": 3,
+    "tail_delay_ms": 1000,
+    "courtesy_tone_hz": 1000,
+    "courtesy_tone_ms": 200,
+    "cw_id": true
+  }
 }

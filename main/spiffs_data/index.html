@@ -177,6 +177,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('sstv',this)">SSTV</button>
       <button class="tab-btn" onclick="showTab('ota',this)">OTA</button>
       <button class="tab-btn" onclick="showTab('spiffs',this)">SPIFFS</button>
+      <button class="tab-btn" onclick="showTab('rep',this)">REPEATER</button>
     </div>
     <div id="tab-log" class="tab-pane active">
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
@@ -360,6 +361,36 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <div id="spiffs-pct" style="font-size:.6rem;color:#666;text-align:right">0%</div>
       </div>
       <div id="spiffs-status" style="font-size:.65rem;min-height:1rem"></div>
+    </div>
+    <div id="tab-rep" class="tab-pane" style="justify-content:flex-start;gap:.8rem">
+      <div style="font-size:.65rem;color:#888">Repetidor de voz semi-duplex. Graba audio al abrir el squelch y lo retransmite tras el silencio.</div>
+      <div style="display:flex;align-items:center;gap:.8rem;flex-wrap:wrap">
+        <span style="font-size:.65rem;color:#aaa">Estado:</span>
+        <span id="rep-state" style="font-size:.7rem;font-family:monospace;font-weight:bold;color:#888">cargando…</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:.4rem">
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <span style="font-size:.65rem;color:#aaa;width:4rem">Ruido HF:</span>
+          <div style="position:relative;background:#111;border:1px solid #333;border-radius:3px;height:10px;width:120px;overflow:visible">
+            <div id="rep-level-bar" style="height:100%;width:0%;background:#4a8a4a;border-radius:2px;transition:width .3s"></div>
+            <div id="rep-thr-marker" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:#c8a04a;left:15%"></div>
+          </div>
+          <span id="rep-level-val" style="font-size:.65rem;font-family:monospace;color:#ccc;width:2rem">0</span>
+          <span style="font-size:.6rem;color:#555">thr:<span id="rep-thr-val">15</span></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem">
+          <span style="font-size:.65rem;color:#aaa;width:4rem">Squelch:</span>
+          <input type="range" id="rep-squelch" min="1" max="100" value="15" style="width:120px"
+            oninput="document.getElementById('rep-squelch-val').textContent=this.value"
+            onchange="repSquelchCommit(this.value)">
+          <span id="rep-squelch-val" style="font-size:.65rem;font-family:monospace;color:#ccc;width:2rem">15</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+        <button onclick="repSetEnabled(true)" id="rep-btn-on" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a3a1a;color:#80e880;border:1px solid #2a6a2a;border-radius:3px;cursor:pointer">&#x25CF; Activar</button>
+        <button onclick="repSetEnabled(false)" id="rep-btn-off" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#3a1a1a;color:#e88080;border:1px solid #6a2a2a;border-radius:3px;cursor:pointer">&#x25CF; Desactivar</button>
+      </div>
+      <div id="rep-msg" style="font-size:.65rem;min-height:1rem;color:#888"></div>
     </div>
   </div>
 </div>
@@ -567,6 +598,8 @@ function handleMsg(p){
   } else if(p.type==='ota_error'){
     otaSetStatus('✗ Error: '+(p.msg||'desconocido'),'#c04040');
     document.getElementById('ota-btn').disabled=false;
+  } else if(p.type==='repeater'){
+    repUpdateState(p.state||'idle',p.level,p.threshold);
   } else if(p.src!=null){
     const k=p.src+'|'+p.dst+'|'+p.info;
     if(!isDuplicate(k))appendLog(p.src,p.dst||'',p.path||'',p.info||'');
@@ -1013,7 +1046,62 @@ function spiffsUpload(){
   xhr.onerror=()=>{btn.disabled=false;st.textContent='✗ Error de red';st.style.color='#c04040';};
   xhr.send(file);
 }
-window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});});
+// ── Repeater ──────────────────────────────────────────────────────────────────
+const REP_STATE_COLOR={idle:'#888',recording:'#e8c040',tail:'#e8a040',pending:'#a0c8e8',tx:'#80e880'};
+const REP_LEVEL_MAX=80; // treat 80+ as full bar
+function repUpdateLevel(level,threshold){
+  const bar=document.getElementById('rep-level-bar');
+  const val=document.getElementById('rep-level-val');
+  const thr=document.getElementById('rep-thr-marker');
+  const thrv=document.getElementById('rep-thr-val');
+  if(!bar)return;
+  const pct=Math.min(level/REP_LEVEL_MAX*100,100);
+  bar.style.width=pct+'%';
+  // Bar is red when HF noise is HIGH (no carrier), green when noise drops (carrier/open squelch)
+  bar.style.background=level<(threshold||20)?'#4a8a4a':'#c84040';
+  if(val)val.textContent=level;
+  if(thrv)thrv.textContent=threshold||'?';
+  if(thr){const tp=Math.min((threshold||15)/REP_LEVEL_MAX*100,100);thr.style.left=tp+'%';}
+}
+function repUpdateState(st,level,threshold){
+  const el=document.getElementById('rep-state');
+  if(!el)return;
+  el.textContent=st.toUpperCase();
+  el.style.color=REP_STATE_COLOR[st]||'#888';
+  if(level!=null)repUpdateLevel(level,threshold);
+}
+function repSetEnabled(en){
+  const msg=document.getElementById('rep-msg');
+  fetch('/api/repeater/enable',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})})
+    .then(r=>r.json())
+    .then(d=>{msg.textContent=d.enabled?'Repetidor activado':'Repetidor desactivado';msg.style.color=d.enabled?'#4a9a4a':'#aaa';})
+    .catch(()=>{msg.textContent='Error de red';msg.style.color='#c04040';});
+}
+function repSquelchCommit(v){
+  fetch('/api/repeater/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({squelch_threshold:parseInt(v)})})
+    .then(r=>r.json()).then(d=>{
+      if(d.threshold!=null){
+        document.getElementById('rep-squelch-val').textContent=d.threshold;
+        document.getElementById('rep-squelch').value=d.threshold;
+      }
+    }).catch(()=>{});
+}
+function repRefresh(){
+  fetch('/api/repeater/status').then(r=>r.json()).then(d=>{
+    repUpdateState(d.state||'idle',d.level,d.threshold);
+    if(d.threshold!=null){
+      document.getElementById('rep-squelch').value=d.threshold;
+      document.getElementById('rep-squelch-val').textContent=d.threshold;
+    }
+  }).catch(()=>{});
+}
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  const orig=btn.onclick;
+  btn.onclick=function(e){if(orig)orig.call(this,e);if(this.textContent==='REPEATER')repRefresh();};
+});
+// Squelch slider label
+document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
+window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});repRefresh();});
 </script>
 </body>
 </html>
