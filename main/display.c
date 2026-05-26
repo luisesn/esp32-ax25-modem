@@ -363,11 +363,7 @@ static void screen_normal(char *line) {
             case REPEATER_STATE_TX:        rep_label = "RPT!"; break;
             default:                       rep_label = "RPT:"; break;
         }
-        // Show state label + numeric level + threshold marker
-        uint32_t lv  = repeater_get_level();
-        uint32_t thr = repeater_get_threshold();
-        snprintf(line, 32, "%s%2u/%u", rep_label, (unsigned)(lv > 99 ? 99 : lv), (unsigned)thr);
-        fb_text(7, 0, line);
+        fb_text(7, 0, rep_label);
     }
 }
 

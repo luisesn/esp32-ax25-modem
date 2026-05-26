@@ -18,6 +18,7 @@
 #include "morse.h"
 #include "rx_stats.h"
 #include "AFSK.h"
+#include "squelch_sf.h"
 #include "repeater.h"
 
 #define TAG "audio_stream"
@@ -49,8 +50,6 @@ static const int step_table[89] = {
 };
 static const int index_table[8] = { -1, -1, -1, -1, 2, 4, 6, 8 };
 
-typedef struct { int32_t predictor; int8_t step_index; } adpcm_state_t;
-
 static uint8_t adpcm_encode(adpcm_state_t *st, int16_t sample) {
     int diff = sample - (int16_t)st->predictor;
     uint8_t nibble = 0;
@@ -78,7 +77,7 @@ static uint8_t adpcm_encode(adpcm_state_t *st, int16_t sample) {
 // Codifica 1017 muestras int8 en un bloque ADPCM WAV de 512 bytes.
 // samples[0] se guarda como predictor de cabecera (no encoded); samples[1..1016]
 // se empacan como nibbles (low nibble primero), 2 por byte → 508 bytes de datos.
-static void encode_block(adpcm_state_t *st, const int8_t *samples, uint8_t *block) {
+void encode_block(adpcm_state_t *st, const int8_t *samples, uint8_t *block) {
     // La primera muestra es el predictor inicial (no se codifica como nibble)
     int16_t first = (int16_t)samples[0] << 8;
     st->predictor  = first;
@@ -94,6 +93,36 @@ static void encode_block(adpcm_state_t *st, const int8_t *samples, uint8_t *bloc
         uint8_t lo = adpcm_encode(st, (int16_t)samples[si]     << 8);
         uint8_t hi = adpcm_encode(st, (int16_t)samples[si + 1] << 8);
         block[4 + i] = (uint8_t)(lo | (hi << 4));
+    }
+}
+
+static int8_t adpcm_decode_nibble(adpcm_state_t *st, uint8_t nibble) {
+    int step  = step_table[(int)st->step_index];
+    int delta = step >> 3;
+    if (nibble & 4) delta += step;
+    if (nibble & 2) delta += step >> 1;
+    if (nibble & 1) delta += step >> 2;
+    if (nibble & 8) st->predictor -= delta;
+    else            st->predictor += delta;
+    if (st->predictor >  32767) st->predictor =  32767;
+    if (st->predictor < -32768) st->predictor = -32768;
+    st->step_index += index_table[nibble & 7];
+    if (st->step_index < 0)  st->step_index = 0;
+    if (st->step_index > 88) st->step_index = 88;
+    return (int8_t)(st->predictor >> 8);
+}
+
+void decode_block(const uint8_t *block, int8_t *samples) {
+    adpcm_state_t st;
+    st.predictor  = (int16_t)((uint16_t)block[0] | ((uint16_t)block[1] << 8));
+    st.step_index = (int8_t)block[2];
+    if (st.step_index < 0)  st.step_index = 0;
+    if (st.step_index > 88) st.step_index = 88;
+    samples[0] = (int8_t)(st.predictor >> 8);
+    for (int i = 0; i < 508; i++) {
+        uint8_t byte = block[4 + i];
+        samples[1 + i * 2]     = adpcm_decode_nibble(&st, byte & 0x0F);
+        samples[1 + i * 2 + 1] = adpcm_decode_nibble(&st, byte >> 4);
     }
 }
 
@@ -132,8 +161,10 @@ static void build_wav_header(uint8_t *buf) {
 
 // ─── Shared stream state ──────────────────────────────────────────────────────
 
-static httpd_handle_t s_httpd      = NULL;
-static QueueHandle_t  s_wav_q      = NULL; // blocks for WAV TCP client
+static httpd_handle_t s_httpd          = NULL;
+static QueueHandle_t  s_wav_q          = NULL; // blocks for WAV TCP client
+static TaskHandle_t   s_wav_task_hdl   = NULL;
+static volatile int   s_wav_srv_fd     = -1;
 
 httpd_handle_t audio_stream_get_httpd(void) { return s_httpd; }
 
@@ -503,6 +534,7 @@ static void wav_server_task(void *arg) {
     };
     bind(srv, (struct sockaddr *)&addr, sizeof(addr));
     listen(srv, 1);
+    s_wav_srv_fd = srv;
     ESP_LOGI(TAG, "Servidor WAV escuchando en puerto %d", AUDIO_WAV_PORT);
 
     for (;;) {
@@ -783,40 +815,13 @@ static const char *repeater_state_str(repeater_state_t st)
 
 static esp_err_t repeater_status_handler(httpd_req_t *req)
 {
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-             "{\"enabled\":%s,\"state\":\"%s\",\"level\":%u,\"threshold\":%u}",
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"enabled\":%s,\"state\":\"%s\"}",
              repeater_is_enabled() ? "true" : "false",
-             repeater_state_str(repeater_get_state()),
-             (unsigned)repeater_get_level(),
-             (unsigned)repeater_get_threshold());
+             repeater_state_str(repeater_get_state()));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, buf);
-    return ESP_OK;
-}
-
-// ─── POST /api/repeater/config ────────────────────────────────────────────────
-
-static esp_err_t repeater_config_handler(httpd_req_t *req)
-{
-    char body[128] = {0};
-    int got = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
-    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
-    if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
-
-    cJSON *thr = cJSON_GetObjectItem(j, "squelch_threshold");
-    if (cJSON_IsNumber(thr) && thr->valueint >= 0)
-        repeater_set_threshold((uint32_t)thr->valueint);
-
-    cJSON_Delete(j);
-    char resp[96];
-    snprintf(resp, sizeof(resp),
-             "{\"ok\":true,\"threshold\":%lu}", (unsigned long)repeater_get_threshold());
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_sendstr(req, resp);
     return ESP_OK;
 }
 
@@ -849,6 +854,91 @@ static esp_err_t repeater_enable_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── POST /api/squelch/sf_config ─────────────────────────────────────────────
+
+static esp_err_t squelch_sf_config_handler(httpd_req_t *req)
+{
+    char body[64] = {0};
+    int got = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
+    if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
+
+    cJSON *thr = cJSON_GetObjectItem(j, "hfne_threshold");
+    if (cJSON_IsNumber(thr)) squelch_hfne_set_threshold((float)thr->valuedouble);
+    cJSON_Delete(j);
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"hfne_thr\":%.2f}", (double)squelch_hfne_get_threshold());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// ─── GET /api/squelch/status ──────────────────────────────────────────────────
+
+static esp_err_t squelch_status_handler(httpd_req_t *req)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"active\":%s,\"manual\":%s,\"hfne\":%.3f,\"open\":%s,\"thr\":%.2f}",
+             squelch_sf_is_active()         ? "true" : "false",
+             squelch_sf_is_monitor_active() ? "true" : "false",
+             (double)squelch_hfne_get_value(),
+             squelch_hfne_is_open()         ? "true" : "false",
+             (double)squelch_hfne_get_threshold());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
+// ─── POST /api/squelch/monitor ────────────────────────────────────────────────
+
+static esp_err_t squelch_monitor_handler(httpd_req_t *req)
+{
+    char body[32] = {0};
+    int got = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
+    if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
+    cJSON *en = cJSON_GetObjectItem(j, "active");
+    if (cJSON_IsBool(en)) squelch_sf_set_monitor_active(cJSON_IsTrue(en));
+    cJSON_Delete(j);
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"active\":%s,\"manual\":%s}",
+             squelch_sf_is_active()         ? "true" : "false",
+             squelch_sf_is_monitor_active() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
+
+// ─── WAV server teardown ──────────────────────────────────────────────────────
+
+void audio_stream_stop_wav_server(void)
+{
+    if (s_wav_task_hdl == NULL) return;
+
+    // Close the listening socket — unblocks accept() with an error so the task
+    // stops trying to serve new clients.
+    int fd = s_wav_srv_fd;
+    s_wav_srv_fd = -1;
+    if (fd >= 0) close(fd);
+
+    // Drop the per-session queue if a client was connected.
+    if (s_wav_q) {
+        vQueueDelete(s_wav_q);
+        s_wav_q = NULL;
+    }
+
+    vTaskDelete(s_wav_task_hdl);
+    s_wav_task_hdl = NULL;
+    ESP_LOGI(TAG, "WAV server stopped (repeater mode)");
+}
+
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {
@@ -859,7 +949,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 23;
+    cfg.max_uri_handlers = 25;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -953,21 +1043,34 @@ void audio_stream_init(void) {
         .method  = HTTP_POST,
         .handler = repeater_enable_handler,
     };
-    static const httpd_uri_t uri_rep_config = {
-        .uri     = "/api/repeater/config",
-        .method  = HTTP_POST,
-        .handler = repeater_config_handler,
-    };
     httpd_register_uri_handler(s_httpd, &uri_rep_status);
     httpd_register_uri_handler(s_httpd, &uri_rep_enable);
-    httpd_register_uri_handler(s_httpd, &uri_rep_config);
+
+    static const httpd_uri_t uri_sf_config = {
+        .uri     = "/api/squelch/sf_config",
+        .method  = HTTP_POST,
+        .handler = squelch_sf_config_handler,
+    };
+    static const httpd_uri_t uri_sq_status = {
+        .uri     = "/api/squelch/status",
+        .method  = HTTP_GET,
+        .handler = squelch_status_handler,
+    };
+    static const httpd_uri_t uri_sq_monitor = {
+        .uri     = "/api/squelch/monitor",
+        .method  = HTTP_POST,
+        .handler = squelch_monitor_handler,
+    };
+    httpd_register_uri_handler(s_httpd, &uri_sf_config);
+    httpd_register_uri_handler(s_httpd, &uri_sq_status);
+    httpd_register_uri_handler(s_httpd, &uri_sq_monitor);
 
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch
     xTaskCreate(audio_stream_task, "audio_stream", 4096, NULL, 3, NULL);
     // Servidor WAV TCP
-    xTaskCreate(wav_server_task,   "wav_server",   4096, NULL, 3, NULL);
+    xTaskCreate(wav_server_task, "wav_server", 4096, NULL, 3, &s_wav_task_hdl);
 
     ESP_LOGI(TAG, "Streaming iniciado — http://ip/ (player) | http://ip:%d/audio (ffplay/VLC)",
              AUDIO_WAV_PORT);

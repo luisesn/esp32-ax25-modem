@@ -21,6 +21,7 @@ idf_component_register(
         "remote_cmd.c"
         "ota.c"
         "repeater.c"
+        "squelch_sf.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

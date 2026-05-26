@@ -24,6 +24,7 @@
 #include "remote_cmd.h"
 #include "ota.h"
 #include "repeater.h"
+#include "squelch_sf.h"
 #include "esp_heap_caps.h"
 
 #include "device.h"
@@ -462,6 +463,7 @@ static void audio_sample_hook(int8_t sample) {
     if (audio_stream_q)
         xQueueSendToBack(audio_stream_q, &sample, 0);
     repeater_audio_hook(sample);
+    squelch_sf_push_sample(sample);
 }
 
 void app_main(void)
@@ -526,6 +528,7 @@ void app_main(void)
     sstv_init();
     ota_init();
     repeater_init(config_get());
+    squelch_sf_init(config_get());
     afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS

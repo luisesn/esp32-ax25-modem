@@ -368,29 +368,44 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <span style="font-size:.65rem;color:#aaa">Estado:</span>
         <span id="rep-state" style="font-size:.7rem;font-family:monospace;font-weight:bold;color:#888">cargando…</span>
       </div>
-      <div style="display:flex;flex-direction:column;gap:.4rem">
-        <div style="display:flex;align-items:center;gap:.5rem">
-          <span style="font-size:.65rem;color:#aaa;width:4rem">Ruido HF:</span>
-          <div style="position:relative;background:#111;border:1px solid #333;border-radius:3px;height:10px;width:120px;overflow:visible">
-            <div id="rep-level-bar" style="height:100%;width:0%;background:#4a8a4a;border-radius:2px;transition:width .3s"></div>
-            <div id="rep-thr-marker" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:#c8a04a;left:15%"></div>
-          </div>
-          <span id="rep-level-val" style="font-size:.65rem;font-family:monospace;color:#ccc;width:2rem">0</span>
-          <span style="font-size:.6rem;color:#555">thr:<span id="rep-thr-val">15</span></span>
-        </div>
-        <div style="display:flex;align-items:center;gap:.5rem">
-          <span style="font-size:.65rem;color:#aaa;width:4rem">Squelch:</span>
-          <input type="range" id="rep-squelch" min="1" max="100" value="15" style="width:120px"
-            oninput="document.getElementById('rep-squelch-val').textContent=this.value"
-            onchange="repSquelchCommit(this.value)">
-          <span id="rep-squelch-val" style="font-size:.65rem;font-family:monospace;color:#ccc;width:2rem">15</span>
-        </div>
-      </div>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap">
         <button onclick="repSetEnabled(true)" id="rep-btn-on" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a3a1a;color:#80e880;border:1px solid #2a6a2a;border-radius:3px;cursor:pointer">&#x25CF; Activar</button>
         <button onclick="repSetEnabled(false)" id="rep-btn-off" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#3a1a1a;color:#e88080;border:1px solid #6a2a2a;border-radius:3px;cursor:pointer">&#x25CF; Desactivar</button>
       </div>
       <div id="rep-msg" style="font-size:.65rem;min-height:1rem;color:#888"></div>
+      <div style="border-top:1px solid #2a2a2a;padding-top:.6rem;display:flex;flex-direction:column;gap:.4rem">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="font-size:.6rem;color:#555;letter-spacing:.06em">HFNE SQUELCH</div>
+          <div style="display:flex;align-items:center;gap:.4rem">
+            <span id="hfne-active-lbl" style="font-size:.6rem;color:#555">inactivo</span>
+            <label style="position:relative;display:inline-block;width:32px;height:16px;cursor:pointer">
+              <input type="checkbox" id="hfne-monitor-sw" style="opacity:0;width:0;height:0"
+                onchange="hfneMonitorToggle(this.checked)">
+              <span id="hfne-sw-track" style="position:absolute;inset:0;background:#333;border-radius:8px;transition:background .2s">
+                <span id="hfne-sw-thumb" style="position:absolute;top:2px;left:2px;width:12px;height:12px;background:#666;border-radius:50%;transition:left .2s"></span>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div id="hfne-panel" style="display:flex;flex-direction:column;gap:.4rem;opacity:.35;pointer-events:none">
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <span style="font-size:.65rem;color:#aaa;width:4rem">HFNE:</span>
+            <div style="position:relative;background:#111;border:1px solid #333;border-radius:3px;height:10px;width:120px;overflow:visible">
+              <div id="hfne-bar" style="height:100%;width:100%;background:#c84040;border-radius:2px;transition:width .1s"></div>
+              <div id="hfne-thr-marker" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:#f0b35a;left:50%"></div>
+            </div>
+            <span id="hfne-val" style="font-size:.65rem;font-family:monospace;color:#ccc;width:3rem">1.000</span>
+            <span id="hfne-badge" style="font-size:.6rem;padding:.05rem .3rem;background:#1a1a1a;border:1px solid #444;border-radius:2px;color:#666">cerrado</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:.5rem">
+            <span style="font-size:.65rem;color:#aaa;width:4rem">thr:</span>
+            <input type="range" id="hfne-thr-slider" min="5" max="95" value="10" step="5" style="width:120px"
+              oninput="document.getElementById('hfne-thr-disp').textContent=(this.value/100).toFixed(2)"
+              onchange="hfneThreshCommit(this.value/100)">
+            <span id="hfne-thr-disp" style="font-size:.65rem;font-family:monospace;color:#ccc;width:3rem">0.10</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -599,7 +614,9 @@ function handleMsg(p){
     otaSetStatus('✗ Error: '+(p.msg||'desconocido'),'#c04040');
     document.getElementById('ota-btn').disabled=false;
   } else if(p.type==='repeater'){
-    repUpdateState(p.state||'idle',p.level,p.threshold);
+    repUpdateState(p.state||'idle');
+  } else if(p.type==='squelch_sf'){
+    hfneUpdate(p.hfne,p.open,p.active,p.manual);
   } else if(p.src!=null){
     const k=p.src+'|'+p.dst+'|'+p.info;
     if(!isDuplicate(k))appendLog(p.src,p.dst||'',p.path||'',p.info||'');
@@ -1048,27 +1065,11 @@ function spiffsUpload(){
 }
 // ── Repeater ──────────────────────────────────────────────────────────────────
 const REP_STATE_COLOR={idle:'#888',recording:'#e8c040',tail:'#e8a040',pending:'#a0c8e8',tx:'#80e880'};
-const REP_LEVEL_MAX=80; // treat 80+ as full bar
-function repUpdateLevel(level,threshold){
-  const bar=document.getElementById('rep-level-bar');
-  const val=document.getElementById('rep-level-val');
-  const thr=document.getElementById('rep-thr-marker');
-  const thrv=document.getElementById('rep-thr-val');
-  if(!bar)return;
-  const pct=Math.min(level/REP_LEVEL_MAX*100,100);
-  bar.style.width=pct+'%';
-  // Bar is red when HF noise is HIGH (no carrier), green when noise drops (carrier/open squelch)
-  bar.style.background=level<(threshold||20)?'#4a8a4a':'#c84040';
-  if(val)val.textContent=level;
-  if(thrv)thrv.textContent=threshold||'?';
-  if(thr){const tp=Math.min((threshold||15)/REP_LEVEL_MAX*100,100);thr.style.left=tp+'%';}
-}
-function repUpdateState(st,level,threshold){
+function repUpdateState(st){
   const el=document.getElementById('rep-state');
   if(!el)return;
   el.textContent=st.toUpperCase();
   el.style.color=REP_STATE_COLOR[st]||'#888';
-  if(level!=null)repUpdateLevel(level,threshold);
 }
 function repSetEnabled(en){
   const msg=document.getElementById('rep-msg');
@@ -1077,29 +1078,60 @@ function repSetEnabled(en){
     .then(d=>{msg.textContent=d.enabled?'Repetidor activado':'Repetidor desactivado';msg.style.color=d.enabled?'#4a9a4a':'#aaa';})
     .catch(()=>{msg.textContent='Error de red';msg.style.color='#c04040';});
 }
-function repSquelchCommit(v){
-  fetch('/api/repeater/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({squelch_threshold:parseInt(v)})})
-    .then(r=>r.json()).then(d=>{
-      if(d.threshold!=null){
-        document.getElementById('rep-squelch-val').textContent=d.threshold;
-        document.getElementById('rep-squelch').value=d.threshold;
-      }
-    }).catch(()=>{});
+function hfneSetActive(active,manual){
+  const sw=document.getElementById('hfne-monitor-sw');
+  const track=document.getElementById('hfne-sw-track');
+  const thumb=document.getElementById('hfne-sw-thumb');
+  const lbl=document.getElementById('hfne-active-lbl');
+  const panel=document.getElementById('hfne-panel');
+  if(sw&&sw.checked!==!!manual)sw.checked=!!manual;
+  if(track)track.style.background=manual?'#1a3a5c':'#333';
+  if(thumb)thumb.style.left=manual?'18px':'2px';
+  if(lbl){lbl.textContent=active?(manual?'monitor':'repetidor'):'inactivo';lbl.style.color=active?'#7ecfff':'#555';}
+  if(panel){panel.style.opacity=active?'1':'0.35';panel.style.pointerEvents=active?'auto':'none';}
+}
+function hfneUpdate(v,open,active,manual){
+  if(active!=null)hfneSetActive(active,manual);
+  if(v==null)return;
+  const bar=document.getElementById('hfne-bar');
+  const val=document.getElementById('hfne-val');
+  const badge=document.getElementById('hfne-badge');
+  const pct=Math.min(Math.max(v*100,0),100);
+  if(bar){bar.style.width=pct+'%';bar.style.background=open?'#4a8a4a':'#c84040';}
+  if(val)val.textContent=v.toFixed(3);
+  if(badge){badge.textContent=open?'ABIERTO':'cerrado';badge.style.borderColor=open?'#4a9a4a':'#444';badge.style.color=open?'#4fc84f':'#666';}
+}
+function hfneMonitorToggle(en){
+  fetch('/api/squelch/monitor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:en})})
+    .then(r=>r.json()).then(d=>{hfneSetActive(d.active,d.manual);}).catch(()=>{});
+}
+function hfneSetThr(thr){
+  const marker=document.getElementById('hfne-thr-marker');
+  const thrDisp=document.getElementById('hfne-thr-disp');
+  const slider=document.getElementById('hfne-thr-slider');
+  if(marker)marker.style.left=Math.min(thr*100,100)+'%';
+  if(thrDisp)thrDisp.textContent=thr.toFixed(2);
+  if(slider)slider.value=Math.round(thr*100);
+}
+function hfneThreshCommit(v){
+  fetch('/api/squelch/sf_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hfne_threshold:parseFloat(v)})})
+    .then(r=>r.json()).then(d=>{if(d.hfne_thr!=null)hfneSetThr(d.hfne_thr);})
+    .catch(()=>{});
 }
 function repRefresh(){
   fetch('/api/repeater/status').then(r=>r.json()).then(d=>{
-    repUpdateState(d.state||'idle',d.level,d.threshold);
-    if(d.threshold!=null){
-      document.getElementById('rep-squelch').value=d.threshold;
-      document.getElementById('rep-squelch-val').textContent=d.threshold;
-    }
+    repUpdateState(d.state||'idle');
+  }).catch(()=>{});
+  fetch('/api/squelch/status').then(r=>r.json()).then(d=>{
+    hfneSetActive(d.active,d.manual);
+    if(d.hfne!=null)hfneUpdate(d.hfne,d.open,d.active,d.manual);
+    if(d.thr!=null)hfneSetThr(d.thr);
   }).catch(()=>{});
 }
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   const orig=btn.onclick;
   btn.onclick=function(e){if(orig)orig.call(this,e);if(this.textContent==='REPEATER')repRefresh();};
 });
-// Squelch slider label
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
 window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});repRefresh();});
 </script>
