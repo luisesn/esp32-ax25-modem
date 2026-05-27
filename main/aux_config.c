@@ -82,7 +82,9 @@ cJSON *config_reload() {
 
     // Load fresh config
     root = config_load_from_file();
-    return root;
+    // Return a duplicate, consistent with config_load(), so callers can safely
+    // pass the result to init functions without risk of freeing the internal root.
+    return root ? cJSON_Duplicate(root, 1) : NULL;
 }
 
 void config_free_json(cJSON *config) {
@@ -110,8 +112,3 @@ bool save_config(const char *json_str) {
     return true;
 }
 
-bool config_updated() {
-    // For now, assume config is updated if save was called
-    // In future, could compare with previous config
-    return true;
-}

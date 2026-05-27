@@ -45,7 +45,8 @@ static volatile int s_client_fd = -1;
 typedef struct { char ssid[32]; char pass[64]; int timeout_s; } wifi_net_t;
 static wifi_net_t   s_nets[MAX_WIFI_NETS];
 static int          s_net_count  = 0;
-static bool         s_ap_enabled = false;
+static bool         s_ap_enabled     = false;
+static bool         s_ap_netif_created = false;   // guard against double esp_netif_create_default_wifi_ap()
 static char         s_ap_ssid[32] = "APRS-TNC";
 static char         s_ap_pass[64] = "";
 static TaskHandle_t s_reconnect_task_handle = NULL;
@@ -146,7 +147,10 @@ static void captive_dns_task(void *arg) {
 static void wifi_start_ap(const char *ssid, const char *password) {
     ESP_LOGI(TAG, "Iniciando AP '%s'...", ssid);
 
-    esp_netif_create_default_wifi_ap();
+    if (!s_ap_netif_created) {
+        esp_netif_create_default_wifi_ap();
+        s_ap_netif_created = true;
+    }
 
     wifi_config_t ap_cfg = {};
     snprintf((char *)ap_cfg.ap.ssid,     sizeof(ap_cfg.ap.ssid),     "%s", ssid);
@@ -393,6 +397,7 @@ static void server_task(void *arg) {
         }
 
         ESP_LOGI(TAG, "Cliente KISS desconectado");
+        kiss_reset();   // clear stale partial-frame state before next client connects
         s_client_fd = -1;
         close(fd);
     }

@@ -24,6 +24,11 @@ void kiss_init(kiss_frame_cb on_frame) {
     s_len      = 0;
 }
 
+void kiss_reset(void) {
+    s_state = S_IDLE;
+    s_len   = 0;
+}
+
 void kiss_rx_byte(uint8_t b) {
     switch (s_state) {
     case S_IDLE:

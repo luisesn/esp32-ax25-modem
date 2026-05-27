@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-26): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-05-27): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -175,6 +175,28 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/squelch/monitor`  | Activa/desactiva modo monitor (squelch sin repetidor). Body JSON: `{"active":true}` |
 | `POST`   | `/api/squelch/sf_config`| Ajusta umbral HFNE en runtime. Body JSON: `{"hfne_threshold":0.25}` |
 | `POST`   | `/api/spiffs/upload?name=<fichero>` | Sube un fichero a SPIFFS. Body: binario raw. Escribe en `/spiffs/<fichero>`. Responde `{"ok":true,"name":"...","size":N}`. Útil para actualizar `index.html` sin reflashear todo el firmware |
+
+## Eventos WebSocket (`/ws`)
+
+El WebSocket mezcla tramas binarias (audio IMA ADPCM) con mensajes de texto JSON. Referencia de tipos:
+
+| `type` | Dirección | Descripción |
+|--------|-----------|-------------|
+| *(binario)* | servidor→cliente | Bloque de audio IMA ADPCM (512 B = 1 017 muestras a 9 600 Hz) |
+| `aprs` | servidor→cliente | Paquete AX.25 decodificado: `{"type":"aprs","src":"...","dst":"...","path":"...","info":"..."}` |
+| `ack_sent` | servidor→cliente | ACK automático transmitido: `{"type":"ack_sent","to":"..."}` |
+| `digipeated` | servidor→cliente | Trama retransmitida por el digipeater: `{"type":"digipeated","src":"...","dst":"...","path":"...","info":"..."}` |
+| `audio_level` | servidor→cliente | Nivel de audio y AGC: `{"type":"audio_level","peak":N,"agc":N}` |
+| `rx_stats` | servidor→cliente | Estadísticas del demodulador: `{"type":"rx_stats","ok":N,"err":N,...}` |
+| `repeater` | servidor→cliente | Estado del repetidor: `{"type":"repeater","state":"idle|recording|tail|pending|tx"}` |
+| `squelch_sf` | servidor→cliente | Estado del squelch HFNE: `{"type":"squelch_sf","hfne":0.08,"open":true,"active":true,"manual":false}` |
+| `sstv_progress` | servidor→cliente | Progreso SSTV: `{"type":"sstv_progress","line":N,"total":N}` |
+| `sstv_done` | servidor→cliente | SSTV finalizado: `{"type":"sstv_done"}` |
+| `sstv_aborted` | servidor→cliente | SSTV abortado: `{"type":"sstv_aborted"}` |
+| `ota_progress` | servidor→cliente | Progreso OTA: `{"type":"ota_progress","written":N,"total":N}` |
+| `digi_config` | servidor→cliente | Config digipeater actualizada: `{"type":"digi_config","enabled":bool}` |
+
+---
 
 ## Digipeater WIDEn-N
 

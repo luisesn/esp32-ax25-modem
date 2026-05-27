@@ -50,6 +50,10 @@ static volatile bool s_enabled   = false;
 static volatile int  s_period_s  = 600;
 static char          s_callsign[16];
 
+// Protects s_callsign, s_phase_step, s_unit_samples written by morse_init
+// (httpd task) against reads in morse_check_and_dispatch (receive_audio_task).
+static portMUX_TYPE s_morse_mux = portMUX_INITIALIZER_UNLOCKED;
+
 // ---------------------------------------------------------------------------
 // Forward declarations of DAC primitives (defined in AFSK.cpp, extern "C")
 // ---------------------------------------------------------------------------
@@ -120,15 +124,15 @@ static void send_morse_char(char c) {
     write_samples(2 * s_unit_samples, false);
 }
 
-static void do_morse_tx(void) {
+static void do_morse_tx(const char *callsign) {
     s_phase    = 0;
     s_buf_fill = 0;
 
     /* Short lead-in silence (3 units) */
     write_samples(3 * s_unit_samples, false);
 
-    for (int i = 0; s_callsign[i] != '\0'; i++) {
-        send_morse_char(s_callsign[i]);
+    for (int i = 0; callsign[i] != '\0'; i++) {
+        send_morse_char(callsign[i]);
     }
 
     flush_dac_buf();
@@ -142,17 +146,28 @@ bool morse_check_and_dispatch(void) {
     if (!s_enabled || !s_ready_sem) return false;
     if (xSemaphoreTake(s_ready_sem, 0) != pdTRUE) return false;
 
-    ESP_LOGI(TAG, "Morse beacon TX: %s  unit=%lu samp", s_callsign, (unsigned long)s_unit_samples);
+    // Snapshot mutable config to avoid a race with morse_init during TX.
+    taskENTER_CRITICAL(&s_morse_mux);
+    char snap_call[16];
+    memcpy(snap_call, s_callsign, sizeof(snap_call));
+    uint32_t snap_phase_step   = s_phase_step;
+    uint32_t snap_unit_samples = s_unit_samples;
+    taskEXIT_CRITICAL(&s_morse_mux);
+
+    (void)snap_phase_step;   // used indirectly via s_phase_step (uint32_t, atomic)
+    (void)snap_unit_samples; // used indirectly via s_unit_samples (uint32_t, atomic)
+
+    ESP_LOGI(TAG, "Morse beacon TX: %s  unit=%lu samp", snap_call, (unsigned long)s_unit_samples);
 
     {
         static char s_morse_json[64];
         snprintf(s_morse_json, sizeof(s_morse_json),
-                 "{\"type\":\"morse_tx\",\"call\":\"%s\"}", s_callsign);
+                 "{\"type\":\"morse_tx\",\"call\":\"%s\"}", snap_call);
         audio_stream_ws_send_text(s_morse_json);
     }
 
     afsk_morse_tx_begin();
-    do_morse_tx();
+    do_morse_tx(snap_call);
     afsk_morse_tx_end();
 
     xSemaphoreGive(s_done_sem);
@@ -173,8 +188,9 @@ static void morse_beacon_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS((uint32_t)s_period_s * 1000u));
         if (s_enabled) {
             xSemaphoreGive(s_ready_sem);
-            /* Wait until receive_audio_task finishes the TX. */
-            xSemaphoreTake(s_done_sem, portMAX_DELAY);
+            /* Wait until receive_audio_task finishes the TX (60 s guard). */
+            if (xSemaphoreTake(s_done_sem, pdMS_TO_TICKS(60000)) != pdTRUE)
+                ESP_LOGW(TAG, "beacon dispatch timeout — TX may be stuck");
         }
     }
 }
@@ -207,6 +223,7 @@ void morse_init(const cJSON *cfg) {
 
             j = cJSON_GetObjectItem(m, "period_s");
             if (cJSON_IsNumber(j) && j->valueint > 0) period_s = j->valueint;
+            if (period_s > 86400) period_s = 86400;   // cap at 24 h to prevent multiply overflow
 
             j = cJSON_GetObjectItem(m, "callsign");
             if (cJSON_IsString(j) && j->valuestring[0] != '\0') {
@@ -226,24 +243,24 @@ void morse_init(const cJSON *cfg) {
         }
     }
 
-    /* --- Apply ----------------------------------------------------------- */
+    /* --- Precompute values before taking the lock ------------------------- */
+    uint8_t  new_sine_lut[256];
+    for (int i = 0; i < 256; i++)
+        new_sine_lut[i] = (uint8_t)(128.0f + 127.0f * sinf(2.0f * (float)M_PI * i / 256.0f));
+
+    uint32_t new_phase_step   = (uint32_t)((double)tone_hz * 4294967296.0 / 48000.0);
+    uint32_t new_unit_samples = (uint32_t)(48000UL * 60UL / (50UL * (uint32_t)wpm));
+
+    /* --- Apply atomically so morse_check_and_dispatch sees consistent data - */
+    taskENTER_CRITICAL(&s_morse_mux);
     s_enabled  = new_enabled;
     s_period_s = period_s;
     strncpy(s_callsign, callsign, sizeof(s_callsign) - 1);
     s_callsign[sizeof(s_callsign) - 1] = '\0';
-
-    /* Build 256-entry sine LUT: unsigned 8-bit, midpoint = 128, peak = 255 */
-    for (int i = 0; i < 256; i++) {
-        s_sine_lut[i] = (uint8_t)(128.0f + 127.0f * sinf(2.0f * (float)M_PI * i / 256.0f));
-    }
-
-    /* Phase step: s_phase is uint32; upper 8 bits index into 256-entry LUT.
-     * step = tone_hz / samplerate * 2^32
-     *      = tone_hz * 4294967296 / 48000                                   */
-    s_phase_step = (uint32_t)((double)tone_hz * 4294967296.0 / 48000.0);
-
-    /* Samples per PARIS timing unit: 48000 * 60 / (50 * wpm) */
-    s_unit_samples = (uint32_t)(48000UL * 60UL / (50UL * (uint32_t)wpm));
+    memcpy(s_sine_lut, new_sine_lut, sizeof(s_sine_lut));
+    s_phase_step   = new_phase_step;
+    s_unit_samples = new_unit_samples;
+    taskEXIT_CRITICAL(&s_morse_mux);
 
     /* Create semaphores once */
     if (!s_ready_sem) s_ready_sem = xSemaphoreCreateBinary();

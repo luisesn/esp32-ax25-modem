@@ -37,6 +37,10 @@
 #  endif
 #endif
 
+// Peak audio level shared with display_task. Written by audio_level_task after
+// reading and resetting audio_peak, so display_task always sees the last non-zero value.
+volatile int8_t g_display_peak = 0;
+
 // Project-level dispatch hook registered with afsk_set_dispatch_hook().
 // Called from receive_audio_task each iteration when not in TX mode.
 // Must not be called directly — task-ownership of I2S0 DAC is required.
@@ -170,6 +174,7 @@ static void audio_level_task(void *arg)
 
         int8_t peak = audio_peak;
         audio_peak  = 0;
+        g_display_peak = peak;  // feed display task without destructive race
 
         bool out_of_range = (peak < AUDIO_LEVEL_TOO_LOW) || (peak > AUDIO_LEVEL_TOO_HIGH);
         if (out_of_range) {

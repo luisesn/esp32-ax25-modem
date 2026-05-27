@@ -4,6 +4,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+#define SSTV_DIR "/spiffs/sstv"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -12,8 +12,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define SSTV_DIR "/spiffs/sstv"
-
 static const char *TAG = "remote_cmd";
 static bool s_enabled = false;
 

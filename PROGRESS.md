@@ -432,3 +432,34 @@ Smallest app partition: 0x1a0000 bytes
 | nuevo | REST: `/api/repeater/*`, `/api/squelch/*` | ✅ 2026-05-26 |
 | nuevo | UI: panel HFNE con barra, slider y monitor toggle | ✅ 2026-05-26 |
 | nuevo | Fix httpd handler bloqueado en WS send (flags diferidos) | ✅ 2026-05-26 |
+
+---
+
+## 2026-05-27 — Bug-fix sweep (auditoría completa)
+
+**CRITICAL fixes:**
+- **C1** `s_wav_q` race (`audio_stream.c`): check-then-use no atómico entre `audio_stream_task` y `audio_stream_stop_wav_server`. Fix: copiar handle a local (`QueueHandle_t q = s_wav_q; if (q) ...`).
+- **C2** `strdup` NULL en `log_handler` (`audio_stream.c`): `strdup()` fallando con OOM pasaba NULL a `httpd_resp_sendstr_chunk` → crash en `strlen(NULL)`. Fix: check resultado antes de insertar en array.
+- **C3** SPIFFS mount silenciado (`aux_file_management.c`): `esp_vfs_spiffs_register` sin comprobar retorno. Fix: `ESP_ERROR_CHECK`.
+
+**HIGH fixes:**
+- **H1** Race `digi_init`/`morse_init` desde httpd: config reload escribe globals leídos por `receive_audio_task` sin mutex. Fix: `portMUX_TYPE` spinlock en `digipeater.c` y `morse.c`.
+- **H2** `morse_beacon_task` espera infinita en `s_done_sem` (`portMAX_DELAY`). Fix: timeout de 60 s con aviso en log.
+- **H3** `wifi_start_ap` llamada dos veces crea dos netifs (panic o leak). Fix: flag `s_ap_netif_created` para crear el netif solo una vez.
+
+**MEDIUM fixes:**
+- **M1** `audio_peak` dual-consumer: `audio_level_task` lo ponía a 0 y `display_task` siempre leía 0. Fix: variable `g_display_peak` intermedia.
+- **M2** Estado KISS no se resetea en reconexión de cliente. Fix: `kiss_init()` tras desconexión.
+- **M3** Overflow `(uint32_t)s_period_s * 1000u` en beacon morse. Fix: cap a 86 400.
+- **M4** `fwrite` parcial silenciado en upload SSTV. Fix: comparar bytes escritos con solicitados.
+- **M5** `config_reload()` devolvía puntero interno (asimetría con `config_load()`). Fix: devuelve `cJSON_Duplicate`.
+- **M6** `log_handler` hacía malloc dentro de sección crítica con `s_log_mutex`. Fix: copiar punteros bajo mutex, strdup fuera.
+
+**LOW fixes:**
+- **L1** Código muerto eliminado de `aux_file_management.c`: `test()`, `file_write_string`, `file_read_string`.
+- **L2** `config_updated()` stub eliminado de `aux_config.c`.
+- **L3** `SPIFFS max_files` subido de 5 a 10.
+- **L4** `AX25IP_MTU` corregido de 300 a 584 (alineado con `CUSTOM_FRAME_SIZE=600`).
+- **L5** `SSTV_DIR` movido a `sstv.h`, eliminada duplicación en `remote_cmd.c`.
+- **L6** Stack de `display_task` subido de 2 048 a 3 072 bytes.
+- **L7** Buffer `static` en `digi_process_frame` convertido a variable local de pila.

@@ -12,6 +12,10 @@ typedef void (*kiss_frame_cb)(const uint8_t *buf, size_t len);
 
 void kiss_init(kiss_frame_cb on_frame);
 
+// Reset the decoder state machine without touching the registered callback.
+// Call when a client disconnects so the next client starts from a clean state.
+void kiss_reset(void);
+
 // Alimentar bytes del host; llama on_frame() cuando la trama está completa.
 void kiss_rx_byte(uint8_t b);
 

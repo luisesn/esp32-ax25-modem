@@ -14,7 +14,6 @@ cJSON *config_reload();
 void config_free_json(cJSON *config);
 cJSON *config_get();
 bool save_config(const char *json_str);
-bool config_updated();
 
 #ifdef __cplusplus
 }

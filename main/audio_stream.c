@@ -217,9 +217,10 @@ static void audio_stream_task(void *arg) {
         }
 
         // Encolar para el cliente WAV TCP si está activo (lossy).
-        if (s_wav_q != NULL) {
-            xQueueSendToBack(s_wav_q, s_adpcm_block, 0);
-        }
+        // Copy handle to local: 32-bit aligned read is atomic on Xtensa, preventing
+        // a race with audio_stream_stop_wav_server deleting the queue between check and use.
+        QueueHandle_t wav_q = s_wav_q;
+        if (wav_q) xQueueSendToBack(wav_q, s_adpcm_block, 0);
     }
 }
 
@@ -604,8 +605,10 @@ static esp_err_t log_handler(httpd_req_t *req)
     int start = (s_log_head - s_log_count + LOG_CAPACITY) % LOG_CAPACITY;
     for (int i = 0; i < s_log_count; i++) {
         int idx = (start + i) % LOG_CAPACITY;
-        if (s_log_ring[idx].seq > since && s_log_ring[idx].json)
-            ptrs[pcount++] = strdup(s_log_ring[idx].json);
+        if (s_log_ring[idx].seq > since && s_log_ring[idx].json) {
+            char *p = strdup(s_log_ring[idx].json);
+            if (p) ptrs[pcount++] = p;
+        }
     }
     xSemaphoreGive(s_log_mutex);
 

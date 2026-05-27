@@ -16,7 +16,6 @@
 
 #define TAG "sstv"
 
-#define SSTV_DIR        "/spiffs/sstv"
 #define SSTV_MAX_FILES  10
 #define SSTV_MAX_SIZE   (200 * 1024)
 #define SSTV_NAME_LEN   48
@@ -752,6 +751,7 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
     int carry = 0;   /* bytes carried over from previous chunk in rbuf[0..carry-1] */
     int total_left = (int)req->content_len;
     bool done = false;
+    bool ok   = true;
 
     while (!done && total_left > 0 && state != MP_ERROR && state != MP_DONE) {
         int to_recv = (int)sizeof(rbuf) - carry;
@@ -841,14 +841,23 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                         }
                     }
                     if (found >= 0) {
-                        if (found > i && out)
-                            out_bytes += (int)fwrite(rbuf + i, 1, found - i, out);
+                        if (found > i && out) {
+                            size_t want = (size_t)(found - i);
+                            if (fwrite(rbuf + i, 1, want, out) != want)
+                                { ok = false; done = true; }
+                            else
+                                out_bytes += (int)want;
+                        }
                         state = MP_DONE;
                         done = true;
                         i = buf_len; /* consume rest */
                     } else {
-                        if (out)
-                            out_bytes += (int)fwrite(rbuf + i, 1, safe, out);
+                        if (out) {
+                            if (fwrite(rbuf + i, 1, (size_t)safe, out) != (size_t)safe)
+                                { ok = false; done = true; }
+                            else
+                                out_bytes += safe;
+                        }
                         i += safe;
                     }
                 } else {
@@ -875,7 +884,7 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
 
     if (out) fclose(out);
 
-    if (state == MP_ERROR || out_bytes == 0) {
+    if (!ok || state == MP_ERROR || out_bytes == 0) {
         /* Remove partial file */
         if (img_name[0]) {
             char fpath[80];

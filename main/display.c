@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
-#include "LibAPRS-esp32-i2s/src/AFSK.h"   // audio_peak
+#include "LibAPRS-esp32-i2s/src/AFSK.h"   // AUDIO_LEVEL_TOO_HIGH, AUDIO_LEVEL_TOO_LOW
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h" // APRS_getCallsign
 #include "rx_stats.h"
 #include "repeater.h"
@@ -330,7 +330,8 @@ static void screen_normal(char *line) {
     fb_hline(5, 0x08);
 
     // --- Page 6: RX audio bar (80 px) + numeric peak ---
-    int peak = (int)(int8_t)audio_peak;
+    extern volatile int8_t g_display_peak;   // set by audio_level_task in main.c
+    int peak = (int)g_display_peak;
     if (peak < 0) peak = 0;
     bool loud = (peak > AUDIO_LEVEL_TOO_HIGH);
 
@@ -461,7 +462,7 @@ void display_init(cJSON *cfg) {
     fb_clear();
     ssd1306_flush();
 
-    xTaskCreate(display_task, "display_task", 2048, NULL, 2, NULL);
+    xTaskCreate(display_task, "display_task", 3072, NULL, 2, NULL);
     ESP_LOGI(TAG, "SSD1306 0x%02X on SDA=GPIO%d SCL=GPIO%d",
              i2c_addr, GPIO_I2C_SDA, GPIO_I2C_SCL);
 }

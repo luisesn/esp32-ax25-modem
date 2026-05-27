@@ -18,11 +18,16 @@
 
 typedef struct { char call[8]; int ssid; } alias_t;
 
-static volatile bool s_enabled       = false;
-static alias_t       s_aliases[MAX_ALIASES];
-static int           s_alias_count   = 0;
-static char          s_call[8]       = "";
-static int           s_call_ssid     = 0;
+static volatile bool   s_enabled       = false;
+static alias_t         s_aliases[MAX_ALIASES];
+static int             s_alias_count   = 0;
+static char            s_call[8]       = "";
+static int             s_call_ssid     = 0;
+
+// Protects config fields written by digi_init (httpd task) and read by
+// digi_process_frame (receive_audio_task). portMUX is a spinlock safe for
+// cross-core use without disabling the scheduler.
+static portMUX_TYPE s_digi_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Parse "CALL" or "CALL-N" into alias_t.
 static void split_callssid(const char *src, char *call_out, int *ssid_out) {
@@ -42,57 +47,68 @@ static void split_callssid(const char *src, char *call_out, int *ssid_out) {
     }
 }
 
-// Add one alias string to s_aliases[] if there is room.
-static void alias_add(const char *str) {
-    if (s_alias_count >= MAX_ALIASES) return;
-    split_callssid(str, s_aliases[s_alias_count].call,
-                        &s_aliases[s_alias_count].ssid);
-    if (s_aliases[s_alias_count].call[0])
-        s_alias_count++;
-}
-
 void digi_init(const cJSON *cfg) {
     if (!cfg) return;
     const cJSON *digi = cJSON_GetObjectItemCaseSensitive(cfg, "digi");
     if (!digi) return;
 
-    const cJSON *en = cJSON_GetObjectItemCaseSensitive(digi, "enabled");
-    s_enabled = cJSON_IsTrue(en);
+    // ── Parse into local variables (no lock needed; JSON read-only here) ──────
+    bool new_enabled = false;
+    alias_t new_aliases[MAX_ALIASES];
+    int new_count = 0;
+    char new_call[8] = "";
+    int  new_ssid = 0;
 
-    // "alias": accepts either a string ("WIDE1-1") for backward compat,
-    // or a JSON array (["WIDE1-1","WIDE2-2","RELAY"]).
-    s_alias_count = 0;
+    const cJSON *en = cJSON_GetObjectItemCaseSensitive(digi, "enabled");
+    new_enabled = cJSON_IsTrue(en);
+
     const cJSON *alias_j = cJSON_GetObjectItemCaseSensitive(digi, "alias");
+    // Helper lambda pattern not available in C; inline the alias parsing:
     if (cJSON_IsArray(alias_j)) {
         const cJSON *item;
         cJSON_ArrayForEach(item, alias_j) {
-            if (cJSON_IsString(item) && item->valuestring[0])
-                alias_add(item->valuestring);
+            if (new_count >= MAX_ALIASES) break;
+            if (!cJSON_IsString(item) || !item->valuestring[0]) continue;
+            split_callssid(item->valuestring,
+                           new_aliases[new_count].call,
+                           &new_aliases[new_count].ssid);
+            if (new_aliases[new_count].call[0]) new_count++;
         }
     } else if (cJSON_IsString(alias_j) && alias_j->valuestring[0]) {
-        alias_add(alias_j->valuestring);
+        split_callssid(alias_j->valuestring,
+                       new_aliases[new_count].call,
+                       &new_aliases[new_count].ssid);
+        if (new_aliases[new_count].call[0]) new_count++;
     }
 
-    // Digipeater own callsign: falls back to aprs.callsign if not set
     const cJSON *cs_j = cJSON_GetObjectItemCaseSensitive(digi, "callsign");
     if (cJSON_IsString(cs_j) && cs_j->valuestring[0]) {
         const cJSON *ss_j = cJSON_GetObjectItemCaseSensitive(digi, "ssid");
-        strncpy(s_call, cs_j->valuestring, 7); s_call[7] = '\0';
-        s_call_ssid = cJSON_IsNumber(ss_j) ? (int)ss_j->valueint : 0;
+        strncpy(new_call, cs_j->valuestring, 7); new_call[7] = '\0';
+        new_ssid = cJSON_IsNumber(ss_j) ? (int)ss_j->valueint : 0;
     } else {
         const cJSON *aprs = cJSON_GetObjectItemCaseSensitive(cfg, "aprs");
         if (aprs) {
             const cJSON *ac = cJSON_GetObjectItemCaseSensitive(aprs, "callsign");
             const cJSON *as = cJSON_GetObjectItemCaseSensitive(aprs, "ssid");
-            if (cJSON_IsString(ac)) { strncpy(s_call, ac->valuestring, 7); s_call[7] = '\0'; }
-            if (cJSON_IsNumber(as)) s_call_ssid = (int)as->valueint;
+            if (cJSON_IsString(ac)) { strncpy(new_call, ac->valuestring, 7); new_call[7] = '\0'; }
+            if (cJSON_IsNumber(as)) new_ssid = (int)as->valueint;
         }
     }
 
+    // ── Apply atomically so digi_process_frame always sees a consistent view ──
+    taskENTER_CRITICAL(&s_digi_mux);
+    s_enabled     = new_enabled;
+    s_alias_count = new_count;
+    memcpy(s_aliases, new_aliases, (size_t)new_count * sizeof(alias_t));
+    memcpy(s_call, new_call, 8);
+    s_call_ssid   = new_ssid;
+    taskEXIT_CRITICAL(&s_digi_mux);
+
     ESP_LOGI(TAG, "digi_init: enabled=%d aliases=%d via=%s-%d",
-             s_enabled, s_alias_count, s_call, s_call_ssid);
-    for (int i = 0; i < s_alias_count; i++)
-        ESP_LOGI(TAG, "  alias[%d]: %s-%d", i, s_aliases[i].call, s_aliases[i].ssid);
+             new_enabled, new_count, new_call, new_ssid);
+    for (int i = 0; i < new_count; i++)
+        ESP_LOGI(TAG, "  alias[%d]: %s-%d", i, new_aliases[i].call, new_aliases[i].ssid);
 }
 
 void digi_set_enabled(bool en) { s_enabled = en; }
@@ -175,26 +191,30 @@ static bool call_eq(const char *a, const char *b) {
 // ─── Main digipeat logic ──────────────────────────────────────────────────────
 
 bool digi_process_frame(const uint8_t *buf, size_t len) {
-    if (!s_enabled) return false;
-    if (len < 16 || s_call[0] == '\0' || s_alias_count == 0) return false;
+    // Snapshot config atomically to prevent races with digi_init called from
+    // the httpd task during a config reload.
+    taskENTER_CRITICAL(&s_digi_mux);
+    bool    cfg_enabled = s_enabled;
+    int     cfg_count   = s_alias_count;
+    alias_t cfg_aliases[MAX_ALIASES];
+    memcpy(cfg_aliases, s_aliases, (size_t)cfg_count * sizeof(alias_t));
+    char cfg_call[8];
+    memcpy(cfg_call, s_call, 8);
+    int cfg_ssid = s_call_ssid;
+    taskEXIT_CRITICAL(&s_digi_mux);
+
+    if (!cfg_enabled) return false;
+    if (len < 16 || cfg_call[0] == '\0' || cfg_count == 0) return false;
 
     // ── Duplicate check (on the original frame before we modify it) ──────────
-    // Hash covers DST+SRC+INFO: enough to identify unique packets.
-    // Path is deliberately excluded so we match the same content regardless of
-    // how many hops it has already traversed before reaching us.
-    // We hash: buf[0..13] (DST+SRC) + everything after CTRL+PID.
-    // Simple approach: hash the entire raw frame — same frame from two
-    // directions will have different paths and NOT be suppressed, which is
-    // correct for multi-path environments. We want to suppress only if WE
-    // already retransmitted THIS exact received frame (same buf bytes).
     uint32_t frame_hash = fnv1a(buf, len);
     if (dedup_check_and_add(frame_hash)) {
         ESP_LOGD(TAG, "Duplicate frame suppressed (hash=0x%08" PRIx32 ")", frame_hash);
         return false;
     }
 
-    // ── Work on a mutable copy ───────────────────────────────────────────────
-    static uint8_t frame[AX25_MAX_FRAME_LEN];
+    // ── Work on a mutable copy (stack-allocated; receive_audio_task has 8 KB) ─
+    uint8_t frame[AX25_MAX_FRAME_LEN];
     if (len > AX25_MAX_FRAME_LEN) return false;
     memcpy(frame, buf, len);
 
@@ -213,7 +233,7 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
         while (!scan_last && (scan + 7) <= end) {
             char sc[8]; int ss; bool sh, sl;
             addr_read(scan, sc, &ss, &sh, &sl);
-            if (sh && call_eq(sc, s_call) && ss == s_call_ssid) {
+            if (sh && call_eq(sc, cfg_call) && ss == cfg_ssid) {
                 return false;   // we already repeated this frame
             }
             scan_last = sl;
@@ -230,14 +250,10 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
         addr_read(p, rpt_call, &rpt_ssid, &rpt_h, &rpt_last);
 
         if (!rpt_h) {
-            // Check against every configured alias
-            for (int ai = 0; ai < s_alias_count; ai++) {
-                if (!call_eq(rpt_call, s_aliases[ai].call)) continue;
-                if (rpt_ssid != s_aliases[ai].ssid) continue;
+            for (int ai = 0; ai < cfg_count; ai++) {
+                if (!call_eq(rpt_call, cfg_aliases[ai].call)) continue;
+                if (rpt_ssid != cfg_aliases[ai].ssid) continue;
 
-                // Match found — apply standard WIDEn-N digipeat:
-                // 1. Insert our callsign (H=1) before this entry (traceback).
-                // 2. Decrement N; if N hits 0 mark alias as spent (H=1).
                 int new_ssid = rpt_ssid - 1;
 
                 if (len + 7 > AX25_MAX_FRAME_LEN) break;   // no room
@@ -246,7 +262,7 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
                 len += 7;
                 end += 7;
 
-                addr_write(p, s_call, s_call_ssid, /*last=*/false, /*h=*/true);
+                addr_write(p, cfg_call, cfg_ssid, /*last=*/false, /*h=*/true);
                 p += 7;
 
                 addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
@@ -255,14 +271,14 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
                 addr_read(&frame[7], src_call, &src_ssid, &src_h, &src_last);
                 ESP_LOGI(TAG, "%s-%d digipeated via alias %s-%d → %s-%d (len=%u)",
                          src_call, src_ssid,
-                         s_aliases[ai].call, s_aliases[ai].ssid,
-                         s_call, s_call_ssid, (unsigned)len);
+                         cfg_aliases[ai].call, cfg_aliases[ai].ssid,
+                         cfg_call, cfg_ssid, (unsigned)len);
                 did_digi = true;
                 break;
             }
         }
 
-        if (did_digi) break;   // one digipeat per frame
+        if (did_digi) break;
         cur_last = rpt_last;
         p += 7;
     }

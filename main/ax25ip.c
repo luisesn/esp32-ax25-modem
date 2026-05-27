@@ -21,9 +21,9 @@
 #define AX25_PID_IP    0xCCu
 
 // Max IP payload per AX.25 frame.
-// AX25_MAX_FRAME_LEN=330; header (2×7 addr + CTRL + PID) = 16 bytes.
-// We use 300 bytes for some extra headroom.
-#define AX25IP_MTU  300
+// CUSTOM_FRAME_SIZE=600 (set in CMakeLists.txt for tncattach MTU 512).
+// Subtract 16 bytes of AX.25 header (2×7 addr + CTRL + PID) = 584 bytes usable.
+#define AX25IP_MTU  584
 
 // ── Module state ─────────────────────────────────────────────────────────────
 
