@@ -21,6 +21,7 @@ idf_component_register(
         "remote_cmd.c"
         "rf_console.c"
         "ota.c"
+        "ota_net.c"
         "repeater.c"
         "squelch_sf.c"
     INCLUDE_DIRS
@@ -44,6 +45,7 @@ idf_component_register(
         espressif__cjson
         esp_timer
         app_update
+        esp_rom
 )
 # AX25_MAX_FRAME_LEN por defecto es 330 (suficiente para APRS pero no para IP).
 # 600 cubre el MTU típico de tncattach (512 B payload + 16 B cabecera AX.25 + 2 B CRC).

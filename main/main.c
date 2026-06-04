@@ -24,6 +24,7 @@
 #include "remote_cmd.h"
 #include "rf_console.h"
 #include "ota.h"
+#include "ota_net.h"
 #include "repeater.h"
 #include "squelch_sf.h"
 #include "esp_heap_caps.h"
@@ -534,6 +535,7 @@ void app_main(void)
     afsk_set_audio_hook(audio_sample_hook);
     sstv_init();
     ota_init();
+    ota_net_init();
     repeater_init(config_get());
     squelch_sf_init(config_get());
     afsk_set_dispatch_hook(project_dispatch_hook);
