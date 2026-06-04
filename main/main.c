@@ -540,6 +540,7 @@ void app_main(void)
     delay_tune_init(config_get());
     repeater_init(config_get());
     squelch_sf_init(config_get());
+    afsk_set_channel_busy_fn(squelch_hfne_is_open);
     afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS
