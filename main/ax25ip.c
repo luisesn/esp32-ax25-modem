@@ -1,5 +1,6 @@
 #include "ax25ip.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <esp_log.h>
 
@@ -37,6 +38,47 @@ static bool         s_tun_mode = false;
 static char    s_call[7];
 static uint8_t s_ssid;
 
+// ── IP debug helper ───────────────────────────────────────────────────────────
+// Returns a static string: "PROTO src.ip:sport→dst.ip:dport" (or without ports
+// for ICMP/unknown). Not re-entrant; consumed immediately by ESP_LOG*.
+static const char *ip_info(const uint8_t *ip, size_t ip_len)
+{
+    static char s[80];
+    if (ip_len < 20 || (ip[0] >> 4) != 4) {
+        snprintf(s, sizeof(s), "(not IPv4)");
+        return s;
+    }
+    uint8_t proto = ip[9];
+    uint8_t ihl   = (uint8_t)((ip[0] & 0x0Fu) * 4u);
+    if (ihl < 20) ihl = 20;
+    const char *pname;
+    char pbuf[6];
+    switch (proto) {
+        case 1:  pname = "ICMP"; break;
+        case 6:  pname = "TCP";  break;
+        case 17: pname = "UDP";  break;
+        default:
+            snprintf(pbuf, sizeof(pbuf), "P%u", proto);
+            pname = pbuf;
+            break;
+    }
+    if ((proto == 6 || proto == 17) && ip_len >= (size_t)ihl + 4u) {
+        const uint8_t *t = ip + ihl;
+        uint16_t sp = (uint16_t)((t[0] << 8) | t[1]);
+        uint16_t dp = (uint16_t)((t[2] << 8) | t[3]);
+        snprintf(s, sizeof(s), "%s %u.%u.%u.%u:%u→%u.%u.%u.%u:%u",
+                 pname,
+                 ip[12], ip[13], ip[14], ip[15], sp,
+                 ip[16], ip[17], ip[18], ip[19], dp);
+    } else {
+        snprintf(s, sizeof(s), "%s %u.%u.%u.%u→%u.%u.%u.%u",
+                 pname,
+                 ip[12], ip[13], ip[14], ip[15],
+                 ip[16], ip[17], ip[18], ip[19]);
+    }
+    return s;
+}
+
 // ── AX.25 address encoding ────────────────────────────────────────────────────
 
 static void enc_addr(uint8_t *buf, const char *call, uint8_t ssid, bool last)
@@ -72,7 +114,7 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
             memcpy(frame + offset, q->payload, q->len);
             offset += q->len;
         }
-        ESP_LOGI(TAG, "TX %u bytes TUN→RF", ip_len);
+        ESP_LOGI(TAG, "TX %u bytes TUN→RF  %s", ip_len, ip_info(frame + 4, ip_len));
         afsk_queue_tx_frame(frame, (size_t)offset);
         return ERR_OK;
     }
@@ -93,7 +135,7 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
         offset += q->len;
     }
 
-    ESP_LOGD(TAG, "TX %u bytes IP→AX.25", ip_len);
+    ESP_LOGI(TAG, "TX %u bytes IP→AX.25  %s", ip_len, ip_info(frame + 16, ip_len));
     afsk_queue_tx_frame(frame, (size_t)offset);
     return ERR_OK;
 }
@@ -178,6 +220,13 @@ bool ax25ip_init(cJSON *cfg)
     return true;
 }
 
+bool ax25ip_get_addr(ip4_addr_t *addr)
+{
+    if (!s_enabled) return false;
+    addr->addr = s_netif.ip_addr.addr;  // IPv4-only: ip_addr_t == ip4_addr_t
+    return true;
+}
+
 void ax25ip_rx_frame(const uint8_t *buf, size_t len)
 {
     if (!s_enabled) return;
@@ -203,7 +252,7 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
             return;
         }
         memcpy(q->payload, buf + 4, ip_len);
-        ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP", (unsigned)ip_len);
+        ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP  %s", (unsigned)ip_len, ip_info(buf + 4, ip_len));
         if (s_netif.input(q, &s_netif) != ERR_OK) {
             ESP_LOGW(TAG, "TUN: lwIP input rejected pbuf");
             pbuf_free(q);
@@ -266,7 +315,7 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     }
     memcpy(q->payload, p, ip_len);
 
-    ESP_LOGI(TAG, "RX %u bytes IP←AX.25 → lwIP", (unsigned)ip_len);
+    ESP_LOGI(TAG, "RX %u bytes IP←AX.25 → lwIP  %s", (unsigned)ip_len, ip_info(p, ip_len));
 
     // Inject into lwIP (tcpip_input is task-safe; sends msg to tcpip task).
     if (s_netif.input(q, &s_netif) != ERR_OK) {

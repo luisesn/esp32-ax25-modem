@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-05-27): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 950`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-06-04): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 1050`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -64,6 +64,8 @@ esp32-aprs-modem/
 │   ├── squelch_sf.h / squelch_sf.c    squelch HFNE (High-Frequency Noise Energy) sobre 4 bins
 │   │                                  Goertzel (3150–4350 Hz); fuentes: repetidor y monitor UI;
 │   │                                  REST: /api/squelch/*; WS: {"type":"squelch_sf",...}
+│   ├── rf_console.h / rf_console.c     consola TCP line-based sobre la IP RF (ax25ip); comandos
+│   │                                  help, status, config, quit; un cliente simultáneo; port 23
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
 │   ├── gps.h / gps.c                  receptor GPS por UART2 (NMEA $GPRMC/$GPGGA),
 │   │                                  struct g_gps_pos con mutex FreeRTOS
@@ -132,9 +134,10 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. `ota_init()` registra el endpoint `POST /api/ota/upload`. Los dos primeros se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
 8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, GPIO16/GPIO4, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
 9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO13/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
-10. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
-11. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
-12. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
+10. `rf_console_init()` arranca el servidor de consola TCP sobre la IP RF (`ip.addr`) si `console.enabled: true` en config.json. Acepta una conexión telnet a la vez, emite prompt `> `, y atiende los comandos `status` (callsign, IPs, heap libre, uptime), `config` (vuelca config.json), `help` y `quit`.
+11. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
+12. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
+13. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
 
 ## Interfaz web
 
@@ -543,6 +546,40 @@ Para activarlo: editar `config.json` vía la pestaña CONFIG de la UI (o reflash
 
 **Nota**: requiere `CONFIG_LWIP_IP_FORWARD=y` (incluido en `sdkconfig.defaults`). MTU máximo: 300 bytes.
 
+---
+
+## Consola RF TCP
+
+El firmware incluye una consola de administración line-based accesible vía TCP (telnet) en la dirección IP asignada a la interfaz RF (`ip.addr`). Permite diagnosticar el nodo directamente desde el enlace de radio sin necesidad de WiFi ni cable serie.
+
+```bash
+telnet <ip.addr> 23
+```
+
+### Comandos disponibles
+
+| Comando | Descripción |
+|---------|-------------|
+| `status` | Callsign, IP RF, IP WiFi, heap libre y uptime en segundos |
+| `config` | Vuelca el `config.json` completo |
+| `help` | Lista de comandos disponibles |
+| `quit` / `exit` | Cierra la conexión |
+
+### Configuración
+
+```json
+"console": {
+  "enabled": true,
+  "port": 23
+}
+```
+
+- Solo acepta conexiones entrantes por la interfaz RF (`ip.addr`); no escucha en la interfaz WiFi.
+- Un único cliente simultáneo; una segunda conexión no se acepta hasta que se cierre la activa.
+- `enabled: false` (o si el gateway IP no está activo) desactiva el servidor completamente.
+
+---
+
 ## Retardo TX tras recepción (`post_rx_tx_delay_ms`)
 
 Cuando el ESP32 recibe una trama y necesita responder (ACK automático, paquete IP de vuelta, trama KISS reencolada), la radio remota acaba de terminar de transmitir y necesita tiempo para soltar el PTT y conmutar su electrónica de TX a RX. Si el ESP32 responde inmediatamente, la radio remota aún no está escuchando y la respuesta se pierde.
@@ -569,13 +606,13 @@ Con `post_rx_tx_delay_ms = 500` el preámbulo termina ~57 ms antes de que el Bao
 
 | Radio | Valor recomendado |
 |-------|------------------|
-| Baofeng UV-5R / UV-82 y similares | **950 ms** |
+| Baofeng UV-5R / UV-82 y similares | **1050 ms** |
 | Radios con conmutación rápida (< 200 ms) | 200–300 ms |
 | Sin radio externa (pruebas en banco) | 0 (deshabilitar) |
 
 ```json
 "aprs": {
-  "post_rx_tx_delay_ms": 950
+  "post_rx_tx_delay_ms": 1050
 }
 ```
 
@@ -642,7 +679,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "ssid": 11,
     "symbol_table": "/",
     "symbol_code": ">",
-    "post_rx_tx_delay_ms": 950
+    "post_rx_tx_delay_ms": 1050
   },
   "wifi": [
     {
@@ -691,6 +728,10 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
   },
   "remote_cmd": {
     "enabled": true
+  },
+  "console": {
+    "enabled": true,
+    "port": 23
   }
 }
 ```
@@ -703,7 +744,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `aprs` | `ssid` | int 0–15 | SSID APRS |
 | `aprs` | `symbol_table` | `"/"` o `"\\"` | Tabla de símbolos APRS (primaria o alternativa) |
 | `aprs` | `symbol_code` | char | Código de símbolo APRS (p. ej. `">"` = coche) |
-| `aprs` | `post_rx_tx_delay_ms` | int | Retardo TX tras recepción (ms). Tiempo mínimo desde que se decodifica una trama hasta que se despacha la siguiente TX. Compensa el tiempo de conmutación TX→RX de la radio remota. `0` = deshabilitado. Valor recomendado con Baofeng UV-5R: **950** |
+| `aprs` | `post_rx_tx_delay_ms` | int | Retardo TX tras recepción (ms). Tiempo mínimo desde que se decodifica una trama hasta que se despacha la siguiente TX. Compensa el tiempo de conmutación TX→RX de la radio remota. `0` = deshabilitado. Valor recomendado con Baofeng UV-5R: **1050** |
 | `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
 | `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
 | `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |
@@ -720,6 +761,8 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
 | `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo |
+| `console` | `enabled` | bool | Activa la consola TCP sobre la IP RF (requiere `ip.enabled: true`) |
+| `console` | `port` | int | Puerto TCP de la consola (por defecto 23) |
 
 > **Nota sobre `rx.active_modem: "best"`**: en este modo ambos demoduladores decodifican de forma independiente. Si el mismo paquete lo decodifican los dos, el host KISS recibirá dos tramas idénticas. El host (tncattach, direwolf) debe manejar los duplicados si es necesario.
 

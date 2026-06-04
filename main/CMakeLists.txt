@@ -19,6 +19,7 @@ idf_component_register(
         "gps.c"
         "display.c"
         "remote_cmd.c"
+        "rf_console.c"
         "ota.c"
         "repeater.c"
         "squelch_sf.c"

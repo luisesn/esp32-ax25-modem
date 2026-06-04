@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "cJSON.h"
+#include "lwip/ip4_addr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,10 @@ bool ax25ip_init(cJSON *cfg);
 // Frames with PID=0xCC (IP) are injected into the lwIP stack.
 // All other PIDs are silently ignored.
 void ax25ip_rx_frame(const uint8_t *buf, size_t len);
+
+// Returns the IPv4 address assigned to the RF netif.
+// Returns false if ax25ip_init() was not called or failed.
+bool ax25ip_get_addr(ip4_addr_t *addr);
 
 #ifdef __cplusplus
 }

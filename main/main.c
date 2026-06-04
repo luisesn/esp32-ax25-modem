@@ -22,6 +22,7 @@
 #include "gps.h"
 #include "display.h"
 #include "remote_cmd.h"
+#include "rf_console.h"
 #include "ota.h"
 #include "repeater.h"
 #include "squelch_sf.h"
@@ -49,16 +50,16 @@ static void project_dispatch_hook(void) {
     sstv_dispatch_if_pending();
     repeater_dispatch_if_pending();
 
-    // Periodic free-heap log (~every 5 s)
-    static TickType_t s_last_heap_log = 0;
-    TickType_t now = xTaskGetTickCount();
-    if ((now - s_last_heap_log) >= pdMS_TO_TICKS(5000)) {
-        s_last_heap_log = now;
-        ESP_LOGI("heap", "free=%u B, min=%u B, largest=%u B",
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)esp_get_minimum_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    }
+//    // Periodic free-heap log (~every 5 s)
+//    static TickType_t s_last_heap_log = 0;
+//    TickType_t now = xTaskGetTickCount();
+//    if ((now - s_last_heap_log) >= pdMS_TO_TICKS(5000)) {
+//        s_last_heap_log = now;
+//        ESP_LOGI("heap", "free=%u B, min=%u B, largest=%u B",
+//                 (unsigned)esp_get_free_heap_size(),
+//                 (unsigned)esp_get_minimum_free_heap_size(),
+//                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+//    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +526,7 @@ void app_main(void)
     digi_init(config_get());
     morse_init(config_get());
     remote_cmd_init(config_get());
+    rf_console_init(config_get());
 
     // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
     // Debe llamarse después de transport_init (WiFi ya conectado).
