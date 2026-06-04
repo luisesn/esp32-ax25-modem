@@ -25,6 +25,7 @@
 #include "rf_console.h"
 #include "ota.h"
 #include "ota_net.h"
+#include "delay_tune.h"
 #include "repeater.h"
 #include "squelch_sf.h"
 #include "esp_heap_caps.h"
@@ -536,6 +537,7 @@ void app_main(void)
     sstv_init();
     ota_init();
     ota_net_init();
+    delay_tune_init(config_get());
     repeater_init(config_get());
     squelch_sf_init(config_get());
     afsk_set_dispatch_hook(project_dispatch_hook);

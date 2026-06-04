@@ -952,7 +952,7 @@ void audio_stream_init(void) {
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 25;
+    cfg.max_uri_handlers = 32;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");

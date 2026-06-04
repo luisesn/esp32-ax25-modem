@@ -14,6 +14,10 @@
 
 // AFSK TX queue
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
+#include "audio_stream.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 #define TAG "ax25ip"
 
@@ -79,6 +83,56 @@ static const char *ip_info(const uint8_t *ip, size_t ip_len)
     return s;
 }
 
+// ── WebSocket log — async queue ───────────────────────────────────────────────
+// ax25ip_output() is called from the lwIP tcpip task while holding the tcpip
+// core lock.  Calling audio_stream_ws_send_text() from there would try to do
+// socket I/O (httpd_ws_send_data → lwIP send → tcpip_api_call) which sends a
+// message TO the tcpip task and waits — instant deadlock.
+//
+// Fix: enqueue the log string from the lwIP callback (non-blocking, no socket
+// ops), and drain from a dedicated low-priority task that runs outside the lock.
+//
+// ax25ip_rx_frame() is called from receive_audio_task (not the lwIP task), so
+// it can call audio_stream_ws_send_text() directly.
+
+#define IPLOG_MSG_LEN  160
+#define IPLOG_QUEUE_LEN  8
+
+static QueueHandle_t s_iplog_q;
+
+static void iplog_drain_task(void *arg)
+{
+    (void)arg;
+    char buf[IPLOG_MSG_LEN];
+    while (1) {
+        if (xQueueReceive(s_iplog_q, buf, portMAX_DELAY) == pdTRUE)
+            audio_stream_ws_send_text(buf);
+    }
+}
+
+// Build the JSON and enqueue it non-blockingly.  Safe from any context.
+static void ws_log_ip_async(const char *dir, const uint8_t *ip_pkt, size_t ip_len)
+{
+    if (!s_iplog_q) return;
+    char buf[IPLOG_MSG_LEN];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"aprs\",\"src\":\"IP-GW\",\"dst\":\"%s\","
+        "\"path\":\"\",\"info\":\"[IP %s] %s\"}",
+        dir, dir, ip_info(ip_pkt, ip_len));
+    xQueueSend(s_iplog_q, buf, 0);   // drop if full (never blocks)
+}
+
+// Direct send — only call from non-lwIP task contexts (e.g. receive_audio_task).
+static void ws_log_ip(const char *dir, const uint8_t *ip_pkt, size_t ip_len)
+{
+    char buf[IPLOG_MSG_LEN];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"aprs\",\"src\":\"IP-GW\",\"dst\":\"%s\","
+        "\"path\":\"\",\"info\":\"[IP %s] %s\"}",
+        dir, dir, ip_info(ip_pkt, ip_len));
+    audio_stream_ws_send_text(buf);
+}
+
 // ── AX.25 address encoding ────────────────────────────────────────────────────
 
 static void enc_addr(uint8_t *buf, const char *call, uint8_t ssid, bool last)
@@ -115,6 +169,7 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
             offset += q->len;
         }
         ESP_LOGI(TAG, "TX %u bytes TUN→RF  %s", ip_len, ip_info(frame + 4, ip_len));
+        ws_log_ip_async("TX", frame + 4, ip_len);
         afsk_queue_tx_frame(frame, (size_t)offset);
         return ERR_OK;
     }
@@ -136,6 +191,7 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
     }
 
     ESP_LOGI(TAG, "TX %u bytes IP→AX.25  %s", ip_len, ip_info(frame + 16, ip_len));
+    ws_log_ip_async("TX", frame + 16, ip_len);
     afsk_queue_tx_frame(frame, (size_t)offset);
     return ERR_OK;
 }
@@ -211,6 +267,14 @@ bool ax25ip_init(cJSON *cfg)
     }
 
     s_enabled = true;
+
+    // Async log queue + drain task (created once, even if ax25ip_init is called again)
+    if (!s_iplog_q) {
+        s_iplog_q = xQueueCreate(IPLOG_QUEUE_LEN, IPLOG_MSG_LEN);
+        if (s_iplog_q)
+            xTaskCreate(iplog_drain_task, "iplog", 2048, NULL, 2, NULL);
+    }
+
     ESP_LOGI(TAG, "AX.25 IP gateway up: %s/%s  (call=%s-%d  MTU=%d  mode=%s)",
              j_addr->valuestring, j_mask->valuestring,
              callsign, (int)s_ssid, AX25IP_MTU,
@@ -253,6 +317,7 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
         }
         memcpy(q->payload, buf + 4, ip_len);
         ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP  %s", (unsigned)ip_len, ip_info(buf + 4, ip_len));
+        ws_log_ip("RX", buf + 4, ip_len);
         if (s_netif.input(q, &s_netif) != ERR_OK) {
             ESP_LOGW(TAG, "TUN: lwIP input rejected pbuf");
             pbuf_free(q);
@@ -316,6 +381,7 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     memcpy(q->payload, p, ip_len);
 
     ESP_LOGI(TAG, "RX %u bytes IP←AX.25 → lwIP  %s", (unsigned)ip_len, ip_info(p, ip_len));
+    ws_log_ip("RX", p, ip_len);
 
     // Inject into lwIP (tcpip_input is task-safe; sends msg to tcpip task).
     if (s_netif.input(q, &s_netif) != ERR_OK) {

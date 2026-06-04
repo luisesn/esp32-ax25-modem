@@ -22,6 +22,7 @@ idf_component_register(
         "rf_console.c"
         "ota.c"
         "ota_net.c"
+        "delay_tune.c"
         "repeater.c"
         "squelch_sf.c"
     INCLUDE_DIRS

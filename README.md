@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-06-04): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 1050`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-06-05): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -73,7 +73,10 @@ esp32-aprs-modem/
 │   │                                  struct g_gps_pos con mutex FreeRTOS
 │   ├── display.h / display.c          driver SSD1306 I2C 128×64 (sin librería externa),
 │   │                                  task de refresco 2 Hz con callsign, IP, GPS, audio
-│   ├── ax25ip.h / ax25ip.c            gateway IP sobre radio; modo TUN (tncattach) o AX.25 RFC 1226
+│   ├── delay_tune.h / delay_tune.c    ajuste automático de post_rx_tx_delay_ms; barrido ICMP
+│   │                                  150–2000 ms; REST: /api/tune/start, /api/tune/stop
+│   ├── ax25ip.h / ax25ip.c            gateway IP sobre radio; modo TUN (tncattach) o AX.25 RFC 1226;
+│   │                                  paquetes IP logueados en el log APRS de la UI web
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
 │   ├── spiffs_data/config.json        configuración activa (credenciales reales — no subir a git)
@@ -92,6 +95,8 @@ esp32-aprs-modem/
 │       ├── FIFO.h                     cola circular inline con variantes _locked (portMUX)
 │       └── FakeArduino.{h,cpp}        stubs de Serial, F(), _BV(), cli/sei
 ├── managed_components/                dependencias gestionadas por IDF
+├── espota.py                          script OTA WiFi (protocolo espota, port 3232)
+│                                      uso: python espota.py -i <IP> [-f firmware.bin]
 ├── CLAUDE.md                          guía de contexto para Claude Code
 ├── report.md                          informe técnico de problemas y soluciones
 └── PROGRESS.md                        seguimiento de arreglos y bitácora
@@ -150,6 +155,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 - **Pestaña POSICIÓN**: formulario para transmitir baliza de posición APRS (lat/lon decimal, símbolo, comentario). Botón de baliza Morse on-demand.
 - **Pestaña CONFIG**: editor JSON del `config.json` completo. Guardar recarga el digipeater y la baliza morse sin reiniciar el firmware. Botón **↺ Reiniciar** para reiniciar el ESP32 de forma remota (pide confirmación; el firmware responde, espera 800 ms y ejecuta `esp_restart()`).
 - **Pestaña OTA**: sube un `.bin` generado por ESP-IDF para actualizar el firmware via OTA. Barra de progreso de subida, validación del magic byte del ESP32 (0xE9), y reinicio automático a los 3 s tras un flash exitoso.
+- **Pestaña TUNE**: ajuste automático de `post_rx_tx_delay_ms`. Barre de 350 a 1950 ms en pasos de 150 ms enviando 5 pings ICMP al nodo remoto (`ip.remote.addr`) por cada valor. Muestra en tiempo real una tabla con env/rec, % de éxito y RTT promedio. Al terminar recomienda el valor mínimo que supera el 80 % de éxito. Requiere `ip.enabled: true` y `ip.remote.addr` configurado. El log APRS también refleja los paquetes IP en tránsito durante el barrido.
 - **Audio**: streaming de audio de recepción en tiempo real vía WebSocket (IMA ADPCM, 9600 Hz). La barra de nivel usa un gradiente rojo/verde/rojo con las zonas de rango correcto visibles incluso sin señal. La barra AGC de la pestaña STATS muestra el nivel de entrada al AGC en cuentas ADC (escala 4–512): verde si está en el rango óptimo (20–400), rojo si la señal es demasiado débil (< 20, solo ruido) o demasiado fuerte (> 400, cerca de saturación del ADC); el valor numérico cambia de color en consecuencia. Botón de grabación para capturar audio y descargar como WAV. También disponible como stream WAV en `http://<IP>:8080/`.
 
 ## REST API
@@ -180,6 +186,8 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/squelch/monitor`  | Activa/desactiva modo monitor (squelch sin repetidor). Body JSON: `{"active":true}` |
 | `POST`   | `/api/squelch/sf_config`| Ajusta umbral HFNE en runtime. Body JSON: `{"hfne_threshold":0.25}` |
 | `POST`   | `/api/spiffs/upload?name=<fichero>` | Sube un fichero a SPIFFS. Body: binario raw. Escribe en `/spiffs/<fichero>`. Responde `{"ok":true,"name":"...","size":N}`. Útil para actualizar `index.html` sin reflashear todo el firmware |
+| `POST`   | `/api/tune/start`       | Inicia el barrido de ajuste de retardo TX. Requiere `ip.enabled` y `ip.remote.addr`. Responde `{"ok":true}` o error `409` si ya hay un barrido en curso |
+| `POST`   | `/api/tune/stop`        | Aborta el barrido en curso. Responde `{"ok":true}` |
 
 ## Eventos WebSocket (`/ws`)
 
@@ -200,6 +208,11 @@ El WebSocket mezcla tramas binarias (audio IMA ADPCM) con mensajes de texto JSON
 | `sstv_aborted` | servidor→cliente | SSTV abortado: `{"type":"sstv_aborted"}` |
 | `ota_progress` | servidor→cliente | Progreso OTA: `{"type":"ota_progress","written":N,"total":N}` |
 | `digi_config` | servidor→cliente | Config digipeater actualizada: `{"type":"digi_config","enabled":bool}` |
+| `tune_start` | servidor→cliente | Barrido iniciado: `{"type":"tune_start","from_ms":N,"to_ms":N,"step_ms":N,"count":N,"thr_pct":80}` |
+| `tune_step` | servidor→cliente | Resultado de un paso: `{"type":"tune_step","d":N,"sent":5,"recv":N,"pct":N,"rtt":N,"ok":bool}` |
+| `tune_waiting` | servidor→cliente | Pausa entre pasos: `{"type":"tune_waiting","next_ms":N,"remaining_s":N}` |
+| `tune_done` | servidor→cliente | Barrido completo: `{"type":"tune_done","best_ms":N,"orig_ms":N,"steps":[...]}` |
+| `tune_aborted` | servidor→cliente | Barrido detenido manualmente: `{"type":"tune_aborted"}` |
 
 ---
 
@@ -620,33 +633,72 @@ Cuando el ESP32 recibe una trama y necesita responder (ACK automático, paquete 
 
 El parámetro `aprs.post_rx_tx_delay_ms` en `config.json` introduce una ventana de inhibición: el dispatcher de TX de `receive_audio_task` no despacha **ninguna** trama encolada hasta que hayan transcurrido N ms desde la última trama decodificada. Los beacons periódicos (Morse, SSTV) **no** se ven afectados — solo las respuestas a tráfico recibido.
 
+### Guardia efectiva = D + preámbulo
+
+El parámetro `D` no es el único tiempo disponible para que la radio remota cambie de TX a RX. Cuando el ESP32 empieza a transmitir tras el retardo `D`, primero envía **~350 ms de preámbulo** (53 flags HDLC a 1200 bps) antes del primer byte de datos. La radio remota solo necesita recibir 4–5 flags (~27 ms) para sincronizar su PLL:
+
+```
+Remote drops PTT ──┬─── switch_time ──► Remote ready to RX
+                   │                          ▲
+ESP32 callback ────┴──── D ──► preámbulo ─────┤─── datos ──►
+                               (~350 ms)      │
+                                └─────── D + 350 ms ────────┘
+```
+
+**La guardia efectiva es `D + 350 ms`**, no solo `D`. Con `D = 500 ms` la radio remota tiene 850 ms de margen total — suficiente incluso para un Baofeng UV-5R (conmutación ~650–750 ms).
+
 ### Desglose del tiempo con dos Baofeng UV-5R
 
-Ensayado con dos ESP32 + Baofeng UV-5R, modo `ip.mode: "tun"` y `ping 44.61.3.71 -W 5 -i 10`:
+Ensayado con dos ESP32 + Baofeng UV-5R, modo `ip.mode: "tun"`:
 
 | Contribución | Tiempo | Origen |
 |---|---|---|
-| Flags de cola pendientes (tail) | ~47 ms | La radio remota detecta fin de trama en el **primer** flag 0x7E de cierre, pero el firmware envía 8 flags de cola (`custom_tail = 50 → DIV_ROUND = 8 bytes`); quedan ~7 × 6,7 ms en el aire |
+| Flags de cola pendientes (tail) | ~47 ms | El firmware envía 8 flags de cola; quedan ~7 × 6,7 ms en el aire tras que la radio remota detecta el primer flag de cierre |
 | Drenado DMA (`wait_dac_drain`) | ~84–168 ms | El pipeline DMA del DAC drena el bloque de silencio extra antes de que caiga el PTT |
 | Conmutación firmware DAC→ADC | ~10 ms | `dac_continuous_del_channels` + `adc_peripheral_start` |
-| **Conmutación hardware TX→RX del Baofeng UV-5R** | **~650–750 ms** | Término dominante: liberación del PA, relé de antena, encendido de la cadena RX y asentamiento del squelch |
-| **Total** | **~800–975 ms** | Tiempo desde que el callback `on_ax25_raw_frame` se ejecuta hasta que la radio remota puede recibir |
+| **Conmutación hardware TX→RX del Baofeng UV-5R** | **~650–750 ms** | Término dominante |
+| **Total hardware** | **~800–975 ms** | Desde `on_ax25_raw_frame` hasta que la radio remota puede recibir |
 
-El preámbulo que envía nuestro ESP32 antes de la respuesta (53 flags × 6,7 ms ≈ **353 ms**) actúa como margen de sincronización: la radio remota solo necesita recibir ~4–5 flags (27 ms) para sincronizar su PLL. Con `post_rx_tx_delay_ms = 950` el margen total disponible es ~436 ms.
+Con `D = 350 ms`: guardia efectiva = 350 + 350 = **700 ms** (la radio remota está lista en 699 ms → margen de ~1 ms, funciona pero es justo → ~80 % de éxito).  
+Con `D = 500 ms`: guardia efectiva = 500 + 350 = **850 ms** (margen holgado → 100 % de éxito).
 
-Con `post_rx_tx_delay_ms = 500` el preámbulo termina ~57 ms antes de que el Baofeng complete su conmutación TX→RX → la sincronización falla de forma intermitente.
+### RTT típico a 1200 bps
+
+Un ciclo ping completo sobre AX.25 incluye dos transmisiones (preámbulo + trama en cada sentido) más tiempos de decodificación:
+
+| Componente | Tiempo aprox. |
+|---|---|
+| ESP32 TX (preámbulo + trama ~50 B) | ~700 ms |
+| Decodificación remota + generación reply | ~100 ms |
+| Remote TX (preámbulo + trama ~50 B) | ~700 ms |
+| Decodificación ESP32 | ~350 ms |
+| Hardware + overhead total | ~400 ms |
+| **RTT total** | **~2 250–3 500 ms** |
+
+Un RTT de 3–3,5 s es completamente normal a 1200 bps y no indica ningún problema.
+
+### Ajuste automático con la pestaña TUNE
+
+La forma más fiable de encontrar el valor óptimo es usar la **pestaña TUNE** de la UI web:
+
+1. Configura `ip.remote.addr` con la IP de otro nodo en la red RF.
+2. Pulsa **▶ Iniciar ajuste** — el firmware barre de 350 a 1950 ms en pasos de 150 ms, enviando 5 pings ICMP por valor.
+3. Observa la tabla en tiempo real (env/rec, % éxito, RTT).
+4. Al finalizar se muestra la recomendación: mínimo D con ≥ 80 % de éxito.
+
+El intervalo entre pings dentro de cada paso es de 100 ms (mucho menor que D), de modo que el mecanismo de inhibición — no el temporizador de esp_ping — controla el espaciado real de las transmisiones. Entre pasos hay una pausa de 30 s.
 
 ### Valores recomendados
 
-| Radio | Valor recomendado |
-|-------|------------------|
-| Baofeng UV-5R / UV-82 y similares | **1050 ms** |
-| Radios con conmutación rápida (< 200 ms) | 200–300 ms |
-| Sin radio externa (pruebas en banco) | 0 (deshabilitar) |
+| Radio | Valor recomendado | Guardia efectiva |
+|-------|------------------|-----------------|
+| Baofeng UV-5R / UV-82 y similares | **500 ms** | 850 ms |
+| Radios con conmutación rápida (< 300 ms) | 150–200 ms | 500–550 ms |
+| Sin radio externa (pruebas en banco) | 0 (deshabilitar) | — |
 
 ```json
 "aprs": {
-  "post_rx_tx_delay_ms": 1050
+  "post_rx_tx_delay_ms": 500
 }
 ```
 
@@ -732,7 +784,10 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "mode": "tun",
     "addr": "44.61.3.75",
     "netmask": "255.255.255.0",
-    "gateway": "44.61.3.1"
+    "gateway": "44.61.3.1",
+    "remote": {
+      "addr": "44.61.3.74"
+    }
   },
   "digi": {
     "enabled": false,
@@ -778,12 +833,13 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `aprs` | `ssid` | int 0–15 | SSID APRS |
 | `aprs` | `symbol_table` | `"/"` o `"\\"` | Tabla de símbolos APRS (primaria o alternativa) |
 | `aprs` | `symbol_code` | char | Código de símbolo APRS (p. ej. `">"` = coche) |
-| `aprs` | `post_rx_tx_delay_ms` | int | Retardo TX tras recepción (ms). Tiempo mínimo desde que se decodifica una trama hasta que se despacha la siguiente TX. Compensa el tiempo de conmutación TX→RX de la radio remota. `0` = deshabilitado. Valor recomendado con Baofeng UV-5R: **1050** |
+| `aprs` | `post_rx_tx_delay_ms` | int | Retardo TX tras recepción (ms). La guardia efectiva es `D + preamble (~350 ms)`; ver sección dedicada. `0` = deshabilitado. Valor recomendado con Baofeng UV-5R: **500** (usa la pestaña TUNE para calibrar) |
 | `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
 | `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
 | `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |
 | `ip` | `enabled` | bool | Activa gateway IP sobre radio |
 | `ip` | `mode` | string | `"tun"` (tncattach, verificado) o `"ax25"` (RFC 1226 / kissattach) |
+| `ip.remote` | `addr` | string | IP del nodo remoto en la red RF; usada por la pestaña TUNE para el barrido de retardo |
 | `digi` | `alias` | array | Aliases a digipeatear (WIDEn-N y aliases legacy) |
 | `digi` | `comment` | string | Comentario libre (informativo, no transmitido) |
 | `morse` | `period_s` | int | Intervalo entre balizas CW (segundos) |
@@ -812,6 +868,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 - **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 - **FIFOs internos** (report.md §2.6) — protegidos con `portMUX_TYPE`; riesgo residual bajo en escenarios de alta carga.
 - **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build innecesariamente.
+- **Pestaña TUNE sin guardar automático** — al terminar el barrido solo muestra la recomendación; el valor debe aplicarse manualmente en la pestaña CONFIG.
 
 ## Indicativo y licencia de radioaficionado
 

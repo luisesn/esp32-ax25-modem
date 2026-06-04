@@ -178,6 +178,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('ota',this)">OTA</button>
       <button class="tab-btn" onclick="showTab('spiffs',this)">SPIFFS</button>
       <button class="tab-btn" onclick="showTab('rep',this)">REPEATER</button>
+      <button class="tab-btn" onclick="showTab('tune',this)">TUNE</button>
     </div>
     <div id="tab-log" class="tab-pane active">
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
@@ -407,6 +408,27 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         </div>
       </div>
     </div>
+    <div id="tab-tune" class="tab-pane" style="justify-content:flex-start;gap:.8rem">
+      <div style="font-size:.65rem;color:#888">Ajuste automático de <code>post_rx_tx_delay_ms</code>. Envía pings ICMP al nodo remoto (<code>ip.remote.addr</code>) con distintos retardos y muestra cuál es el mínimo que funciona.</div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <button id="tune-start-btn" onclick="tuneStart()" style="padding:.3rem .9rem;font-size:.65rem;font-family:monospace;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a;border-radius:3px;cursor:pointer">&#x25B6; Iniciar ajuste</button>
+        <button id="tune-stop-btn" onclick="tuneStop()" disabled style="padding:.3rem .9rem;font-size:.65rem;font-family:monospace;background:#2a1a1a;color:#e88080;border:1px solid #5a2a2a;border-radius:3px;cursor:pointer">&#x25A0; Detener</button>
+        <span id="tune-status" style="font-size:.65rem;color:#888;flex:1"></span>
+      </div>
+      <div id="tune-recommendation" style="display:none;padding:.4rem .6rem;border:1px solid #3a5a3a;border-radius:4px;background:#0d1a0d;font-size:.7rem;font-family:monospace;color:#80e880"></div>
+      <table id="tune-table" style="display:none;border-collapse:collapse;font-size:.65rem;font-family:monospace;width:100%">
+        <thead>
+          <tr style="color:#666;border-bottom:1px solid #2a2a2a">
+            <th style="text-align:left;padding:.2rem .4rem">Delay (ms)</th>
+            <th style="text-align:center;padding:.2rem .4rem">Env/Rec</th>
+            <th style="text-align:center;padding:.2rem .4rem">Éxito</th>
+            <th style="text-align:right;padding:.2rem .4rem">RTT prom</th>
+            <th style="text-align:center;padding:.2rem .4rem"></th>
+          </tr>
+        </thead>
+        <tbody id="tune-tbody"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 <script>
@@ -617,6 +639,16 @@ function handleMsg(p){
     repUpdateState(p.state||'idle');
   } else if(p.type==='squelch_sf'){
     hfneUpdate(p.hfne,p.open,p.active,p.manual);
+  } else if(p.type==='tune_start'){
+    tuneOnStart(p);
+  } else if(p.type==='tune_step'){
+    tuneOnStep(p);
+  } else if(p.type==='tune_waiting'){
+    tuneOnWaiting(p);
+  } else if(p.type==='tune_done'){
+    tuneOnDone(p);
+  } else if(p.type==='tune_aborted'){
+    tuneOnAborted();
   } else if(p.src!=null){
     const k=p.src+'|'+p.dst+'|'+p.info;
     if(!isDuplicate(k))appendLog(p.src,p.dst||'',p.path||'',p.info||'');
@@ -1134,6 +1166,73 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 });
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
 window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});repRefresh();});
+// ── Delay tuner ───────────────────────────────────────────────────────────
+function tuneSetRunning(running){
+  document.getElementById('tune-start-btn').disabled=running;
+  document.getElementById('tune-stop-btn').disabled=!running;
+}
+function tuneSetStatus(msg,color){
+  const el=document.getElementById('tune-status');
+  el.textContent=msg;el.style.color=color||'#888';
+}
+function tuneOnStart(p){
+  document.getElementById('tune-table').style.display='table';
+  document.getElementById('tune-recommendation').style.display='none';
+  document.getElementById('tune-tbody').innerHTML='';
+  tuneSetRunning(true);
+  tuneSetStatus('Probando '+p.from_ms+'..'+p.to_ms+' ms (paso '+p.step_ms+' ms, '+p.count+' pings, umbral '+p.thr_pct+'%)','#c8a04a');
+}
+function tuneOnStep(p){
+  const tbody=document.getElementById('tune-tbody');
+  const pct=p.pct;
+  const color=p.ok?'#80e880':pct>=40?'#e8c040':'#e86060';
+  const bar='█'.repeat(Math.round(pct/20))+'░'.repeat(5-Math.round(pct/20));
+  const rttStr=p.rtt?p.rtt+' ms':'—';
+  const tr=document.createElement('tr');
+  tr.style.borderBottom='1px solid #1a1a1a';
+  tr.innerHTML=
+    '<td style="padding:.2rem .4rem;color:#ccc">'+p.d+'</td>'+
+    '<td style="text-align:center;padding:.2rem .4rem;color:#888">'+p.recv+'/'+p.sent+'</td>'+
+    '<td style="text-align:center;padding:.2rem .4rem;color:'+color+';font-family:monospace">'+bar+' '+pct+'%</td>'+
+    '<td style="text-align:right;padding:.2rem .4rem;color:#888">'+rttStr+'</td>'+
+    '<td style="text-align:center;padding:.2rem .4rem">'+
+      (p.ok?'<span style="color:#80e880">✓</span>':'<span style="color:#666">✗</span>')+
+    '</td>';
+  tbody.appendChild(tr);
+  tbody.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function tuneOnWaiting(p){
+  tuneSetStatus('Esperando '+p.remaining_s+' s antes de probar '+p.next_ms+' ms…','#666');
+}
+function tuneOnDone(p){
+  tuneSetRunning(false);
+  const rec=document.getElementById('tune-recommendation');
+  rec.style.display='block';
+  if(p.best_ms!==null&&p.best_ms>0){
+    rec.style.color='#80e880';rec.style.borderColor='#3a5a3a';
+    rec.innerHTML='✓ Recomendado: <b>'+p.best_ms+' ms</b>'
+      +' (actual: '+p.orig_ms+' ms) — aplícalo en la pestaña CONFIG editando <code>aprs.post_rx_tx_delay_ms</code>.';
+    tuneSetStatus('Ajuste completado.','#80e880');
+  } else {
+    rec.style.color='#e88080';rec.style.borderColor='#5a3a3a';
+    rec.innerHTML='✗ Ningún retardo alcanzó el umbral de éxito. El nodo remoto puede no estar accesible o el canal es muy ruidoso.';
+    tuneSetStatus('Ajuste completado — sin resultado.','#e88080');
+  }
+}
+function tuneOnAborted(){
+  tuneSetRunning(false);
+  tuneSetStatus('Ajuste detenido.','#e88080');
+}
+async function tuneStart(){
+  tuneSetStatus('Iniciando…','#c8a04a');
+  const r=await fetch('/api/tune/start',{method:'POST'});
+  const j=await r.json();
+  if(!j.ok)tuneSetStatus('Error: '+(j.error||'desconocido'),'#e88080');
+}
+async function tuneStop(){
+  await fetch('/api/tune/stop',{method:'POST'});
+  tuneSetStatus('Deteniendo…','#888');
+}
 </script>
 </body>
 </html>

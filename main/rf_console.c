@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <errno.h>
 
@@ -150,24 +151,38 @@ static void handle_client(int fd, const char *client_ip)
 {
     ESP_LOGI(TAG, "client connected: %s", client_ip);
 
-    static const char *banner = "RF Console (type 'help' for commands)\r\n> ";
-    send(fd, banner, strlen(banner), MSG_NOSIGNAL);
+    // Do NOT send the banner here.  The TCP connection was just accepted but the
+    // RF round-trip (~6 s at 1200 bps) is longer than lwIP's default RTO (1.5 s).
+    // Sending data before the client proves the link works in both directions would
+    // trigger a retransmit storm that fills s_tx_queue and the connection would be
+    // reset before the banner ever arrives.  Instead, send the banner with the first
+    // response — by then recv() has returned, so we know RF client→ESP is working,
+    // which means ESP→client will also work.
 
     char line[128];
     int  pos = 0;
+    bool skip_lf   = false;
+    bool need_banner = true;
 
     while (1) {
         char ch;
         int n = recv(fd, &ch, 1, 0);
         if (n <= 0) break;
 
-        if (ch == '\n') {
+        if (ch == '\n' && skip_lf) {
+            skip_lf = false;    // consumed the \n of a \r\n pair — already dispatched
+        } else if (ch == '\n' || ch == '\r') {
+            skip_lf = (ch == '\r');
             line[pos] = '\0';
+            if (need_banner) {
+                static const char *banner = "RF Console (type 'help' for commands)\r\n";
+                send(fd, banner, strlen(banner), MSG_NOSIGNAL);
+                need_banner = false;
+            }
             if (!dispatch(fd, line)) break;
             pos = 0;
-        } else if (ch == '\r') {
-            // ignore bare CR — will be flushed on the following \n
         } else {
+            skip_lf = false;
             if (pos < (int)sizeof(line) - 1)
                 line[pos++] = ch;
             else {
@@ -232,6 +247,12 @@ static void rf_console_task(void *arg)
 
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+
+        int nodelay = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+        struct timeval tv = { .tv_sec = 120, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
         handle_client(fd, client_ip);
     }
 }
