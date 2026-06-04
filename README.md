@@ -627,6 +627,62 @@ telnet <ip.addr> 23
 
 ---
 
+## Comandos remotos vía APRS
+
+El firmware puede recibir comandos de control enviados como **mensajes APRS dirigidos al propio indicativo del nodo**. Cualquier estación de radioaficionado con acceso a la red APRS puede operar el nodo de forma remota sin necesidad de WiFi ni cable.
+
+Actívalo en `config.json`:
+
+```json
+"remote_cmd": {
+  "enabled": true
+}
+```
+
+### Sintaxis
+
+El cuerpo del mensaje es una cadena de campos separados por comas, sin espacios:
+
+```
+verbo,sustantivo[,argumento1[,argumento2]]
+```
+
+El número de mensaje APRS `{NNN}` se elimina automáticamente antes de procesar el comando.
+
+### Comandos disponibles
+
+| Comando | Acción | Respuesta APRS |
+|---------|--------|----------------|
+| `tx,sstv,<fichero>,<modo>` | Transmite una imagen JPEG almacenada en SPIFFS en el modo SSTV indicado. El modo por defecto es `r36` si se omite. | `SSTV TX:<fichero>` o `ERR:SSTV busy` / `ERR:tx,sstv needs filename` |
+| `tx,morse,beacon` | Dispara la baliza CW morse inmediatamente (equivalente a `POST /api/morse/trigger`). | *(sin respuesta; acción registrada en log serie)* |
+| `tx,aprs,position` | Transmite una baliza de posición APRS con el fix GPS actual. Requiere `gps.enabled: true` y fix válido. | `Position sent` o `No GPS fix` |
+| `rx,sstv,list` | Lista los ficheros JPEG disponibles en `/spiffs/sstv/`. Envía un mensaje APRS por fichero con una pausa de 5 s entre mensajes. | Un mensaje por fichero, o `SSTV:no files` |
+
+Modos SSTV válidos para `tx,sstv`: `m1` (Martin M1), `m2` (Martin M2), `s1` (Scottie S1), `r36` (Robot 36), `r72` (Robot 72).
+
+### Ejemplo desde la UI web
+
+En la pestaña **MENSAJE** de `http://<IP-del-ESP32>/`, rellena:
+- **Destino**: el propio indicativo del nodo (p. ej. `EA1JBS`) con su SSID.
+- **Texto**: el comando, por ejemplo `rx,sstv,list`.
+
+### Ejemplo desde direwolf / APRS-IS
+
+```
+# Enviar desde otro TNC direwolf (ajustar indicativos):
+EA1JBS-5>APRS,WIDE1-1::EA1JBS-11:rx,sstv,list
+EA1JBS-5>APRS,WIDE1-1::EA1JBS-11:tx,sstv,foto.jpg,r36
+EA1JBS-5>APRS,WIDE1-1::EA1JBS-11:tx,aprs,position
+```
+
+### Notas de seguridad
+
+- No hay autenticación: cualquier estación puede enviar comandos si `remote_cmd.enabled: true` y el mensaje llega al nodo.
+- Los comandos de transmisión (`tx,sstv`, `tx,morse`, `tx,aprs`) activan el PTT. Úsalos solo con licencia y en la banda correcta.
+- Ponlo a `false` (valor por defecto) si el nodo no necesita control remoto por radio.
+
+---
+
 ## Retardo TX tras recepción (`post_rx_tx_delay_ms`)
 
 Cuando el ESP32 recibe una trama y necesita responder (ACK automático, paquete IP de vuelta, trama KISS reencolada), la radio remota acaba de terminar de transmitir y necesita tiempo para soltar el PTT y conmutar su electrónica de TX a RX. Si el ESP32 responde inmediatamente, la radio remota aún no está escuchando y la respuesta se pierde.
