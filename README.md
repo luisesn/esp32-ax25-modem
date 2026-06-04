@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-06-04): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota/idf.py) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 1050`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-06-04): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 1050`). Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. RX pendiente verificación con señal RF real.**
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -378,22 +378,39 @@ Respuesta en caso de éxito: `{"ok":true,"name":"index.html","size":98432}`.
 
 ## Actualización OTA de firmware
 
-El firmware soporta actualización Over-The-Air de tres formas: desde el navegador, con `curl`, o con `idf.py` directamente desde la línea de comandos sin cable serie.
+El firmware soporta actualización Over-The-Air de tres formas: desde el navegador, con `curl`, o con el script `espota.py` incluido en el repositorio.
 
-### Con idf.py (espota, recomendado para desarrollo)
+### Con espota.py (recomendado para desarrollo)
 
-Requiere que el firmware esté activo y WiFi conectado. Usa el protocolo espota.py (UDP+TCP port 3232):
+Requiere que el firmware esté activo y WiFi conectado. Usa el protocolo espota (UDP+TCP port 3232, sin cable serie):
 
 ```bash
-idf.py -p <IP-del-ESP32> app-flash
+# Compilar primero:
+ninja -C build
+
+# Flashear por WiFi (usa build/esp32-aprs-modem.bin por defecto):
+python espota.py -i <IP-del-ESP32>
+
+# O especificar el fichero explícitamente:
+python espota.py -i 192.168.1.50 -f build/esp32-aprs-modem.bin
 ```
 
-Por ejemplo:
-```bash
-idf.py -p 192.168.1.50 app-flash
+Salida típica:
+```
+Target  : 192.168.1.50:3232
+Firmware: build/esp32-aprs-modem.bin  (921600 bytes)
+MD5     : a3f2c1...
+
+Sending OTA request... OK
+Connecting TCP to 192.168.1.50:3232... OK
+Uploading...
+  [==================================================] 100%  900/900 KB  180 KB/s
+Sent 921600 bytes in 5.1s (176 KB/s)
+Waiting for device confirmation... OK
+OTA successful! Device is rebooting...
 ```
 
-El progreso se muestra en el terminal igual que con un puerto serie. El ESP32 reinicia automáticamente al completar la actualización. La partición SPIFFS (config.json, index.html, imágenes SSTV) **no se toca**.
+La partición SPIFFS (config.json, index.html, imágenes SSTV) **no se toca**.
 
 ### Desde la UI web
 
