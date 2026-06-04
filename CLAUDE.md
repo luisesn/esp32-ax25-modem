@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-04-30): **compila limpio (binary 904 KB, 47 % libre), KISS TNC bidireccional operativo, TX verificado en hardware (datos decodificados por receptor externo), UI web funcional, gateway IP RFC 1226 implementado, RX pendiente verificación con señal RF real**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-06-05): **compila limpio (~874 KB, 48 % libre), KISS TNC bidireccional operativo, TX verificado en hardware, UI web con chat APRS por burbujas + confirmación ACK, comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, RX pendiente verificación con señal RF real**.
 
 Se basa en una adaptación local de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino), reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -31,11 +31,12 @@ esp32-aprs-modem/
 │   ├── ax25ip.h / ax25ip.c     # Gateway IP RFC 1226 (lwIP custom netif, PID=0xCC)
 │   ├── aux_config.h / .c       # Carga/guarda config JSON desde SPIFFS
 │   ├── aux_file_management.h/.c# Utilidades de sistema de ficheros SPIFFS
+│   ├── remote_cmd.h / .c       # Comandos remotos vía APRS (tx sstv/morse/pos, rx sstv list)
 │   ├── spiffs_data/
 │   │   ├── config.json         # Config inicial (callsign, WiFi, AP, IP) flasheada en SPIFFS
-│   │   └── index.html          # UI web completa (APRS log, envío de mensajes, audio)
+│   │   └── index.html          # UI web completa (APRS log, chat, audio, SSTV, OTA…)
 │   └── LibAPRS-esp32-i2s/src/
-│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (init, queue_msg, queue_ack, get_callsign…)
+│       ├── LibAPRS.{h,cpp}     # API APRS de alto nivel (init, queue_msg→int, queue_ack, get_callsign…)
 │       ├── AFSK.{h,cpp}        # Modulador/demodulador AFSK, DAC TX, ADC RX
 │       ├── AX25.{h,cpp}        # Codificación/decodificación AX.25 + raw_hook para KISS
 │       ├── CRC-CCIT.{h,c}      # CRC-CCITT para tramas AX.25
@@ -215,19 +216,20 @@ idf.py monitor             # ver trazas; salir con Ctrl-]
 
 Ver [report.md](report.md) para el detalle técnico y [PROGRESS.md](PROGRESS.md) para el seguimiento.
 
-Resumen rápido (2026-04-30):
+Resumen rápido (2026-06-05):
 - Sección 1 (bloqueantes): todos resueltos en código ✅
 - KISS TNC bidireccional (WiFi TCP) operativo ✅
 - TX verificado en hardware: datos decodificados por receptor externo ✅
-- UI web (index.html): log APRS, envío de mensajes, audio IMA ADPCM, auto-ACK ✅
-- Gateway IP RFC 1226 (`ax25ip.c`): implementado, build limpio ✅
-- APRS_queue_msg / APRS_queue_ack / APRS_getCallsign ✅
-- Indicativo y SSID desde config.json en modo KISS ✅
-- Build binario: 904 KB (47 % libre) con `idf.py reconfigure && ninja -C build` ✅
-- `freeMemory()` constante ficticia: pendiente sustituir por `esp_get_free_heap_size()` ⬜
-- FIFOs sin protección portMUX_TYPE: riesgo teórico ⬜
+- UI web (index.html): log APRS, tab CHAT con burbujas y ACK checkmark, audio IMA ADPCM ✅
+- Tab bar scrollable en móvil; iOS zoom fix (`font-size:16px`) ✅
+- `APRS_queue_msg` devuelve `int` (msg_id); `/api/aprs/send` expone `msg_id` en respuesta ✅
+- Comandos remotos vía APRS (`remote_cmd.c`): tx sstv/morse/pos, rx sstv list ✅
+- ACK enviado antes que la respuesta del comando remoto (`main.c`) ✅
+- Gateway IP RFC 1226 (`ax25ip.c`): modo TUN verificado en hardware ✅
+- Build binario: ~874 KB (48 % libre) con `idf.py reconfigure && ninja -C build` ✅
+- FIFOs sin protección portMUX_TYPE: riesgo teórico residual ⬜
 - Verificación RX con señal RF real: pendiente ⚠️
-- Verificación gateway IP en hardware real: pendiente ⚠️
+- Repetidor de voz, GPS, display SSD1306: implementados, verificación HW pendiente ⚠️
 
 ## Referencias externas
 

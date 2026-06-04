@@ -59,9 +59,11 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .pkt .tx-lbl{color:#c8a04a;font-weight:bold}
 .pkt .tx-arr{color:#6d6d6d}
 #info{font-size:.7rem;color:#555;text-align:center;line-height:1.6;}
-.tab-bar{display:flex;border-bottom:1px solid #2a1a00;flex-shrink:0}
-.tab-btn{flex:1;padding:.35rem;font-size:.65rem;font-family:monospace;background:none;
-  border:none;color:#666;cursor:pointer;letter-spacing:.06em;
+.tab-bar{display:flex;border-bottom:1px solid #2a1a00;flex-shrink:0;
+  overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+.tab-bar::-webkit-scrollbar{display:none}
+.tab-btn{flex:0 0 auto;padding:.35rem .5rem;font-size:.65rem;font-family:monospace;background:none;
+  border:none;color:#666;cursor:pointer;letter-spacing:.06em;white-space:nowrap;
   border-bottom:2px solid transparent;transition:color .15s}
 .tab-btn.active{color:#c8a04a;border-bottom:2px solid #c8a04a}
 .tab-pane{display:none;padding:.75rem;flex-direction:column;gap:.6rem;flex:1;min-height:0;
@@ -108,12 +110,16 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #send-btn:disabled{opacity:.4;cursor:default}
 #send-status{font-size:.65rem;min-height:1rem;color:#888;padding:0 .1rem}
 @media (max-width:700px){
-  body{padding:.6rem}
-  .app{height:auto;min-height:calc(100dvh - 1.2rem);grid-template-rows:auto 1fr;gap:.75rem}
-  #top-panel{padding:.85rem;gap:.7rem}
-  .send-row{flex-wrap:wrap}
-  .send-row label{min-width:auto}
-  #send-to,#send-text{width:100%}
+  body{padding:.4rem}
+  .app{height:auto;min-height:calc(100dvh - .8rem);grid-template-rows:auto 1fr;gap:.5rem}
+  #top-panel{padding:.6rem .85rem;gap:.5rem}
+  h1{font-size:1rem}
+  #info{display:none}
+  #meter-wrap{width:100%;max-width:none}
+  .tab-btn{min-width:2.75rem;padding:.5rem .35rem;font-size:.6rem}
+  input,select,textarea{font-size:16px !important}
+  .bubble{max-width:88%}
+  #chat-hdr input{width:5rem}
 }
 #rec-btn{padding:.35rem .7rem;font-size:.75rem;font-family:monospace;
   background:#1a0000;color:#c04040;border:1px solid #c04040;
@@ -152,6 +158,37 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   background:#2a0a0a;color:#c04040;border:1px solid #c04040;border-radius:3px;cursor:pointer}
 .sstv-del-btn:hover{background:#3a0a0a}
 #sstv-preview{max-width:100%;border:1px solid #333;display:none;margin-top:.4rem}
+/* ── Chat tab ─────────────────────────────────────────────────────────────── */
+#tab-msg{padding:0;gap:0;justify-content:flex-start}
+#chat-hdr{display:flex;align-items:center;gap:.35rem;padding:.35rem .5rem;
+  border-bottom:1px solid #2a1a00;flex-shrink:0;background:#0a0a0a;flex-wrap:wrap}
+#chat-hdr label{font-size:.65rem;color:#888;flex-shrink:0}
+#chat-hdr input,#chat-hdr select{background:#111;color:#e0e0e0;border:1px solid #333;
+  border-radius:3px;font-family:monospace;font-size:.75rem;padding:.25rem .35rem}
+#send-to{width:5.5rem;text-transform:uppercase}
+#send-ssid{width:3.5rem}
+#chat-open-btn{padding:.25rem .55rem;font-size:.65rem;font-family:monospace;
+  background:#1a3a1a;color:#4fc84f;border:1px solid #4a9a4a;border-radius:3px;
+  cursor:pointer;flex-shrink:0;white-space:nowrap}
+#chat-open-btn:hover{background:#244a24}
+#chat-log{flex:1;min-height:0;overflow-y:auto;padding:.5rem .6rem;
+  display:flex;flex-direction:column;gap:.45rem}
+#chat-placeholder{color:#444;font-size:.72rem;text-align:center;
+  padding:2rem .5rem;line-height:1.9;margin:auto}
+.bubble{max-width:78%;padding:.4rem .6rem;border-radius:6px;font-size:.73rem;
+  line-height:1.45;word-break:break-word}
+.bubble-out{align-self:flex-end;background:#2a1e00;border:1px solid #c8a04a;color:#e0c060}
+.bubble-in{align-self:flex-start;background:#0a1e0a;border:1px solid #4a9a4a;color:#c0e0a0}
+.bubble-ts{font-size:.58rem;color:#555;margin-top:.15rem;display:flex;
+  align-items:center;gap:.25rem;justify-content:flex-end}
+.bubble-in .bubble-ts{justify-content:flex-start}
+.bubble-ack{color:#444;font-size:.7rem;transition:color .4s}
+.bubble-ack.acked{color:#4fc84f}
+#chat-input-bar{display:flex;gap:.4rem;padding:.4rem .5rem;
+  border-top:1px solid #2a1a00;flex-shrink:0;align-items:center;background:#0a0a0a}
+#send-text{flex:1;background:#111;color:#e0e0e0;border:1px solid #333;
+  border-radius:3px;font-family:monospace;font-size:.75rem;padding:.35rem .4rem}
+#send-status{font-size:.62rem;min-height:.85rem;color:#888;padding:.1rem .5rem .2rem}
 </style>
 </head>
 <body>
@@ -170,7 +207,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   <div id="send-wrap" class="panel">
     <div class="tab-bar">
       <button class="tab-btn active" onclick="showTab('log',this)">LOG</button>
-      <button class="tab-btn" onclick="showTab('msg',this)">MENSAJE</button>
+      <button id="tab-btn-msg" class="tab-btn" onclick="showTab('msg',this)">CHAT</button>
       <button class="tab-btn" onclick="showTab('pos',this)">POSICIÓN</button>
       <button class="tab-btn" onclick="showTab('cfg',this)">CONFIG</button>
       <button class="tab-btn" onclick="showTab('stats',this)">STATS</button>
@@ -185,10 +222,11 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div id="log"></div>
     </div>
     <div id="tab-msg" class="tab-pane">
-      <div class="send-row">
-        <label>Destino</label>
-        <input id="send-to" type="text" maxlength="6" placeholder="NO0CAL" spellcheck="false" autocomplete="off">
-        <label style="min-width:2rem">SSID</label>
+      <div id="chat-hdr">
+        <label>A:</label>
+        <input id="send-to" type="text" maxlength="6" placeholder="NO0CAL" spellcheck="false" autocomplete="off"
+          onkeydown="if(event.key==='Enter')openChatFromInput()">
+        <label>-</label>
         <select id="send-ssid">
           <option value="-1">—</option>
           <option value="0" selected>0</option>
@@ -201,10 +239,14 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           <option value="13">13</option><option value="14">14</option>
           <option value="15">15</option>
         </select>
+        <button id="chat-open-btn" onclick="openChatFromInput()">&#x25B6; Abrir</button>
       </div>
-      <div class="send-row">
-        <label>Mensaje</label>
-        <input id="send-text" type="text" maxlength="67" placeholder="Hola desde ESP32-APRS" spellcheck="false">
+      <div id="chat-log">
+        <div id="chat-placeholder">Introduce un indicativo arriba<br>o haz clic en un callsign del LOG</div>
+      </div>
+      <div id="chat-input-bar">
+        <input id="send-text" type="text" maxlength="67" placeholder="Mensaje…" spellcheck="false"
+          onkeydown="if(event.key==='Enter')sendAPRS()">
         <button id="send-btn" onclick="sendAPRS()">&#x2191; Enviar</button>
       </div>
       <div id="send-status"></div>
@@ -473,15 +515,102 @@ function fmtHops(path){
 const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
 let s_gps_course=null,s_gps_speed_kt=null;
 let s_last_log_seq=0;
+// ── Chat state ──────────────────────────────────────────────────────────────
+let chatContact=null; // {call:'EA1JBS', ssid:7}
+const chatPendingAcks=new Map(); // msgId(int) → bubble DOM element
+function chatContactStr(){
+  if(!chatContact)return null;
+  const s=chatContact.ssid;
+  return chatContact.call+(s>=0&&s<=15?'-'+s:'');
+}
+function chatMatchesSrc(src){
+  if(!chatContact||!src)return false;
+  const parts=(src+'').split('-');
+  const c=parts[0].toUpperCase();
+  const s=parts.length>1?parseInt(parts[1],10):0;
+  return c===chatContact.call&&s===chatContact.ssid;
+}
+function chatMatchesDst(dst){
+  if(!chatContact||!dst)return false;
+  return (dst+'').toUpperCase()===chatContactStr().toUpperCase();
+}
+function scrollChatToBottom(){
+  const cl=document.getElementById('chat-log');
+  if(cl)cl.scrollTop=cl.scrollHeight;
+}
+function chatAddBubble(out,text,tsStr,msgId){
+  const cl=document.getElementById('chat-log');
+  if(!cl)return null;
+  const ph=document.getElementById('chat-placeholder');
+  if(ph)ph.remove();
+  const d=document.createElement('div');
+  d.className='bubble '+(out?'bubble-out':'bubble-in');
+  const ts=tsStr||new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const ackSpan=out?'<span class="bubble-ack" data-ack>✓</span>':'';
+  d.innerHTML=esc(text)+'<div class="bubble-ts"><span>'+ts+'</span>'+ackSpan+'</div>';
+  if(out&&msgId!=null){
+    d.dataset.msgid=msgId;
+    chatPendingAcks.set(msgId,d);
+  }
+  cl.appendChild(d);
+  scrollChatToBottom();
+  return d;
+}
+function chatMarkAcked(msgIdInt){
+  const d=chatPendingAcks.get(msgIdInt);
+  if(!d)return;
+  const sp=d.querySelector('[data-ack]');
+  if(sp){sp.classList.add('acked');}
+  chatPendingAcks.delete(msgIdInt);
+}
+function openChat(call,ssid){
+  const c=call.toUpperCase().trim();
+  const s=parseInt(ssid,10);
+  if(!c)return;
+  chatContact={call:c,ssid:isNaN(s)?0:s};
+  chatPendingAcks.clear();
+  // Sync header inputs
+  const toEl=document.getElementById('send-to');
+  const siEl=document.getElementById('send-ssid');
+  if(toEl)toEl.value=c;
+  if(siEl)siEl.value=isNaN(s)?0:s;
+  // Rebuild chat log from history (logData is newest-first → reverse)
+  const cl=document.getElementById('chat-log');
+  cl.innerHTML='';
+  const relevant=[...logData].reverse().filter(e=>{
+    if(e.type==='tx') return chatMatchesDst(e.dst)&&!aprsIsAck(e.info||'');
+    return chatMatchesSrc(e.src)&&!aprsIsAck(e.info||'');
+  });
+  if(relevant.length===0){
+    cl.innerHTML='<div id="chat-placeholder">Sin mensajes previos con '+esc(chatContactStr())+'</div>';
+  } else {
+    relevant.forEach(e=>{
+      const out=(e.type==='tx');
+      const ts=e.ts?new Date(e.ts).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'';
+      const text=out?(e.info||''):aprsExtractMsg(e.info||'');
+      chatAddBubble(out,text,ts,null);
+    });
+  }
+  scrollChatToBottom();
+}
+function openChatFromInput(){
+  const c=document.getElementById('send-to').value.trim();
+  const s=document.getElementById('send-ssid').value;
+  if(!c){document.getElementById('send-to').focus();return;}
+  openChat(c,s);
+  showTab('msg',document.getElementById('tab-btn-msg'));
+  setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
+}
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fillDest(src){
-  const m=src.match(/^([A-Z0-9]+)(?:-(\d+))?$/);
+  const m=src.match(/^([A-Z0-9]+)(?:-(\d+))?$/i);
   if(!m)return;
-  document.getElementById('send-to').value=m[1];
-  const si=document.getElementById('send-ssid');
-  si.value=(m[2]!=null)?m[2]:'0';
-  document.getElementById('send-text').focus();
+  const call=m[1].toUpperCase();
+  const ssid=(m[2]!=null)?parseInt(m[2],10):0;
+  openChat(call,ssid);
+  showTab('msg',document.getElementById('tab-btn-msg'));
+  setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
 }
 function isMessageToMe(info){
   if(!myCall||!info) return false;
@@ -504,13 +633,41 @@ function isMessageToMe(info){
   }
   return false;
 }
+function aprsExtractMsg(info){
+  if(!info)return info;
+  // APRS message format: ":ADDRESSEE:text{NNN}" (addressee is 9 chars padded)
+  if(info[0]===':'&&info.length>11&&info[10]===':'){
+    return info.slice(11).replace(/\{\d+\}$/,'').trimEnd();
+  }
+  return info;
+}
+// Returns true if info is an APRS ACK packet, either bare ("ack001") or
+// wrapped in the APRS message envelope (":DEST     :ack001").
+function aprsIsAck(info){
+  if(!info) return false;
+  if(/^ack\d+$/i.test(info.trim())) return true;
+  if(info[0]===':'&&info.length>11&&info[10]===':')
+    return /^ack\d+/i.test(info.slice(11).trimStart());
+  return false;
+}
+// Extracts the numeric ACK id from bare or envelope format. Returns null if not an ACK.
+function aprsExtractAckId(info){
+  if(!info) return null;
+  let m=info.trim().match(/^ack(\d+)$/i);
+  if(m) return parseInt(m[1],10);
+  if(info[0]===':'&&info.length>11&&info[10]===':'){
+    m=info.slice(11).trimStart().match(/^ack(\d+)/i);
+    if(m) return parseInt(m[1],10);
+  }
+  return null;
+}
 function appendLog(src,dst,path,info,isDigi){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt';
   const ts=new Date().toLocaleTimeString('es',
     {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  const isAck=/^ack\d+$/i.test(info.trim());
+  const isAck=aprsIsAck(info);
   const isToMe=isMessageToMe(info);
   if(isDigi)d.classList.add('pkt-digi');
   if(isAck)d.classList.add('pkt-ack');
@@ -535,6 +692,16 @@ function appendLog(src,dst,path,info,isDigi){
   const tsISO=new Date().toISOString();
   logData.unshift({ts:tsISO,type:isDigi?'digi':(isAck?'ack':(isToMe?'me':'rx')),src,dst,path,info});
   if(logData.length>MAX_LOG)logData.length=MAX_LOG;
+  // Chat: incoming message or ACK from the active contact
+  if(!isDigi&&chatContact&&chatMatchesSrc(src)){
+    if(isAck){
+      // Mark the corresponding sent bubble as delivered
+      const ackId=aprsExtractAckId(info);
+      if(ackId!==null)chatMarkAcked(ackId);
+    } else {
+      chatAddBubble(false,aprsExtractMsg(info),ts,null);
+    }
+  }
 }
 function appendSentLog(to,ssid,text){
   const log=document.getElementById('log');
@@ -551,7 +718,15 @@ function appendSentLog(to,ssid,text){
   const tsISO=new Date().toISOString();
   logData.unshift({ts:tsISO,type:'tx',src:myCall+(mySsid>0?'-'+mySsid:''),dst:dest,path:'',info:text});
   if(logData.length>MAX_LOG)logData.length=MAX_LOG;
-}// ── WAV recorder ──────────────────────────────────────────────────────────────────
+}
+function appendSentChatBubble(to,ssid,text,msgId){
+  if(!chatContact)return;
+  const dest=(ssid>=0&&ssid<=15)?to+'-'+ssid:to;
+  if(!chatMatchesDst(dest))return;
+  const ts=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  chatAddBubble(true,text,ts,msgId);
+}
+// ── WAV recorder ──────────────────────────────────────────────────────────────────
 let recChunks=[];
 let isRecording=false;
 function toggleRec(){
@@ -711,6 +886,8 @@ function sendAPRS(){
   const st=document.getElementById('send-status');
   if(!to){st.style.color='#c04040';st.textContent='Indica el indicativo destino.';return;}
   if(!text){st.style.color='#c04040';st.textContent='El mensaje no puede estar vacío.';return;}
+  // If no chat open yet, open it now
+  if(!chatContact)openChat(to,ssid);
   const btn=document.getElementById('send-btn');
   btn.disabled=true;st.style.color='#888';st.textContent='Enviando…';
   fetch('/api/aprs/send',{
@@ -718,8 +895,12 @@ function sendAPRS(){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({to,ssid,text})
   }).then(r=>r.json()).then(d=>{
-    if(d.ok){st.style.color='#4ac84a';st.textContent='Enviado ✓';appendSentLog(to,ssid,text);}
-    else{st.style.color='#c04040';st.textContent='Error del servidor.';}
+    if(d.ok){
+      st.style.color='#4ac84a';st.textContent='Enviado ✓';
+      appendSentLog(to,ssid,text);
+      appendSentChatBubble(to,ssid,text,d.msg_id!=null?d.msg_id:null);
+      document.getElementById('send-text').value='';
+    } else {st.style.color='#c04040';st.textContent='Error del servidor.';}
   }).catch(()=>{
     st.style.color='#c04040';st.textContent='Error de red.';
   }).finally(()=>{btn.disabled=false;});

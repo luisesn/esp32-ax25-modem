@@ -6,7 +6,41 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-06-05): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, mensajes, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-06-05): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. RX pendiente verificación con señal RF real.**
+
+---
+
+## Índice
+
+- [Hardware objetivo](#hardware-objetivo)
+- [Modos de operación](#modos-de-operación)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Dependencias](#dependencias)
+- [Compilación y flasheo](#compilación-y-flasheo)
+- [Qué hace el firmware (modo KISS TNC)](#qué-hace-el-firmware-modo-kiss-tnc)
+- [Interfaz web](#interfaz-web)
+- [REST API](#rest-api)
+- [Eventos WebSocket (`/ws`)](#eventos-websocket-ws)
+- [Digipeater WIDEn-N](#digipeater-widen-n)
+- [Baliza morse CW](#baliza-morse-cw)
+- [SSTV (Slow-Scan Television)](#sstv-slow-scan-television)
+- [Repetidor de voz analógico](#repetidor-de-voz-analógico)
+- [Subida de ficheros a SPIFFS](#subida-de-ficheros-a-spiffs)
+- [Actualización OTA de firmware](#actualización-ota-de-firmware)
+- [GPS (NMEA por UART2)](#gps-nmea-por-uart2)
+- [Display LCD SSD1306 128×64 I2C](#display-lcd-ssd1306-12864-i2c)
+- [Gateway IP sobre radio (opcional)](#gateway-ip-sobre-radio-opcional)
+- [Consola RF TCP](#consola-rf-tcp)
+- [Comandos remotos vía APRS](#comandos-remotos-vía-aprs)
+- [Retardo TX tras recepción (`post_rx_tx_delay_ms`)](#retardo-tx-tras-recepción-post_rx_tx_delay_ms)
+- [Conectar al host](#conectar-al-host)
+- [Configuración antes de flashear](#configuración-antes-de-flashear)
+- [Limitaciones actuales](#limitaciones-actuales)
+- [Pines](#pines)
+- [Licencia](#licencia)
+- [Créditos](#créditos)
+
+---
 
 El firmware opera como un **KISS TNC bidireccional** accesible desde la red local vía TCP. Conecta `tncattach` o `direwolf` en el host y obtienes una interfaz de red AX.25 (`tnc0`) o un gateway APRS completo — sin cable USB, sin drivers adicionales.
 
@@ -150,8 +184,8 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 
 Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 
-- **Log APRS**: muestra paquetes recibidos por radio en tiempo real (newest-first). Badges: `PARA MÍ` si el mensaje va dirigido a tu indicativo, `ACK` para confirmaciones, `TX` para los enviados, `DIGI` (azul) para los retransmitidos por el digipeater. Click en callsign rellena el destino.
-- **Pestaña MENSAJE**: formulario para transmitir mensajes APRS directamente desde el navegador.
+- **Log APRS**: muestra paquetes recibidos por radio en tiempo real (newest-first). Badges: `PARA MÍ` si el mensaje va dirigido a tu indicativo, `ACK` para confirmaciones, `TX` para los enviados, `DIGI` (azul) para los retransmitidos por el digipeater. Click en callsign abre directamente el chat con esa estación.
+- **Pestaña CHAT**: chat de mensajes APRS con una estación. Burbujas salientes (ámbar, derecha) y entrantes (verde, izquierda). Confirmación de entrega ✓ (se vuelve verde cuando llega el `ackNNN` del remoto). El historial de mensajes con el contacto activo se reconstruye al abrir. Selecciona el contacto manualmente o haz clic en cualquier callsign del LOG.
 - **Pestaña POSICIÓN**: formulario para transmitir baliza de posición APRS (lat/lon decimal, símbolo, comentario). Botón de baliza Morse on-demand.
 - **Pestaña CONFIG**: editor JSON del `config.json` completo. Guardar recarga el digipeater y la baliza morse sin reiniciar el firmware. Botón **↺ Reiniciar** para reiniciar el ESP32 de forma remota (pide confirmación; el firmware responde, espera 800 ms y ejecuta `esp_restart()`).
 - **Pestaña OTA**: sube un `.bin` generado por ESP-IDF para actualizar el firmware via OTA. Barra de progreso de subida, validación del magic byte del ESP32 (0xE9), y reinicio automático a los 3 s tras un flash exitoso.
@@ -164,7 +198,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 |--------|----------|-------------|
 | `GET`    | `/`                     | Sirve `index.html` desde SPIFFS |
 | `GET`    | `/ws`                   | WebSocket upgrade (audio binario IMA ADPCM + JSON APRS/ACK/DIGI) |
-| `POST`   | `/api/aprs/send`        | Envía mensaje APRS. Body JSON: `{"to":"CALL","ssid":N,"text":"..."}` |
+| `POST`   | `/api/aprs/send`        | Envía mensaje APRS. Body JSON: `{"to":"CALL","ssid":N,"text":"..."}`. Responde `{"ok":true,"msg_id":N}` con el número de secuencia `{NNN}` usado (para correlacionar el `ack` entrante) |
 | `POST`   | `/api/aprs/beacon`      | Transmite baliza de posición. Body JSON: `{"lat":40.4,"lon":-3.7,"symbol":">","comment":"..."}` |
 | `GET`    | `/api/me`               | Devuelve `{"call":"...","ssid":N}` con el indicativo configurado |
 | `GET`    | `/api/config`           | Devuelve `config.json` completo |

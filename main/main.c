@@ -330,7 +330,11 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
         strncpy(src_base, src_call, 6); src_base[6] = '\0';
     }
 
-    // Remote command hook for messages with {NNN} ID
+    // ACK first so the remote station knows the command was received,
+    // then enqueue the command response (and any subsequent TX like SSTV).
+    ESP_LOGI("ax25rx", "AUTO-ACK %s-%d ack%s", src_base, src_ssid_num, msg_id);
+    APRS_queue_ack(src_base, src_ssid_num, msg_id);
+
     {
         size_t cmd_len = (size_t)(brace - txt);
         if (cmd_len > 67) cmd_len = 67;
@@ -339,9 +343,6 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
         cmd_text[cmd_len] = '\0';
         remote_cmd_handle(src_base, src_ssid_num, cmd_text);
     }
-
-    ESP_LOGI("ax25rx", "AUTO-ACK %s-%d ack%s", src_base, src_ssid_num, msg_id);
-    APRS_queue_ack(src_base, src_ssid_num, msg_id);
 
     // Notificar al frontend via WebSocket
     static char ack_json[96];

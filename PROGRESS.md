@@ -3,7 +3,7 @@
 Seguimiento de la resolución de problemas listados en [report.md](report.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-05-26
+Última actualización: 2026-06-05
 
 ---
 
@@ -58,6 +58,11 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | nuevo | Ventana mínima de grabación 500 ms | ✅ 2026-05-26 |
 | nuevo | Modo monitor HFNE sin repetidor | ✅ 2026-05-26 |
 | nuevo | REST: `/api/repeater/*`, `/api/squelch/*` | ✅ 2026-05-26 |
+| nuevo | Comandos remotos vía APRS (`remote_cmd.c`) — tx sstv, morse, posición, listado | ✅ 2026-06-05 |
+| nuevo | Fix orden ACK antes de respuesta en comandos remotos (`main.c`) | ✅ 2026-06-05 |
+| nuevo | `APRS_queue_msg` devuelve `int` (seq usado); `/api/aprs/send` expone `msg_id` | ✅ 2026-06-05 |
+| nuevo | Tab CHAT: burbujas, checkmark ACK con `msg_id`, historial, clic callsign → chat | ✅ 2026-06-05 |
+| nuevo | Mejoras mobile: tab bar scroll, iOS zoom fix, panel superior compacto | ✅ 2026-06-05 |
 
 Pendientes prioritarios:
 1. **2.7** Desacoplar `APRS_poll` en modo APRS (solo si se usa ese modo).
@@ -463,3 +468,49 @@ Smallest app partition: 0x1a0000 bytes
 - **L5** `SSTV_DIR` movido a `sstv.h`, eliminada duplicación en `remote_cmd.c`.
 - **L6** Stack de `display_task` subido de 2 048 a 3 072 bytes.
 - **L7** Buffer `static` en `digi_process_frame` convertido a variable local de pila.
+
+---
+
+## 2026-06-05 — Comandos remotos APRS, chat UI y mejoras mobile
+
+### Comandos remotos vía APRS (`remote_cmd.c / .h`)
+
+Nuevo módulo que procesa mensajes APRS dirigidos al propio indicativo del nodo como comandos de control remoto. Activado con `remote_cmd.enabled: true` en `config.json`. Comandos implementados:
+
+| Comando | Acción |
+|---------|--------|
+| `tx,sstv,<fichero>,<modo>` | Transmite imagen JPEG almacenada en SPIFFS |
+| `tx,morse,beacon` | Dispara baliza CW inmediata |
+| `tx,aprs,position` | Transmite baliza de posición con fix GPS actual |
+| `rx,sstv,list` | Lista ficheros JPEG en `/spiffs/sstv/`, uno por mensaje con pausa 5 s |
+
+Responde al remitente con un mensaje APRS de confirmación o error. No hay autenticación; requiere licencia válida para operar.
+
+### Fix orden ACK/respuesta en comandos remotos (`main.c`)
+
+En `try_auto_ack`, `remote_cmd_handle` se llamaba **antes** de `APRS_queue_ack`. Resultado: el ACK salía después de la respuesta del comando (y el SSTV quedaba aún más al final pero correctamente). Corrección: `APRS_queue_ack` se mueve antes de `remote_cmd_handle` para que la cola TX quede `[ACK, respuesta, SSTV]` en lugar de `[respuesta, ACK, SSTV]`.
+
+### `APRS_queue_msg` devuelve `int` — `msg_id` expuesto en REST
+
+- **`LibAPRS.cpp`**: `APRS_queue_msg` pasa de `void` a `int`; devuelve el `message_seq` usado (0–999). Devuelve `-1` si los argumentos son inválidos.
+- **`LibAPRS.h`**: declaración actualizada a `int APRS_queue_msg(...)`.
+- **`audio_stream.c`**: `POST /api/aprs/send` captura el retorno y responde `{"ok":true,"msg_id":N}` en lugar de `{"ok":true}`. Permite al frontend correlacionar el `ackNNN` entrante con el mensaje enviado.
+
+### Tab CHAT (reemplaza MENSAJE)
+
+- **`index.html`**: el tab `MENSAJE` se renombra a `CHAT` y se convierte en una vista de conversación 1:1.
+  - Selector de contacto en la cabecera (callsign + SSID + botón ▶ Abrir).
+  - Área de burbujas: salientes (ámbar, derecha) con indicador ✓ pendiente; entrantes (verde, izquierda).
+  - ✓ se vuelve verde al recibir el `ackNNN` del remoto, correlacionado con `msg_id` de la respuesta REST.
+  - Click en cualquier callsign del LOG → `openChat()` + cambio automático al tab CHAT.
+  - Al abrir un chat se reconstruye el historial desde `logData` filtrando por pares src/dst.
+  - Input de mensaje fijo en la parte inferior; Enter o botón `↑ Enviar` para transmitir.
+  - Al enviar se borra el campo de texto automáticamente.
+
+### Mejoras mobile (`index.html`)
+
+- **Tab bar scrollable**: `overflow-x: auto; scrollbar-width: none` en `.tab-bar`; botones con `flex: 0 0 auto; white-space: nowrap`. Los 10 tabs se deslizan horizontalmente sin cortar texto.
+- **Panel superior más compacto**: padding y gap reducidos en media query `≤700px`; la línea de info IMA ADPCM/VLC se oculta (`display:none`) en móvil.
+- **Prevención de zoom iOS**: `font-size: 16px !important` en `input, select, textarea` bajo `≤700px` (iOS no hace zoom si el font-size del campo es ≥16 px).
+- **Touch targets**: `.tab-btn` con `min-width: 2.75rem; padding: .5rem .35rem` en móvil para facilitar el toque con el dedo.
+- **Meter**: `width: 100%; max-width: none` en móvil.

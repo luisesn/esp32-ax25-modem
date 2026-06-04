@@ -288,12 +288,14 @@ static esp_err_t aprs_send_handler(httpd_req_t *req) {
     if (ssid_val < 0)  ssid_val = 0;
     if (ssid_val > 15) ssid_val = 15;
 
-    APRS_queue_msg(j_to->valuestring, ssid_val, j_text->valuestring);
-    ESP_LOGI(TAG, "APRS MSG queued → %s-%d: %s", j_to->valuestring, ssid_val, j_text->valuestring);
+    int seq = APRS_queue_msg(j_to->valuestring, ssid_val, j_text->valuestring);
+    ESP_LOGI(TAG, "APRS MSG queued → %s-%d: %s (seq=%d)", j_to->valuestring, ssid_val, j_text->valuestring, seq);
 
+    char resp[48];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"msg_id\":%d}", seq);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
+    httpd_resp_sendstr(req, resp);
     return ESP_OK;
 }
 
