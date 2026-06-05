@@ -8,7 +8,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{background:#111;color:#e0e0e0;font-family:monospace;min-height:100vh;padding:1rem}
-.app{height:calc(100dvh - 2rem);display:grid;grid-template-rows:auto 1fr;gap:1rem;
+/* --vvh is updated by JS from window.visualViewport.height (keyboard-aware on mobile) */
+.app{height:calc(var(--vvh,100dvh) - 2rem);display:grid;grid-template-rows:auto 1fr;gap:1rem;
   max-width:960px;margin:0 auto}
 .panel{background:#0d0d0d;border:1px solid #2a2a2a;border-radius:4px;overflow:hidden}
 #top-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -111,7 +112,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #send-status{font-size:.65rem;min-height:1rem;color:#888;padding:0 .1rem}
 @media (max-width:700px){
   body{padding:.4rem}
-  .app{height:auto;min-height:calc(100dvh - .8rem);grid-template-rows:auto 1fr;gap:.5rem}
+  .app{height:calc(var(--vvh,100dvh) - .8rem);grid-template-rows:auto 1fr;gap:.5rem}
   #top-panel{padding:.6rem .85rem;gap:.5rem}
   h1{font-size:1rem}
   #info{display:none}
@@ -246,7 +247,9 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       </div>
       <div id="chat-input-bar">
         <input id="send-text" type="text" maxlength="67" placeholder="Mensaje…" spellcheck="false"
-          onkeydown="if(event.key==='Enter')sendAPRS()">
+          onkeydown="if(event.key==='Enter')sendAPRS()"
+          onfocus="setTimeout(applyVV,300)"
+          onblur="setTimeout(applyVV,100)">
         <button id="send-btn" onclick="sendAPRS()">&#x2191; Enviar</button>
       </div>
       <div id="send-status"></div>
@@ -829,6 +832,22 @@ function handleMsg(p){
     if(!isDuplicate(k))appendLog(p.src,p.dst||'',p.path||'',p.info||'');
   }
 }
+// ── Viewport / teclado móvil ────────────────────────────────────────────────
+// Actualiza --vvh con la altura visible real (keyboard-aware en iOS y Android).
+// El CSS usa calc(var(--vvh,100dvh) - ...) para que el layout se ajuste cuando
+// el teclado virtual aparece y encoge el viewport visual.
+function applyVV(){
+  const h=(window.visualViewport?window.visualViewport.height:window.innerHeight);
+  document.documentElement.style.setProperty('--vvh',h+'px');
+  if(document.getElementById('tab-msg').classList.contains('active'))
+    setTimeout(scrollChatToBottom,60);
+}
+window.addEventListener('resize',applyVV);
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',applyVV);
+  window.visualViewport.addEventListener('scroll',applyVV);
+}
+applyVV();
 // ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
 let ws=null,wsTimer=null;
 function setStatus(t){document.getElementById('status').textContent=t;}

@@ -25,9 +25,16 @@
 
 QueueHandle_t audio_stream_q = NULL;
 
-// ─── RAM log buffer (last LOG_CAPACITY text WS messages) ─────────────────────
+// ─── RAM log buffer (last s_log_max entries of persistent WS messages) ────────
+//
+// High-frequency periodic events (audio_level, squelch_sf, repeater, rx_stats)
+// are NOT stored — they fire every 100–500 ms and would evict APRS packets within
+// seconds. Only discrete events (aprs, ack_sent, digipeated, sstv_*, ota_*,
+// tune_*, morse_tx, digi_config) are persisted for replay on reconnect.
+//
+// Capacity is configurable: config.json "aprs_msg.max_stored" (default 25, max 250).
 
-#define LOG_CAPACITY 250
+#define LOG_CAPACITY 250   // compile-time array size; runtime limit ≤ this
 
 typedef struct { uint32_t seq; char *json; } log_entry_t;
 
@@ -36,6 +43,15 @@ static int               s_log_head     = 0;
 static int               s_log_count    = 0;
 static uint32_t          s_log_seq_next = 1;
 static SemaphoreHandle_t s_log_mutex    = NULL;
+static int               s_log_max      = 25; // runtime effective capacity
+
+// Returns true for high-frequency periodic events that should NOT be persisted.
+static bool log_is_ephemeral(const char *text) {
+    return strstr(text, "\"type\":\"audio_level\"")  != NULL ||
+           strstr(text, "\"type\":\"squelch_sf\"")    != NULL ||
+           strstr(text, "\"type\":\"repeater\"")       != NULL ||
+           strstr(text, "\"type\":\"rx_stats\"")       != NULL;
+}
 
 // ─── IMA ADPCM ───────────────────────────────────────────────────────────────
 
@@ -604,9 +620,10 @@ static esp_err_t log_handler(httpd_req_t *req)
 
     xSemaphoreTake(s_log_mutex, portMAX_DELAY);
     last_seq = s_log_seq_next > 0 ? s_log_seq_next - 1 : 0;
-    int start = (s_log_head - s_log_count + LOG_CAPACITY) % LOG_CAPACITY;
+    int cap   = s_log_max;
+    int start = (s_log_head - s_log_count + cap) % cap;
     for (int i = 0; i < s_log_count; i++) {
-        int idx = (start + i) % LOG_CAPACITY;
+        int idx = (start + i) % cap;
         if (s_log_ring[idx].seq > since && s_log_ring[idx].json) {
             char *p = strdup(s_log_ring[idx].json);
             if (p) ptrs[pcount++] = p;
@@ -676,15 +693,16 @@ void audio_stream_ws_send_text(const char *text) {
     if (wrapped)
         snprintf(wrapped, tlen + 24, "{\"seq\":%lu,%s", (unsigned long)seq, text + 1);
 
-    // Almacenar en ring buffer (fuera del malloc, liberar viejo fuera del mutex)
+    // Persist in ring buffer only discrete events; skip high-frequency telemetry.
     char *to_free = NULL;
-    if (s_log_mutex && wrapped) {
+    if (s_log_mutex && wrapped && !log_is_ephemeral(text)) {
         xSemaphoreTake(s_log_mutex, portMAX_DELAY);
+        int cap = s_log_max; // snapshot under mutex
         to_free = s_log_ring[s_log_head].json;
         s_log_ring[s_log_head].seq  = seq;
         s_log_ring[s_log_head].json = wrapped;
-        s_log_head = (s_log_head + 1) % LOG_CAPACITY;
-        if (s_log_count < LOG_CAPACITY) s_log_count++;
+        s_log_head = (s_log_head + 1) % cap;
+        if (s_log_count < cap) s_log_count++;
         xSemaphoreGive(s_log_mutex);
     }
     free(to_free);
@@ -947,6 +965,23 @@ void audio_stream_stop_wav_server(void)
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
 void audio_stream_init(void) {
+    // Read configurable log capacity (aprs_msg.max_stored, default 25)
+    {
+        const cJSON *cfg = config_get();
+        if (cfg) {
+            const cJSON *am = cJSON_GetObjectItem(cfg, "aprs_msg");
+            if (am) {
+                const cJSON *ms = cJSON_GetObjectItem(am, "max_stored");
+                if (cJSON_IsNumber(ms) && ms->valueint >= 1) {
+                    int v = ms->valueint;
+                    if (v > LOG_CAPACITY) v = LOG_CAPACITY;
+                    s_log_max = v;
+                }
+            }
+        }
+        ESP_LOGI(TAG, "log: max_stored=%d (ephemeral events not persisted)", s_log_max);
+    }
+
     audio_stream_q = xQueueCreate(AUDIO_QUEUE_LEN, sizeof(int8_t));
 
     // HTTP server (index.html + WebSocket)
