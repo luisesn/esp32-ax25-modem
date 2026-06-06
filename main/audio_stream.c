@@ -988,8 +988,9 @@ void audio_stream_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
-    cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 32;
+    cfg.max_open_sockets   = 9;    // 2 WS clients + captive-portal burst (3-5) + margin
+    cfg.lru_purge_enable   = true; // evict oldest idle socket when limit reached
+    cfg.max_uri_handlers   = 32;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
