@@ -25,6 +25,8 @@ idf_component_register(
         "delay_tune.c"
         "repeater.c"
         "squelch_sf.c"
+        "rs_codec.c"
+        "il2p.c"
     INCLUDE_DIRS
         "."
         "LibAPRS-esp32-i2s"

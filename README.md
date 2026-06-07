@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-06-05): compila limpio (binary ~874 KB, 48 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-06-07): compila limpio (binary ~921 KB, 46 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json`. RX pendiente verificación con señal RF real.**
 
 ---
 
@@ -30,6 +30,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 - [GPS (NMEA por UART2)](#gps-nmea-por-uart2)
 - [Display LCD SSD1306 128×64 I2C](#display-lcd-ssd1306-12864-i2c)
 - [Gateway IP sobre radio (opcional)](#gateway-ip-sobre-radio-opcional)
+- [IL2P — Improved Layer 2 Protocol](#il2p--improved-layer-2-protocol)
 - [Consola RF TCP](#consola-rf-tcp)
 - [Comandos remotos vía APRS](#comandos-remotos-vía-aprs)
 - [Retardo TX tras recepción (`post_rx_tx_delay_ms`)](#retardo-tx-tras-recepción-post_rx_tx_delay_ms)
@@ -109,6 +110,10 @@ esp32-aprs-modem/
 │   │                                  task de refresco 2 Hz con callsign, IP, GPS, audio
 │   ├── delay_tune.h / delay_tune.c    ajuste automático de post_rx_tx_delay_ms; barrido ICMP
 │   │                                  150–2000 ms; REST: /api/tune/start, /api/tune/stop
+│   ├── il2p.h / il2p.c                IL2P: RX state machine + TX encoder; Reed-Solomon FEC +
+│   │                                  LFSR scrambling sobre AFSK Bell-202; routing smart_tx_frame
+│   ├── rs_codec.h / rs_codec.c        codec Reed-Solomon para IL2P: RS(255,239) GF(2⁸) y
+│   │                                  RS(15,13) GF(2⁴); BM + Chien + Forney con verificación
 │   ├── ax25ip.h / ax25ip.c            gateway IP sobre radio; modo TUN (tncattach) o AX.25 RFC 1226;
 │   │                                  paquetes IP logueados en el log APRS de la UI web
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
@@ -629,6 +634,61 @@ Para activarlo: editar `config.json` vía la pestaña CONFIG de la UI (o reflash
 
 ---
 
+## IL2P — Improved Layer 2 Protocol
+
+IL2P reemplaza el framing AX.25/HDLC con **Reed-Solomon FEC** y **scrambling LFSR**, mejorando el SNR efectivo en ~3–6 dB sin cambiar el módem AFSK Bell-202. Los mensajes APRS no se ven afectados: IL2P es puramente capa 2 y los frames decodificados se entregan al mismo callback `on_ax25_raw_frame` que los frames AX.25 normales.
+
+### Qué hace cada parte
+
+| Mecanismo | Descripción |
+|-----------|-------------|
+| **Scrambling LFSR** | Polinomio x⁹+x⁴+1, estado inicial 0x1FF. Evita largas rachas de ceros/unos que dificultan la sincronización de símbolo |
+| **RS(15,13) header** | Cabecera de 13 bytes → 2 bytes de paridad. Corrige hasta 1 error de byte |
+| **RS(255,239) payload** | Bloques de hasta 239 bytes de datos → 16 bytes de paridad. Corrige hasta 8 errores de byte por bloque |
+| **Sync word** | `0xF1 0x5E 0x48` (24 bits, no scrambled), precedido de ≥4 flags `0x7E` de preámbulo |
+
+### Activación
+
+```json
+"il2p": {
+  "enabled": true
+}
+```
+
+Con `enabled: false` (valor por defecto) el código IL2P es inerte: ni el RX ni el TX cambian de comportamiento.
+
+### Comportamiento cuando está activo
+
+**RX** — Se ejecuta en paralelo con el demodulador AX.25 normal:
+- Ambos modems (v1 y v2) alimentan el receptor IL2P de forma independiente.
+- Si el mismo frame es decodificado por los dos modems, la deduplicación (CRC16, ventana de 500 ms) lo entrega solo una vez al callback.
+- Los frames AX.25 normales (no IL2P) siguen siendo decodificados sin cambios.
+
+**TX** — `smart_tx_frame` enruta por PID:
+- `PID = 0xCC` (tráfico IP RFC-1226 de `ax25ip`) → codificado como frame IL2P.
+- Cualquier otro PID (APRS, KISS genérico) → frame AX.25 normal.
+
+### Interoperabilidad
+
+Compatible con [Direwolf](https://github.com/wb2osz/direwolf) (opción `IL2P 1` en `direwolf.conf`). Para recibir IL2P en Direwolf:
+
+```
+# direwolf.conf:
+ADEVICE tcp:<ip_del_esp32> 8001
+ACHANNEL 0 1200
+MYCALL TU_CALL
+IL2P 1
+```
+
+### Notas técnicas
+
+- El header IL2P codifica: indicativos destino/origen + SSID + control AX.25 + PID + longitud de payload (10 bits → max 1023 bytes).
+- El firmware limita el frame AX.25 reconstruido a `AX25_MAX_FRAME_LEN` (600 bytes con `CUSTOM_FRAME_SIZE=600`); frames IL2P más largos se descartan.
+- El bit-stuffing HDLC se deshabilita durante TX IL2P (`Afsk::il2p_tx` flag).
+- La verificación de síndrome RS tras la corrección garantiza que nunca se entreguen datos corruptos: si la corrección falla, el frame se descarta.
+
+---
+
 ## Consola RF TCP
 
 El firmware incluye una consola de administración line-based accesible vía TCP (telnet) en la dirección IP asignada a la interfaz RF (`ip.addr`). Permite diagnosticar el nodo directamente desde el enlace de radio sin necesidad de WiFi ni cable serie.
@@ -905,6 +965,13 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
     "squelch_threshold": 0,
     "deemphasis_enabled": false
   },
+  "tx": {
+    "lbt_enabled": true,
+    "lbt_max_wait_ms": 10000
+  },
+  "il2p": {
+    "enabled": false
+  },
   "remote_cmd": {
     "enabled": true
   },
@@ -940,6 +1007,9 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo, sin dedup) |
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
+| `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre (squelch HFNE cerrado) antes de transmitir |
+| `tx` | `lbt_max_wait_ms` | int | Tiempo máximo de espera LBT (ms); si expira, transmite de todas formas con aviso en log |
+| `il2p` | `enabled` | bool | Activa IL2P: RX acepta IL2P en paralelo con AX.25; TX enruta tráfico IP (PID=0xCC) vía IL2P y APRS vía AX.25 normal |
 | `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo |
 | `console` | `enabled` | bool | Activa la consola TCP sobre la IP RF (requiere `ip.enabled: true`) |
 | `console` | `port` | int | Puerto TCP de la consola (por defecto 23) |
@@ -951,6 +1021,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 ## Limitaciones actuales
 
 - **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
+- **IL2P sin verificación en hardware real** — implementado y compilado limpio; pendiente prueba contra Direwolf con `IL2P 1`.
 - **Repetidor sin verificación en hardware real** — implementado y compilado limpio; pendiente prueba con radio FM real.
 - **SSTV solo TX** — no hay decodificador RX.
 - **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.

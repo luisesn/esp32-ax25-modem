@@ -28,6 +28,7 @@
 #include "delay_tune.h"
 #include "repeater.h"
 #include "squelch_sf.h"
+#include "il2p.h"
 #include "esp_heap_caps.h"
 
 #include "device.h"
@@ -525,6 +526,18 @@ void app_main(void)
 
     afsk_set_tx_fn(APRS_send_raw_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
+
+    {
+        bool il2p_en = false;
+        cJSON *il2p_cfg = cJSON_GetObjectItem(config_get(), "il2p");
+        if (il2p_cfg) {
+            cJSON *en = cJSON_GetObjectItem(il2p_cfg, "enabled");
+            if (cJSON_IsBool(en)) il2p_en = cJSON_IsTrue(en);
+        }
+        il2p_init(il2p_en, on_ax25_raw_frame);
+        if (il2p_en)
+            afsk_set_tx_fn(smart_tx_frame);
+    }
 
     digi_init(config_get());
     morse_init(config_get());
