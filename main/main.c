@@ -155,6 +155,7 @@ static void audio_level_task(void *arg)
     (void)arg;
     char bar[13];
     int log_div = 0;
+    int ws_div  = 0;
     bool alarm_led_state = false;
     bool alarm_active = false;
 
@@ -211,6 +212,19 @@ static void audio_level_task(void *arg)
             }
         }
 #endif
+        // Send WS level update every 5 ticks (500 ms).
+        if (++ws_div >= 5) {
+            ws_div = 0;
+            char lvl_buf[80];
+            const char *st = out_of_range
+                ? (peak < AUDIO_LEVEL_TOO_LOW ? "low" : "high")
+                : "ok";
+            snprintf(lvl_buf, sizeof(lvl_buf),
+                     "{\"type\":\"audio_level\",\"peak\":%d,\"status\":\"%s\"}",
+                     (int)peak, st);
+            audio_stream_ws_send_text(lvl_buf);
+        }
+
         (void)bar; (void)log_div;
     }
 }
@@ -403,8 +417,32 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
 // Trama KISS completa recibida del host → encolar para TX en receive_audio_task.
 // No llamar APRS_send_raw_frame directamente desde server_task: adc_continuous_stop
 // requiere ser invocado por la misma tarea que llamó adc_continuous_start.
+// Predicado de canal ocupado para el Listen-Before-Talk.
+//
+// squelch_sf_push_sample() sale de inmediato cuando ni el repetidor ni el
+// monitor HFNE están activos, así que en ese caso squelch_hfne_is_open()
+// devuelve un valor congelado: no refleja el canal, es el último estado que
+// quedó. Usarlo tal cual para inhibir TX puede retrasar cada trama hasta
+// lbt_max_wait_ms (10 s por defecto) sin que haya nadie transmitiendo.
+// Sin fuente de squelch viva, el canal se considera libre.
+static bool channel_is_busy(void) {
+    return squelch_sf_is_active() && squelch_hfne_is_open();
+}
+
+// Espera de encolado en TX. server_task puede bloquearse sin riesgo: mientras lo
+// hace deja de vaciar el socket, la ventana TCP del host se cierra y el host
+// deja de enviar. Eso es contrapresión real; descartar la trama en silencio
+// dejaba al otro extremo esperando su temporizador de retransmisión (segundos
+// de parón aparentemente inexplicable).
+//
+// Solo hace falta que se libere UN hueco: con MTU 250 una trama ocupa ~1,7 s de
+// aire más preámbulo, unos 2,3 s. El margen hasta 15 s cubre el peor caso de
+// diferimiento por LBT (lbt_max_wait_ms = 10 s) encadenado con una trama en
+// curso, sin llegar a descartar.
+#define KISS_TX_ENQUEUE_TIMEOUT_MS 15000
+
 static void on_kiss_frame(const uint8_t *buf, size_t len) {
-    afsk_queue_tx_frame(buf, len);
+    afsk_queue_tx_frame_wait(buf, len, KISS_TX_ENQUEUE_TIMEOUT_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +592,7 @@ void app_main(void)
     delay_tune_init(config_get());
     repeater_init(config_get());
     squelch_sf_init(config_get());
-    afsk_set_channel_busy_fn(squelch_hfne_is_open);
+    afsk_set_channel_busy_fn(channel_is_busy);
     afsk_set_dispatch_hook(project_dispatch_hook);
 
 #elif TNC_MODE == TNC_MODE_APRS

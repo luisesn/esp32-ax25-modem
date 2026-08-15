@@ -25,10 +25,19 @@
 #define AX25_CTRL_UI   0x03u
 #define AX25_PID_IP    0xCCu
 
-// Max IP payload per AX.25 frame.
-// CUSTOM_FRAME_SIZE=600 (set in CMakeLists.txt for tncattach MTU 512).
-// Subtract 16 bytes of AX.25 header (2×7 addr + CTRL + PID) = 584 bytes usable.
-#define AX25IP_MTU  584
+// Hard ceiling for the IP payload of one AX.25 frame, used to size the TX
+// buffers. CUSTOM_FRAME_SIZE=600 (set in CMakeLists.txt) minus 16 bytes of
+// AX.25 header (2×7 addr + CTRL + PID) = 584 bytes usable.
+#define AX25IP_MTU_MAX  584
+
+// Working MTU, from ip.mtu in config.json. This MUST match the MTU tncattach
+// runs with on the host: our netif advertises it to lwIP, so it sets the MSS of
+// locally-originated TCP. Advertising more than the peer accepts makes large
+// segments disappear at the far end with no ICMP to fall back on. Default 250
+// also keeps one frame near ~1.8 s of air time at 1200 bps, which matters more
+// than efficiency here — a lost frame costs a full retransmit.
+#define AX25IP_MTU_DEFAULT 250
+static uint16_t s_mtu = AX25IP_MTU_DEFAULT;
 
 // ── Module state ─────────────────────────────────────────────────────────────
 
@@ -153,30 +162,35 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
     (void)ipaddr;
 
     uint16_t ip_len = p->tot_len;
-    if (ip_len > AX25IP_MTU) {
-        ESP_LOGW(TAG, "drop: IP frame too large (%u > %d)", ip_len, AX25IP_MTU);
+    if (ip_len > s_mtu) {
+        ESP_LOGW(TAG, "drop: IP frame too large (%u > %u)", ip_len, s_mtu);
         return ERR_MEM;
     }
 
     if (s_tun_mode) {
         // TUN mode: prepend Linux TUN PI header (flags=0x0000, proto=IPv4 0x0800).
         // tncattach reads this 4-byte header from the TUN fd before the IP packet.
-        uint8_t frame[4 + AX25IP_MTU];
+        uint8_t frame[4 + AX25IP_MTU_MAX];
         frame[0] = 0x00; frame[1] = 0x00; frame[2] = 0x08; frame[3] = 0x00;
         uint16_t offset = 4;
         for (struct pbuf *q = p; q != NULL; q = q->next) {
             memcpy(frame + offset, q->payload, q->len);
             offset += q->len;
         }
+        // Never block here: this runs on the lwIP tcpip thread. ERR_MEM tells the
+        // stack the packet was not sent, so TCP keeps the segment and retries at
+        // its own pace instead of assuming it went on air and waiting for an ACK
+        // that can never arrive.
+        if (!afsk_queue_tx_frame(frame, (size_t)offset))
+            return ERR_MEM;
         ESP_LOGI(TAG, "TX %u bytes TUN→RF  %s", ip_len, ip_info(frame + 4, ip_len));
         ws_log_ip_async("TX", frame + 4, ip_len);
-        afsk_queue_tx_frame(frame, (size_t)offset);
         return ERR_OK;
     }
 
     // AX.25 UI frame layout:
     // [DST:7][SRC:7][CTRL:1=0x03][PID:1=0xCC][IP payload...]
-    uint8_t frame[16 + AX25IP_MTU];
+    uint8_t frame[16 + AX25IP_MTU_MAX];
 
     enc_addr(frame + 0, "QST   ", 0, false);          // broadcast destination
     enc_addr(frame + 7, s_call, s_ssid, true);         // our address (last=1)
@@ -190,9 +204,10 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
         offset += q->len;
     }
 
+    if (!afsk_queue_tx_frame(frame, (size_t)offset))
+        return ERR_MEM;   // see TUN branch: signal the stack instead of dropping
     ESP_LOGI(TAG, "TX %u bytes IP→AX.25  %s", ip_len, ip_info(frame + 16, ip_len));
     ws_log_ip_async("TX", frame + 16, ip_len);
-    afsk_queue_tx_frame(frame, (size_t)offset);
     return ERR_OK;
 }
 
@@ -200,7 +215,7 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
 static err_t ax25ip_netif_init(struct netif *netif)
 {
     netif->output     = ax25ip_output;
-    netif->mtu        = AX25IP_MTU;
+    netif->mtu        = s_mtu;   // set from ip.mtu before netif_add()
     // No link-layer ARP; broadcast-capable; already up.
     netif->flags      = NETIF_FLAG_BROADCAST | NETIF_FLAG_UP | NETIF_FLAG_LINK_UP;
     netif->hwaddr_len = 0;
@@ -255,6 +270,18 @@ bool ax25ip_init(cJSON *cfg)
     cJSON *j_mode = cJSON_GetObjectItem(ip_obj, "mode");
     s_tun_mode = cJSON_IsString(j_mode) && strcmp(j_mode->valuestring, "tun") == 0;
 
+    // MTU: must mirror the value tncattach uses on the host (--mtu).
+    cJSON *j_mtu = cJSON_GetObjectItem(ip_obj, "mtu");
+    if (cJSON_IsNumber(j_mtu)) {
+        int m = (int)j_mtu->valueint;
+        if (m < 128)             m = 128;              // below this IP is unusable
+        if (m > AX25IP_MTU_MAX)  m = AX25IP_MTU_MAX;   // TX buffer ceiling
+        if (m != (int)j_mtu->valueint)
+            ESP_LOGW(TAG, "ip.mtu %d out of range, clamped to %d",
+                     (int)j_mtu->valueint, m);
+        s_mtu = (uint16_t)m;
+    }
+
     // Add netif under lwIP core lock (lwIP already running via WiFi stack).
     LOCK_TCPIP_CORE();
     struct netif *r = netif_add(&s_netif, &addr, &mask, &gw,
@@ -275,9 +302,9 @@ bool ax25ip_init(cJSON *cfg)
             xTaskCreate(iplog_drain_task, "iplog", 2048, NULL, 2, NULL);
     }
 
-    ESP_LOGI(TAG, "AX.25 IP gateway up: %s/%s  (call=%s-%d  MTU=%d  mode=%s)",
+    ESP_LOGI(TAG, "AX.25 IP gateway up: %s/%s  (call=%s-%d  MTU=%u  mode=%s)",
              j_addr->valuestring, j_mask->valuestring,
-             callsign, (int)s_ssid, AX25IP_MTU,
+             callsign, (int)s_ssid, s_mtu,
              s_tun_mode ? "tun" : "ax25");
     ESP_LOGI(TAG, "Add host route:  ip route add %s/%s via <ESP32-WiFi-IP>",
              j_addr->valuestring, j_mask->valuestring);

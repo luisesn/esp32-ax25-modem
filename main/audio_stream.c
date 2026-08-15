@@ -189,6 +189,55 @@ httpd_handle_t audio_stream_get_httpd(void) { return s_httpd; }
 static int8_t  s_sample_buf[ADPCM_SAMPLES_BLOCK];
 static uint8_t s_adpcm_block[ADPCM_BLOCK_BYTES];
 
+// ─── Detección de clientes WS atascados ──────────────────────────────────────
+//
+// Un cliente que deja de drenar su socket (pestaña en segundo plano, móvil que
+// se aleja del AP sin cerrar la conexión) llena el buffer TCP. Sin este control,
+// httpd_ws_send_data() se bloqueaba hasta agotar send_wait_timeout dentro de
+// audio_stream_task: eso congelaba el audio de TODOS los clientes durante ese
+// tiempo y desbordaba audio_stream_q, además de dejar buffers TX del driver WiFi
+// retenidos (síntomas: "httpd_sock_err: error in send : 11" y "wifi:m f null").
+//
+// El audio es en tiempo real: descartar el bloque es mejor que bloquear.
+
+#define WS_STALL_SLOTS 8
+#define WS_STALL_LIMIT 24   // ~2,5 s de bloques (106 ms) descartados → cerrar sesión
+
+// Se guarda fd+1 para que 0 signifique "libre" con inicialización estática.
+static struct { int fd1; uint16_t misses; } s_ws_stall[WS_STALL_SLOTS];
+
+// Suma un fallo consecutivo al cliente `fd` y devuelve el total acumulado.
+static uint16_t ws_stall_bump(int fd) {
+    int free_i = -1;
+    for (int i = 0; i < WS_STALL_SLOTS; i++) {
+        if (s_ws_stall[i].fd1 == fd + 1) return ++s_ws_stall[i].misses;
+        if (s_ws_stall[i].fd1 == 0 && free_i < 0) free_i = i;
+    }
+    if (free_i < 0) return WS_STALL_LIMIT;  // sin hueco libre: tratarlo como atascado
+    s_ws_stall[free_i].fd1    = fd + 1;
+    s_ws_stall[free_i].misses = 1;
+    return 1;
+}
+
+static void ws_stall_clear(int fd) {
+    for (int i = 0; i < WS_STALL_SLOTS; i++) {
+        if (s_ws_stall[i].fd1 == fd + 1) {
+            s_ws_stall[i].fd1    = 0;
+            s_ws_stall[i].misses = 0;
+            return;
+        }
+    }
+}
+
+// true si el socket admite escritura ahora mismo (select con timeout 0).
+static bool sock_writable(int fd) {
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 0 };
+    return select(fd + 1, NULL, &wfds, NULL, &tv) > 0;
+}
+
 // En ESP-IDF 6.1 el handler WebSocket NO se llama al conectar el cliente,
 // solo cuando el cliente envía frames. Para streaming unidireccional (server→client)
 // usamos httpd_get_client_list + httpd_ws_get_fd_info para encontrar clientes WS.
@@ -215,18 +264,33 @@ static void audio_stream_task(void *arg) {
             size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
             if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
                 for (int i = 0; i < (int)n; i++) {
-                    if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-                        httpd_ws_frame_t pkt = {
-                            .final      = true,
-                            .fragmented = false,
-                            .type       = HTTPD_WS_TYPE_BINARY,
-                            .payload    = s_adpcm_block,
-                            .len        = ADPCM_BLOCK_BYTES,
-                        };
-                        if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
-                            // Socket muerto: cerrar sesión para que httpd lo limpie
-                            httpd_sess_trigger_close(s_httpd, client_fds[i]);
+                    int fd = client_fds[i];
+                    if (httpd_ws_get_fd_info(s_httpd, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
+                        continue;
+
+                    // Cliente sin espacio en el buffer TCP: descartar el bloque
+                    // en lugar de bloquear la tarea. Si sigue atascado durante
+                    // WS_STALL_LIMIT bloques se da la sesión por muerta.
+                    if (!sock_writable(fd)) {
+                        if (ws_stall_bump(fd) >= WS_STALL_LIMIT) {
+                            ESP_LOGW(TAG, "WS fd=%d atascado, cerrando sesión", fd);
+                            ws_stall_clear(fd);
+                            httpd_sess_trigger_close(s_httpd, fd);
                         }
+                        continue;
+                    }
+                    ws_stall_clear(fd);
+
+                    httpd_ws_frame_t pkt = {
+                        .final      = true,
+                        .fragmented = false,
+                        .type       = HTTPD_WS_TYPE_BINARY,
+                        .payload    = s_adpcm_block,
+                        .len        = ADPCM_BLOCK_BYTES,
+                    };
+                    if (httpd_ws_send_data(s_httpd, fd, &pkt) != ESP_OK) {
+                        // Socket muerto: cerrar sesión para que httpd lo limpie
+                        httpd_sess_trigger_close(s_httpd, fd);
                     }
                 }
             }
@@ -719,10 +783,14 @@ void audio_stream_ws_send_text(const char *text) {
     int    client_fds[5];
     size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
     if (httpd_get_client_list(s_httpd, &n, client_fds) != ESP_OK) return;
+    // A diferencia del audio, aquí no se descarta por socket lleno: un paquete
+    // APRS o un ACK sí importan. El bloqueo queda acotado por send_wait_timeout.
     for (int i = 0; i < (int)n; i++) {
         if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK)
+            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
+                ws_stall_clear(client_fds[i]);
                 httpd_sess_trigger_close(s_httpd, client_fds[i]);
+            }
         }
     }
     // wrapped queda en el ring buffer — no liberar aquí
@@ -991,6 +1059,11 @@ void audio_stream_init(void) {
     cfg.max_open_sockets   = 9;    // 2 WS clients + captive-portal burst (3-5) + margin
     cfg.lru_purge_enable   = true; // evict oldest idle socket when limit reached
     cfg.max_uri_handlers   = 32;
+    // Por defecto son 5 s: un cliente que no drena su socket bloqueaba la tarea
+    // emisora 5 s por intento. 1 s acota el peor caso de las rutas que sí
+    // esperan (texto WS, respuestas HTTP); el audio ni siquiera llega a esperar
+    // gracias al chequeo sock_writable().
+    cfg.send_wait_timeout  = 1;
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");

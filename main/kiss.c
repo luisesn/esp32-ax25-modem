@@ -1,6 +1,9 @@
 #include "kiss.h"
 #include "transport.h"
 #include "LibAPRS-esp32-i2s/src/AX25.h"  // AX25_MAX_FRAME_LEN
+#include "esp_log.h"
+
+static const char *TAG = "kiss";
 
 // KISS encoded worst case: FEND + CMD + 2*frame + FEND
 #define KISS_MAX_ENCODED (2 + 1 + AX25_MAX_FRAME_LEN * 2)
@@ -17,48 +20,66 @@ static kiss_state_t  s_state = S_IDLE;
 static uint8_t       s_buf[AX25_MAX_FRAME_LEN];
 static size_t        s_len;
 static uint8_t       s_cmd;
+// Set when the host frame exceeds s_buf. The frame is then discarded at its
+// closing FEND instead of being transmitted truncated: a truncated AX.25 frame
+// goes on air with a valid CRC, so the peer accepts it and silently drops the
+// mangled payload higher up — which looks like an unexplained TX stall.
+static bool          s_overflow;
 
 void kiss_init(kiss_frame_cb on_frame) {
     s_on_frame = on_frame;
     s_state    = S_IDLE;
     s_len      = 0;
+    s_overflow = false;
 }
 
 void kiss_reset(void) {
-    s_state = S_IDLE;
-    s_len   = 0;
+    s_state    = S_IDLE;
+    s_len      = 0;
+    s_overflow = false;
+}
+
+// Append one decoded payload byte, flagging overflow instead of truncating.
+static void kiss_put(uint8_t b) {
+    if (s_len < AX25_MAX_FRAME_LEN) s_buf[s_len++] = b;
+    else                            s_overflow = true;
 }
 
 void kiss_rx_byte(uint8_t b) {
     switch (s_state) {
     case S_IDLE:
-        if (b == KISS_FEND) { s_state = S_CMD; s_len = 0; }
+        if (b == KISS_FEND) { s_state = S_CMD; s_len = 0; s_overflow = false; }
         break;
 
     case S_CMD:
-        if (b == KISS_FEND) { s_len = 0; break; }  // doble FEND: ignorar
+        if (b == KISS_FEND) { s_len = 0; s_overflow = false; break; }  // doble FEND: ignorar
         s_cmd   = b;
         s_state = S_DATA;
         break;
 
     case S_DATA:
         if (b == KISS_FEND) {
-            // Solo entregar tramas DATA (cmd bajo nibble = 0x0, puerto 0)
-            if ((s_cmd & 0x0F) == 0x00 && s_len > 0 && s_on_frame)
+            if (s_overflow) {
+                ESP_LOGW(TAG, "trama del host > %d B: descartada (reduce la MTU del host)",
+                         AX25_MAX_FRAME_LEN);
+            } else if ((s_cmd & 0x0F) == 0x00 && s_len > 0 && s_on_frame) {
+                // Solo entregar tramas DATA (cmd bajo nibble = 0x0, puerto 0)
                 s_on_frame(s_buf, s_len);
-            s_state = S_CMD;
-            s_len   = 0;
+            }
+            s_state    = S_CMD;
+            s_len      = 0;
+            s_overflow = false;
         } else if (b == KISS_FESC) {
             s_state = S_ESC;
-        } else if (s_len < AX25_MAX_FRAME_LEN) {
-            s_buf[s_len++] = b;
+        } else {
+            kiss_put(b);
         }
         break;
 
     case S_ESC:
         s_state = S_DATA;
-        if      (b == KISS_TFEND && s_len < AX25_MAX_FRAME_LEN) s_buf[s_len++] = KISS_FEND;
-        else if (b == KISS_TFESC && s_len < AX25_MAX_FRAME_LEN) s_buf[s_len++] = KISS_FESC;
+        if      (b == KISS_TFEND) kiss_put(KISS_FEND);
+        else if (b == KISS_TFESC) kiss_put(KISS_FESC);
         // cualquier otro byte tras escape: descartar (error de protocolo)
         break;
     }

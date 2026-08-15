@@ -26,6 +26,15 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #meter{height:100%;width:0;
        background:linear-gradient(90deg,#8a3030 0%,#8a3030 6.3%,#2a9a2a 9%,#2a9a2a 88%,#8a3030 92%,#8a3030 100%);
        background-size:260px 100%;background-repeat:no-repeat;transition:width .05s}
+#rx-signal{display:flex;align-items:center;gap:.45rem;width:clamp(260px,75%,100%)}
+#rx-sq-dot{font-size:.85rem;color:#444;transition:color .25s;cursor:default;user-select:none}
+#rx-bar-outer{flex:1;height:8px;position:relative;
+  background:linear-gradient(90deg,#3a1010 0%,#3a1010 6.3%,#1a2a1a 6.3%,#1a2a1a 90.6%,#3a1010 90.6%,#3a1010 100%);
+  border:1px solid #2a2a2a;border-radius:2px;overflow:visible}
+#rx-bar{height:100%;width:0;border-radius:2px;background:#2a8a2a;transition:width .25s,background .3s}
+.rx-thr-mark{position:absolute;top:-2px;bottom:-2px;width:1px;background:#c07000;opacity:.55;pointer-events:none}
+#rx-peak-num{font-size:.6rem;font-family:monospace;color:#666;min-width:2.2rem;text-align:right}
+#rx-hint{font-size:.65rem;font-family:monospace;min-width:4.5rem;color:#555;transition:color .3s}
 #log-hdr{padding:.35rem .6rem;font-size:.7rem;color:#4a9a4a;
          border-bottom:1px solid #1a2a1a;letter-spacing:.08em;
          display:flex;align-items:center;justify-content:space-between}
@@ -117,6 +126,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
   h1{font-size:1rem}
   #info{display:none}
   #meter-wrap{width:100%;max-width:none}
+  #rx-signal{width:100%;max-width:none}
   .tab-btn{min-width:2.75rem;padding:.5rem .35rem;font-size:.6rem}
   input,select,textarea{font-size:16px !important}
   .bubble{max-width:88%}
@@ -201,6 +211,17 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button id="rec-btn" onclick="toggleRec()" disabled title="Grabar audio y descargar WAV">&#x23FA; Grabar</button>
     </div>
     <div id="meter-wrap"><div id="meter"></div></div>
+    <div id="rx-signal" title="Nivel señal RX. Óptimo ADC: 8–115 / 127. Punto verde = portadora detectada (squelch HFNE).">
+      <span id="rx-sq-dot" title="Squelch cerrado">&#x25CF;</span>
+      <div id="rx-bar-outer">
+        <div id="rx-bar"></div>
+        <div class="rx-thr-mark" style="left:6.3%"></div>
+        <div class="rx-thr-mark" style="left:90.6%"></div>
+        <div id="rx-hold-mark" style="position:absolute;top:-3px;bottom:-3px;width:2px;background:#7ecfff;border-radius:1px;opacity:0;transition:left .25s,opacity .3s" title="Nivel de la última portadora"></div>
+      </div>
+      <span id="rx-peak-num">—</span>
+      <span id="rx-hint">sin datos</span>
+    </div>
     <div id="info">
       IMA ADPCM &middot; 9600 Hz &middot; 38.4 kbps   -   VLC/ffplay: <code>http://HOST:8080/audio</code>
     </div>
@@ -518,6 +539,8 @@ function fmtHops(path){
 const MAX_LOG=100;const logData=[];let myCall='',mySsid=-1;
 let s_gps_course=null,s_gps_speed_kt=null;
 let s_last_log_seq=0;
+let s_squelch_open=false;
+let s_hold_peak=null;
 // ── Chat state ──────────────────────────────────────────────────────────────
 let chatContact=null; // {call:'EA1JBS', ssid:7}
 const chatPendingAcks=new Map(); // msgId(int) → bubble DOM element
@@ -815,6 +838,8 @@ function handleMsg(p){
     document.getElementById('ota-btn').disabled=false;
   } else if(p.type==='repeater'){
     repUpdateState(p.state||'idle');
+  } else if(p.type==='audio_level'){
+    rxLevelUpdate(p.peak,p.status);
   } else if(p.type==='squelch_sf'){
     hfneUpdate(p.hfne,p.open,p.active,p.manual);
   } else if(p.type==='tune_start'){
@@ -1322,8 +1347,43 @@ function hfneSetActive(active,manual){
   if(lbl){lbl.textContent=active?(manual?'monitor':'repetidor'):'inactivo';lbl.style.color=active?'#7ecfff':'#555';}
   if(panel){panel.style.opacity=active?'1':'0.35';panel.style.pointerEvents=active?'auto':'none';}
 }
+function rxLevelUpdate(peak,status){
+  const bar=document.getElementById('rx-bar');
+  const num=document.getElementById('rx-peak-num');
+  const hint=document.getElementById('rx-hint');
+  const hold=document.getElementById('rx-hold-mark');
+  if(!bar)return;
+  const pct=Math.min(peak/127*100,100);
+  bar.style.width=pct+'%';
+  num.textContent=peak;
+  if(s_squelch_open){
+    s_hold_peak=peak;
+    if(hold){hold.style.left=pct+'%';hold.style.opacity='0.8';}
+  }
+  if(!s_squelch_open){
+    // No carrier — advice without signal is meaningless
+    bar.style.background='#2a2a5a';
+    hint.textContent='sin señal';hint.style.color='#555';
+  }else if(status==='low'){
+    bar.style.background='#8a3030';
+    hint.textContent='↑ sube vol';hint.style.color='#c04040';
+  }else if(status==='high'){
+    bar.style.background='#c07000';
+    hint.textContent='↓ baja vol';hint.style.color='#c08030';
+  }else{
+    bar.style.background='#2a8a2a';
+    hint.textContent='✓ nivel OK';hint.style.color='#4a9a4a';
+  }
+}
 function hfneUpdate(v,open,active,manual){
+  if(open!=null)s_squelch_open=open;
   if(active!=null)hfneSetActive(active,manual);
+  // Update top-panel squelch dot (visible on all tabs)
+  const dot=document.getElementById('rx-sq-dot');
+  if(dot&&open!=null){
+    dot.style.color=open?'#4fc84f':'#444';
+    dot.title=open?'Squelch ABIERTO — portadora detectada':'Squelch cerrado';
+  }
   if(v==null)return;
   const bar=document.getElementById('hfne-bar');
   const val=document.getElementById('hfne-val');

@@ -29,6 +29,10 @@ static const char *TAG = "display";
 #define SSD1306_CMD_BYTE  0x00  // following bytes = commands
 #define SSD1306_DATA_BYTE 0x40  // following bytes = GDDRAM data
 
+// Tiempo que la pantalla de hotspot permanece visible tras caer a modo AP;
+// después se vuelve a la pantalla normal (el modo AP sigue activo).
+#define HOTSPOT_SCREEN_MS 30000
+
 // Initialization command sequence
 static const uint8_t ssd1306_init_seq[] = {
     0xAE,       // display off
@@ -288,12 +292,14 @@ static void screen_normal(char *line) {
     snprintf(callssid, sizeof(callssid), "%s-%d", call, ssid_n);
     fb_text(0, 0, callssid);
 
-    // --- Page 1: IP address ---
+    // --- Page 1: IP address (STA; en modo hotspot, la del AP) ---
     char ip_str[16] = "no wifi";
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (sta) {
+    const char *ifkey = (g_wifi_status.state == WIFI_STATUS_HOTSPOT)
+                        ? "WIFI_AP_DEF" : "WIFI_STA_DEF";
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(ifkey);
+    if (netif) {
         esp_netif_ip_info_t ip_info = {0};
-        if (esp_netif_get_ip_info(sta, &ip_info) == ESP_OK && ip_info.ip.addr)
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr)
             esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
     }
     fb_text(1, 0, ip_str);
@@ -374,16 +380,28 @@ static void screen_normal(char *line) {
 
 static void display_task(void *arg) {
     char line[32];
+    wifi_status_t prev_state    = WIFI_STATUS_IDLE;
+    int64_t       hotspot_since = 0;   // us; instante de entrada en modo hotspot
 
     for (;;) {
         fb_clear();
 
-        switch (g_wifi_status.state) {
+        wifi_status_t state = g_wifi_status.state;
+        if (state == WIFI_STATUS_HOTSPOT && prev_state != WIFI_STATUS_HOTSPOT)
+            hotspot_since = esp_timer_get_time();
+        prev_state = state;
+
+        switch (state) {
             case WIFI_STATUS_CONNECTING:
                 screen_wifi_connecting(line);
                 break;
             case WIFI_STATUS_HOTSPOT:
-                screen_hotspot(line);
+                // Mostrar los datos del hotspot solo los primeros
+                // HOTSPOT_SCREEN_MS ms; después, pantalla normal.
+                if ((esp_timer_get_time() - hotspot_since) / 1000 < HOTSPOT_SCREEN_MS)
+                    screen_hotspot(line);
+                else
+                    screen_normal(line);
                 break;
             default:
                 screen_normal(line);
