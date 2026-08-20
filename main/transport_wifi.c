@@ -503,6 +503,22 @@ static void server_task(void *arg) {
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
         ESP_LOGI(TAG, "Cliente KISS conectado desde %s", client_ip);
 
+        /* KISS hosts can legitimately stay silent for a long time (they only
+         * send when they have a frame to TX), so recv() below has no
+         * timeout — a plain read timeout would kick out idle-but-alive
+         * clients. TCP keepalive instead only fires when the peer stops
+         * ACKing: a client that vanishes without a clean FIN/RST (crash,
+         * cable pull, silent NAT/firewall drop) would otherwise leave this
+         * task blocked in recv() forever, with the single-slot listen()
+         * backlog meaning no other client could ever connect again until
+         * reboot. */
+        int ka = 1;
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+        int ka_idle = 10, ka_intvl = 5, ka_cnt = 3;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &ka_idle,  sizeof(ka_idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
+
         s_client_fd = fd;
 
         uint8_t buf[256];
