@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -131,6 +132,12 @@ void repeater_init(cJSON *config)
 
 void repeater_set_enabled(bool en)
 {
+#if !REPEATER_ENABLED
+    if (en) {
+        ESP_LOGW(TAG, "repetidor deshabilitado en compilación (REPEATER_ENABLED=0)");
+        return;
+    }
+#endif
     if (en) {
         if (!s_configured) {
             ESP_LOGW(TAG, "can't enable: no repeater section in config.json");

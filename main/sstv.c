@@ -300,9 +300,10 @@ typedef struct {
     int            lines_done;
 } JpegCtx;
 
-/* Work area and context are static — only one SSTV TX at a time. */
-static JpegCtx  s_jctx;
-static uint8_t  s_jwork[JPEG_WORK_SIZE];
+/* Contexto (~15,5 KB) y work area (8 KB) se reservan en heap durante la TX y se
+   liberan al terminar: como .bss se comían la mitad del heap libre (47 KB tras
+   enlazar) y dejaban al driver WiFi sin memoria para sus buffers TX — síntoma
+   "wifi:m f null" repetido. Solo hay una TX SSTV a la vez. */
 static JDEC     s_jdec;
 
 static UINT jpeg_input_cb(JDEC *jdec, BYTE *buf, UINT nbytes) {
@@ -496,6 +497,19 @@ void sstv_transmit(const SstvRequest *req) {
 
     const SstvModeParams *mp = &sstv_modes[(int)req->mode];
 
+    /* Reservar antes de levantar el PTT: si no hay heap, se aborta sin emitir. */
+    JpegCtx *jctx  = (JpegCtx *)calloc(1, sizeof(JpegCtx));
+    uint8_t *jwork = (uint8_t *)malloc(JPEG_WORK_SIZE);
+    if (!jctx || !jwork) {
+        ESP_LOGE(TAG, "sin heap para el decodificador JPEG (%u B necesarios)",
+                 (unsigned)(sizeof(JpegCtx) + JPEG_WORK_SIZE));
+        free(jctx);
+        free(jwork);
+        fclose(f);
+        audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
+        return;
+    }
+
     s_sstv_abort = false;
     afsk_switch_to_tx();
     gpio_set_level(GPIO_PTT_OUT, 1);
@@ -509,14 +523,13 @@ void sstv_transmit(const SstvRequest *req) {
     if (mp->is_scottie)
         tx_tone(&g, 1200.0f, mp->sync_us);
 
-    /* Set up JPEG decode context. */
-    memset(&s_jctx, 0, sizeof(s_jctx));
-    s_jctx.f    = f;
-    s_jctx.tg   = &g;
-    s_jctx.mode = req->mode;
-    s_jctx.mp   = mp;
+    /* Set up JPEG decode context (calloc ya lo dejó a cero). */
+    jctx->f    = f;
+    jctx->tg   = &g;
+    jctx->mode = req->mode;
+    jctx->mp   = mp;
 
-    JRESULT rc = jd_prepare(&s_jdec, jpeg_input_cb, s_jwork, sizeof(s_jwork), &s_jctx);
+    JRESULT rc = jd_prepare(&s_jdec, jpeg_input_cb, jwork, JPEG_WORK_SIZE, jctx);
     if (rc != JDR_OK) {
         ESP_LOGE(TAG, "jd_prepare failed: rc=%d (3=pool_small, 6=fmt, 8=unsupported)",
                  (int)rc);
@@ -527,7 +540,7 @@ void sstv_transmit(const SstvRequest *req) {
 
     /* Scale 0 = no scaling (output at full resolution). */
     rc = jd_decomp(&s_jdec, jpeg_output_cb, 0);
-    ESP_LOGI(TAG, "jd_decomp rc=%d, lines_done=%d", (int)rc, s_jctx.lines_done);
+    ESP_LOGI(TAG, "jd_decomp rc=%d, lines_done=%d", (int)rc, jctx->lines_done);
     if (rc != JDR_OK && rc != JDR_INTR) {
         ESP_LOGE(TAG, "jd_decomp error: rc=%d", (int)rc);
     }
@@ -538,15 +551,19 @@ done:
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
 
+    int lines_done = jctx->lines_done;
+    free(jctx);
+    free(jwork);
+
     if (s_sstv_abort) {
         audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
-        ESP_LOGI(TAG, "SSTV TX aborted after %d lines", s_jctx.lines_done);
+        ESP_LOGI(TAG, "SSTV TX aborted after %d lines", lines_done);
     } else {
         char ws_msg[96];
         snprintf(ws_msg, sizeof(ws_msg),
                  "{\"type\":\"sstv_done\",\"name\":\"%s\"}", req->name);
         audio_stream_ws_send_text(ws_msg);
-        ESP_LOGI(TAG, "SSTV TX done: %d lines", s_jctx.lines_done);
+        ESP_LOGI(TAG, "SSTV TX done: %d lines", lines_done);
     }
 }
 

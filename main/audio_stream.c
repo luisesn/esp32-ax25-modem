@@ -8,6 +8,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include <lwip/sockets.h>
+#include <errno.h>
+#include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -189,6 +191,17 @@ httpd_handle_t audio_stream_get_httpd(void) { return s_httpd; }
 static int8_t  s_sample_buf[ADPCM_SAMPLES_BLOCK];
 static uint8_t s_adpcm_block[ADPCM_BLOCK_BYTES];
 
+// Contadores de diagnóstico del stream, expuestos en GET /api/rx/stats. Sin
+// consola serie es la única forma de ver dónde se corta el audio:
+//   samples≈0            → el hook del ADC no alimenta audio_stream_q
+//   starve alto          → llegan muestras a ráfagas y el bloque se reinicia
+//   blocks sube, sent=0  → los bloques se generan pero ws_try_send los descarta
+//   drop sube            → sock_writable() da el socket por lleno
+static volatile uint32_t s_a_samples = 0, s_a_blocks = 0;
+static volatile uint32_t s_a_sent    = 0, s_a_drop   = 0, s_a_starve = 0;
+static volatile uint32_t s_a_wsc     = 0;   // clientes WS vistos en el último bloque
+static volatile uint32_t s_a_hs      = 0;   // handshakes /ws completados desde el arranque
+
 // ─── Detección de clientes WS atascados ──────────────────────────────────────
 //
 // Un cliente que deja de drenar su socket (pestaña en segundo plano, móvil que
@@ -238,6 +251,94 @@ static bool sock_writable(int fd) {
     return select(fd + 1, NULL, &wfds, NULL, &tv) > 0;
 }
 
+// Escritura completa sobre el socket, instalada como send_fn de las sesiones WS.
+//
+// httpd_ws_send_frame_async() emite la cabecera y el payload con UN send() cada
+// uno y solo comprueba `< 0` (httpd_ws.c:446-458): un envío PARCIAL —el socket
+// admite 300 de los 512 B y send() devuelve el parcial al agotar SO_SNDTIMEO— lo
+// da por bueno. Eso desincroniza el stream: el navegador lee la cabecera del
+// bloque siguiente como payload del anterior, ve violación de protocolo y cierra
+// la conexión, sin que aquí se registre ningún error. Síntoma medido: la sesión
+// se abre, recibe unos segundos de audio y desaparece (sent 385 de 2421 bloques
+// con ws_clients=0). sock_writable() no lo evita: select() solo garantiza que
+// quepa 1 byte.
+//
+// Devolver <0 tras un parcial es correcto: el stream ya es irrecuperable y
+// ws_try_send() cierra la sesión para que el navegador reconecte limpio.
+#define WS_SEND_DEADLINE_US 500000   // 500 ms para colocar el buffer entero
+
+static int ws_send_all(httpd_handle_t hd, int fd, const char *buf, size_t len, int flags) {
+    (void)hd;
+    size_t  off      = 0;
+    int64_t deadline = esp_timer_get_time() + WS_SEND_DEADLINE_US;
+
+    while (off < len) {
+        int n = send(fd, buf + off, len - off, flags);
+        if (n > 0) {
+            off += (size_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            if (esp_timer_get_time() > deadline)
+                return HTTPD_SOCK_ERR_TIMEOUT;   // cliente inservible
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        return HTTPD_SOCK_ERR_FAIL;   // n == 0 también es fallo: no hay progreso
+    }
+    return (int)len;
+}
+
+// Serializa los envíos WS: audio_stream_task y los emisores de texto (nivel de
+// audio, squelch, APRS…) escriben sobre los mismos sockets desde tareas
+// distintas, y httpd_ws_send_data() no es atómica — dos tramas entrelazadas
+// rompen el stream WebSocket del navegador.
+static SemaphoreHandle_t s_ws_tx_mutex = NULL;
+
+// Envía `pkt` al cliente `fd` sin bloquear nunca la tarea llamante:
+//   - socket sin espacio → se descarta y se cuenta como fallo;
+//   - WS_STALL_LIMIT fallos seguidos → sesión dada por muerta y cerrada.
+// Devuelve true si la trama se entregó al stack.
+static bool ws_try_send(int fd, httpd_ws_frame_t *pkt) {
+    if (!sock_writable(fd)) {
+        if (ws_stall_bump(fd) >= WS_STALL_LIMIT) {
+            ESP_LOGW(TAG, "WS fd=%d atascado, cerrando sesión", fd);
+            ws_stall_clear(fd);
+            httpd_sess_trigger_close(s_httpd, fd);
+        }
+        return false;
+    }
+
+    // El socket admite escritura, así que el send no debería esperar; el
+    // timeout del mutex solo cubre el solape con otro emisor.
+    if (s_ws_tx_mutex && xSemaphoreTake(s_ws_tx_mutex, pdMS_TO_TICKS(200)) != pdTRUE)
+        return false;
+    // httpd_ws_send_frame_async() escribe el socket EN ESTA TAREA. No usar
+    // httpd_ws_send_data(): esa encola el envío como mensaje de trabajo en el
+    // socket de control UDP de httpd y espera (portMAX_DELAY) a que la tarea
+    // httpd lo ejecute. La tarea httpd drena UN mensaje de control por vuelta de
+    // select(), y por esa misma cola viajan los cierres LRU que habilitan
+    // accept(); con ~9,4 bloques/s por cliente la cola se satura, los mensajes
+    // (UDP) se pierden y las conexiones nuevas — el propio /ws — se quedan
+    // minutos sin ser aceptadas. El mutex sustituye a esa serialización.
+    esp_err_t err = httpd_ws_send_frame_async(s_httpd, fd, pkt);
+    if (s_ws_tx_mutex) xSemaphoreGive(s_ws_tx_mutex);
+
+    if (err != ESP_OK) {
+        // Socket muerto: cerrar sesión para que httpd lo limpie.
+        ws_stall_clear(fd);
+        httpd_sess_trigger_close(s_httpd, fd);
+        return false;
+    }
+    ws_stall_clear(fd);
+    // Sin esto la sesión WS es siempre la víctima del purgado LRU: httpd solo
+    // refresca lru_counter al procesar una petición ENTRANTE (httpd_sess.c), y
+    // este WebSocket solo recibe datos del servidor. Cada conexión nueva con la
+    // tabla llena cerraría justo la sesión de audio que sí está viva.
+    httpd_sess_update_lru_counter(s_httpd, fd);
+    return true;
+}
+
 // En ESP-IDF 6.1 el handler WebSocket NO se llama al conectar el cliente,
 // solo cuando el cliente envía frames. Para streaming unidireccional (server→client)
 // usamos httpd_get_client_list + httpd_ws_get_fd_info para encontrar clientes WS.
@@ -249,37 +350,29 @@ static void audio_stream_task(void *arg) {
     for (;;) {
         int8_t sample;
         if (xQueueReceive(audio_stream_q, &sample, pdMS_TO_TICKS(150)) != pdTRUE) {
+            if (sample_count) s_a_starve++;   // bloque a medias descartado
             sample_count = 0;
             continue;
         }
         s_sample_buf[sample_count++] = sample;
+        s_a_samples++;
 
         if (sample_count < ADPCM_SAMPLES_BLOCK) continue;
         sample_count = 0;
 
         encode_block(&state, s_sample_buf, s_adpcm_block);
+        s_a_blocks++;
 
         // Enviar a todos los clientes WebSocket activos.
         if (s_httpd != NULL) {
             size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
+            uint32_t wsc = 0;
             if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
                 for (int i = 0; i < (int)n; i++) {
                     int fd = client_fds[i];
                     if (httpd_ws_get_fd_info(s_httpd, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
                         continue;
-
-                    // Cliente sin espacio en el buffer TCP: descartar el bloque
-                    // en lugar de bloquear la tarea. Si sigue atascado durante
-                    // WS_STALL_LIMIT bloques se da la sesión por muerta.
-                    if (!sock_writable(fd)) {
-                        if (ws_stall_bump(fd) >= WS_STALL_LIMIT) {
-                            ESP_LOGW(TAG, "WS fd=%d atascado, cerrando sesión", fd);
-                            ws_stall_clear(fd);
-                            httpd_sess_trigger_close(s_httpd, fd);
-                        }
-                        continue;
-                    }
-                    ws_stall_clear(fd);
+                    wsc++;
 
                     httpd_ws_frame_t pkt = {
                         .final      = true,
@@ -288,12 +381,12 @@ static void audio_stream_task(void *arg) {
                         .payload    = s_adpcm_block,
                         .len        = ADPCM_BLOCK_BYTES,
                     };
-                    if (httpd_ws_send_data(s_httpd, fd, &pkt) != ESP_OK) {
-                        // Socket muerto: cerrar sesión para que httpd lo limpie
-                        httpd_sess_trigger_close(s_httpd, fd);
-                    }
+                    // descarta el bloque si el cliente no drena
+                    if (ws_try_send(fd, &pkt)) s_a_sent++;
+                    else                       s_a_drop++;
                 }
             }
+            s_a_wsc = wsc;
         }
 
         // Encolar para el cliente WAV TCP si está activo (lossy).
@@ -317,7 +410,14 @@ static esp_err_t index_handler(httpd_req_t *req) {
     char buf[512];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        httpd_resp_send_chunk(req, buf, (ssize_t)n);
+        // Abortar en cuanto el cliente deja de drenar: index.html son ~157
+        // chunks y con send_wait_timeout=1 cada chunk fallido bloquea la tarea
+        // httpd 1 s ("httpd_sock_err: error in send : 11" una vez por segundo),
+        // dejando el servidor entero — WS incluido — sin atender.
+        if (httpd_resp_send_chunk(req, buf, (ssize_t)n) != ESP_OK) {
+            fclose(f);
+            return ESP_FAIL;   // httpd cierra el socket; no enviar el chunk final
+        }
     }
     fclose(f);
     httpd_resp_send_chunk(req, NULL, 0);
@@ -589,17 +689,42 @@ static esp_err_t ws_handler(httpd_req_t *req) {
         };
         httpd_ws_send_frame(req, &pong);
     } else if (pkt.type == HTTPD_WS_TYPE_CLOSE) {
-        // Responder CLOSE y dejar que httpd cierre el socket
-        httpd_ws_frame_t close_f = {
-            .final = true, .type = HTTPD_WS_TYPE_CLOSE,
-            .payload = NULL, .len = 0,
-        };
-        httpd_ws_send_frame(req, &close_f);
+        // Responder CLOSE y dejar que httpd cierre el socket. El eco solo se
+        // intenta si el socket admite escritura: el cliente que cierra suele
+        // tener ya el buffer TX lleno, y entonces el send se queda hasta agotar
+        // send_wait_timeout para acabar en EAGAIN ("error in send : 11").
+        int cfd = httpd_req_to_sockfd(req);
+        if (cfd >= 0 && sock_writable(cfd)) {
+            httpd_ws_frame_t close_f = {
+                .final = true, .type = HTTPD_WS_TYPE_CLOSE,
+                .payload = NULL, .len = 0,
+            };
+            httpd_ws_send_frame(req, &close_f);
+        }
+        if (cfd >= 0) ws_stall_clear(cfd);
         free(buf);
         return ESP_FAIL;  // provoca cierre de sesión por parte de httpd
     }
 
     free(buf);
+    return ESP_OK;
+}
+
+// Llamado por httpd justo tras responder el 101 del upgrade. Sirve para separar
+// en /api/rx/stats "el handshake no llega a ejecutarse" (hs no sube) de "la
+// sesión se establece pero muere después" (hs sube y ws_clients sigue a 0).
+static esp_err_t ws_post_handshake(httpd_req_t *req) {
+    int fd = httpd_req_to_sockfd(req);
+    ESP_LOGI(TAG, "WS handshake OK fd=%d", fd);
+    if (fd >= 0) {
+        ws_stall_clear(fd);
+        // Sustituye el send() suelto de httpd por uno que coloca el buffer
+        // entero; sin esto un envío parcial rompe el stream WebSocket. El
+        // override es por sesión y httpd_sess_new() lo repone al reutilizar
+        // el descriptor, así que no contamina sockets HTTP normales.
+        httpd_sess_set_send_override(req->handle, fd, ws_send_all);
+    }
+    s_a_hs++;
     return ESP_OK;
 }
 
@@ -701,12 +826,16 @@ static esp_err_t log_handler(httpd_req_t *req)
     char hdr[48];
     snprintf(hdr, sizeof(hdr), "{\"last_seq\":%lu,\"entries\":[",
              (unsigned long)last_seq);
-    httpd_resp_sendstr_chunk(req, hdr);
+    // Igual que index_handler: en cuanto un chunk falla se aborta. Son hasta 250
+    // entradas y con send_wait_timeout=1 cada chunk fallido bloquearía la tarea
+    // httpd un segundo más.
+    esp_err_t err = httpd_resp_sendstr_chunk(req, hdr);
     for (int i = 0; i < pcount; i++) {
-        if (i > 0) httpd_resp_sendstr_chunk(req, ",");
-        httpd_resp_sendstr_chunk(req, ptrs[i]);
+        if (err == ESP_OK && i > 0) err = httpd_resp_sendstr_chunk(req, ",");
+        if (err == ESP_OK)          err = httpd_resp_sendstr_chunk(req, ptrs[i]);
         free(ptrs[i]);
     }
+    if (err != ESP_OK) return ESP_FAIL;  // sin chunk final: httpd cierra el socket
     httpd_resp_sendstr_chunk(req, "]}");
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
@@ -716,11 +845,13 @@ static esp_err_t log_handler(httpd_req_t *req)
 
 static esp_err_t rx_stats_handler(httpd_req_t *req)
 {
-    char buf[256];
+    char buf[448];
     snprintf(buf, sizeof(buf),
         "{\"v1\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
         "\"v2\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
-        "\"v2_enabled\":%s,\"v2_agc_peak\":%ld,\"v2_squelch_open\":%s}",
+        "\"v2_enabled\":%s,\"v2_agc_peak\":%ld,\"v2_squelch_open\":%s,"
+        "\"audio\":{\"samples\":%lu,\"blocks\":%lu,\"sent\":%lu,\"drop\":%lu,"
+        "\"starve\":%lu,\"ws_clients\":%lu,\"hs\":%lu,\"q_waiting\":%u,\"heap\":%u}}",
         (unsigned long)rx_stats_v1.frames_crc_ok,
         (unsigned long)rx_stats_v1.frames_crc_err,
         (unsigned long)rx_stats_v1.hdlc_flags,
@@ -731,7 +862,13 @@ static esp_err_t rx_stats_handler(httpd_req_t *req)
         (unsigned long)rx_stats_v2.fifo_overflows,
         AFSK_modem_v2 ? "true" : "false",
         (long)afsk_v2_agc_peak,
-        afsk_v2_squelch_open ? "true" : "false");
+        afsk_v2_squelch_open ? "true" : "false",
+        (unsigned long)s_a_samples, (unsigned long)s_a_blocks,
+        (unsigned long)s_a_sent,    (unsigned long)s_a_drop,
+        (unsigned long)s_a_starve,  (unsigned long)s_a_wsc,
+        (unsigned long)s_a_hs,
+        (unsigned)(audio_stream_q ? uxQueueMessagesWaiting(audio_stream_q) : 0),
+        (unsigned)esp_get_free_heap_size());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, buf);
@@ -758,8 +895,12 @@ void audio_stream_ws_send_text(const char *text) {
         snprintf(wrapped, tlen + 24, "{\"seq\":%lu,%s", (unsigned long)seq, text + 1);
 
     // Persist in ring buffer only discrete events; skip high-frequency telemetry.
+    // El ring adopta `wrapped`; si NO entra (evento efímero, o sin mutex/malloc)
+    // el dueño sigue siendo esta función y hay que liberarlo tras enviarlo.
+    bool ring_owns = false;
     char *to_free = NULL;
     if (s_log_mutex && wrapped && !log_is_ephemeral(text)) {
+        ring_owns = true;
         xSemaphoreTake(s_log_mutex, portMAX_DELAY);
         int cap = s_log_max; // snapshot under mutex
         to_free = s_log_ring[s_log_head].json;
@@ -782,18 +923,18 @@ void audio_stream_ws_send_text(const char *text) {
     };
     int    client_fds[5];
     size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
-    if (httpd_get_client_list(s_httpd, &n, client_fds) != ESP_OK) return;
-    // A diferencia del audio, aquí no se descarta por socket lleno: un paquete
-    // APRS o un ACK sí importan. El bloqueo queda acotado por send_wait_timeout.
-    for (int i = 0; i < (int)n; i++) {
-        if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
-            if (httpd_ws_send_data(s_httpd, client_fds[i], &pkt) != ESP_OK) {
-                ws_stall_clear(client_fds[i]);
-                httpd_sess_trigger_close(s_httpd, client_fds[i]);
-            }
+    if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
+        // Igual que el audio: nunca esperar por un cliente que no drena. Los
+        // eventos no efímeros ya están en el ring con su `seq`, y el cliente los
+        // recupera al reconectar con GET /api/log?since=<last_seq>, así que
+        // descartarlos aquí no pierde información.
+        for (int i = 0; i < (int)n; i++) {
+            if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
+                ws_try_send(client_fds[i], &pkt);
         }
     }
-    // wrapped queda en el ring buffer — no liberar aquí
+
+    if (!ring_owns) free(wrapped);
 }
 
 // ─── Reboot endpoint ──────────────────────────────────────────────────────────
@@ -1052,6 +1193,10 @@ void audio_stream_init(void) {
 
     audio_stream_q = xQueueCreate(AUDIO_QUEUE_LEN, sizeof(int8_t));
 
+    // Antes de httpd_start(): en cuanto el servidor acepta clientes puede haber
+    // envíos WS concurrentes.
+    s_ws_tx_mutex = xSemaphoreCreateMutex();
+
     // HTTP server (index.html + WebSocket)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = AUDIO_HTTP_PORT;
@@ -1064,6 +1209,13 @@ void audio_stream_init(void) {
     // esperan (texto WS, respuestas HTTP); el audio ni siquiera llega a esperar
     // gracias al chequeo sock_writable().
     cfg.send_wait_timeout  = 1;
+    // Recolecta sockets medio abiertos (pestaña cerrada de golpe, móvil que se
+    // aleja del AP): sin keep-alive se quedan ocupando slot indefinidamente y,
+    // con la tabla llena, cada conexión nueva depende del purgado LRU.
+    cfg.keep_alive_enable   = true;
+    cfg.keep_alive_idle     = 5;   // s de inactividad antes del primer sondeo
+    cfg.keep_alive_interval = 5;   // s entre sondeos
+    cfg.keep_alive_count    = 3;   // sondeos sin respuesta → socket cerrado
 
     if (httpd_start(&s_httpd, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Error iniciando HTTP server");
@@ -1080,6 +1232,7 @@ void audio_stream_init(void) {
         .method      = HTTP_GET,
         .handler     = ws_handler,
         .is_websocket = true,
+        .ws_post_handshake_cb = ws_post_handshake,
     };
     static const httpd_uri_t uri_aprs_send = {
         .uri     = "/api/aprs/send",

@@ -1,3 +1,5 @@
 CONFIG_HTTPD_WS_SUPPORT=y
+# Callback tras el handshake /ws: alimenta el contador "hs" de /api/rx/stats.
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_MAX_SOCKETS=16

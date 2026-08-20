@@ -328,7 +328,10 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
         // Expect: 00 00 08 00 (PI: flags=0, proto=IPv4) + IPv4 header (≥20 bytes)
         if (len < 8 || buf[0] != 0x00 || buf[1] != 0x00 ||
             buf[2] != 0x08 || buf[3] != 0x00 || (buf[4] & 0xF0u) != 0x40u) {
-            ESP_LOGW(TAG, "TUN: drop: unexpected frame (len=%u hdr=%02X%02X%02X%02X)",
+            // Tráfico normal: on_ax25_raw_frame() nos pasa TODA trama recibida por
+            // RF, y las APRS de terceros (dst "APxxxx" → hdr 82A0...) no llevan la
+            // cabecera PI de TUN. No es un error, así que va en DEBUG.
+            ESP_LOGD(TAG, "TUN: drop: not a TUN-IP frame (len=%u hdr=%02X%02X%02X%02X)",
                      (unsigned)len, buf[0], buf[1], buf[2], buf[3]);
             return;
         }

@@ -28,6 +28,15 @@
 #define TNC_MODE       TNC_MODE_KISS
 
 // ---------------------------------------------------------------------------
+// Repetidor de voz
+// ---------------------------------------------------------------------------
+// Deshabilitado (2026-08-16) mientras se depura la presión de heap: al activarse
+// reserva ~15 KB contiguos para el buffer de audio, pausa la decodificación RX
+// (afsk_pause_rx) y detiene el servidor WAV. Poner a 1 para volver a permitirlo;
+// con 0, ni config.json ni POST /api/repeater/enable pueden activarlo.
+#define REPEATER_ENABLED 0
+
+// ---------------------------------------------------------------------------
 // Transporte (solo relevante en TNC_MODE_KISS)
 // ---------------------------------------------------------------------------
 #define KISS_TRANSPORT_WIFI  1   // WiFi TCP (implementado)
