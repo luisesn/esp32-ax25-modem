@@ -331,6 +331,18 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
         ESP_LOGI(TAG, "output_cb first block: [%d,%d,%d,%d] img_w=%d",
                  rect->left, rect->top, rect->right, rect->bottom, img_w);
 
+    /* row_buf is fixed at 320 px wide (JPEG_ROW_BUF_HEIGHT x 320*3). A JPEG
+     * wider than the SSTV mode (e.g. an unresized camera photo uploaded
+     * directly via the API) would make rect->left/bw index past that row,
+     * corrupting the heap. Bail out instead of overflowing. */
+    if (rect->left < 0 || bw <= 0 ||
+        ((size_t)rect->left + (size_t)bw) * 3 > sizeof(ctx->row_buf[0])) {
+        ESP_LOGE(TAG, "MCU block [%d,%d] out of bounds for %d-px row buffer — image too wide?",
+                 rect->left, bw, img_w);
+        ctx->error = true;
+        return 0;
+    }
+
     /* Copy MCU block pixels into row_buf. */
     for (int row = 0; row < bh; row++) {
         int img_row = (int)rect->top + row;
@@ -537,6 +549,17 @@ void sstv_transmit(const SstvRequest *req) {
     }
     ESP_LOGI(TAG, "jd_prepare OK, jdec.width=%d jdec.height=%d (expect %dx%d)",
              (int)s_jdec.width, (int)s_jdec.height, mp->cols, mp->rows);
+
+    if ((int)s_jdec.width != mp->cols) {
+        /* row_buf and every per-line channel buffer are sized for mp->cols
+         * (320 px) exactly. A narrower image would silently transmit only
+         * the VIS header (the row-complete check never fires); a wider one
+         * is now rejected defensively inside jpeg_output_cb too. Refuse
+         * up front with a clear error instead of either failure mode. */
+        ESP_LOGE(TAG, "image width %d != mode width %d — resize before uploading",
+                 (int)s_jdec.width, mp->cols);
+        goto done;
+    }
 
     /* Scale 0 = no scaling (output at full resolution). */
     rc = jd_decomp(&s_jdec, jpeg_output_cb, 0);

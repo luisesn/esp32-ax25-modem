@@ -2,9 +2,12 @@
  * Reed-Solomon codec for IL2P
  * Adapted from Phil Karn KA9Q's libfec (LGPL) and Direwolf/WB2OSZ.
  *
- * Two independent instantiations:
- *   GF(2^8), poly=0x11D, fcr=1, nroots=16  → RS(255,239)
- *   GF(2^4), poly=0x13,  fcr=1, nroots=2   → RS(15,13)
+ * Two instantiations, both over the same GF(2^8) field (poly=0x11D, fcr=1):
+ *   nroots=16 → RS(255,239) shortened, for payload blocks
+ *   nroots=2  → shortened RS, for the IL2P header
+ * The header must use byte symbols (GF(2^8)), not GF(2^4) nibbles: it
+ * carries raw 8-bit values (packed callsigns, PID, control byte) that a
+ * 4-bit symbol space cannot represent.
  */
 
 #include "rs_codec.h"
@@ -73,58 +76,33 @@ static inline uint8_t gf8_inv(uint8_t a)
     return gf8_exp[255 - (int)gf8_log[a]];
 }
 
-/* GF(2^4) ------------------------------------------------------------------ */
-#define GF4_POLY   0x13    /* x^4 + x + 1                                      */
-#define RS4_N      15
-#define RS4_NROOTS 2
-#define RS4_K      13
-#define RS4_FCR    1
+/* Header codec — same GF(2^8) field as above, dedicated 2-root generator. -- */
+#define RSH_NROOTS 2
+#define RSH_FCR    1
 
-static uint8_t  gf4_exp[32];
-static uint8_t  gf4_log[16];
-static uint8_t  rs4_gp[RS4_NROOTS];   /* coefficients in log form              */
-static bool     gf4_ready = false;
+static uint8_t  rsh_gp[RSH_NROOTS];   /* generator poly coefficients (log)     */
+static bool     rsh_ready = false;
 
-static void gf4_init(void)
+static void rsh_init(void)
 {
-    uint8_t sr = 1;
-    for (int i = 0; i < 15; i++) {
-        gf4_exp[i] = sr;
-        gf4_log[sr] = (uint8_t)i;
-        sr <<= 1;
-        if (sr & 0x10) sr ^= GF4_POLY;
-    }
-    for (int i = 15; i < 32; i++) gf4_exp[i] = gf4_exp[i - 15];
+    if (!gf8_ready) gf8_init();
 
-    /* g(x) = (x − α^1)(x − α^2) = x^2 + (α^1 + α^2)x + α^3
-     * α^1 = 2, α^2 = 4, α^3 = 8  in GF(2^4) with poly 0x13 */
-    uint8_t tmp[RS4_NROOTS + 1];
+    uint8_t tmp[RSH_NROOTS + 1];
     tmp[0] = 1;
-    for (int j = 1; j <= RS4_NROOTS; j++) tmp[j] = 0;
+    for (int j = 1; j <= RSH_NROOTS; j++) tmp[j] = 0;
 
-    for (int i = 0; i < RS4_NROOTS; i++) {
-        uint8_t root = gf4_exp[RS4_FCR + i];
+    for (int i = 0; i < RSH_NROOTS; i++) {
+        uint8_t root = gf8_exp[RSH_FCR + i];
         for (int j = i + 1; j > 0; j--) {
             if (tmp[j - 1] != 0)
-                tmp[j] ^= gf4_exp[(gf4_log[tmp[j - 1]] + gf4_log[root]) % 15];
+                tmp[j] ^= gf8_exp[(gf8_log[tmp[j - 1]] + gf8_log[root]) % 255];
         }
-        tmp[0] = gf4_exp[(gf4_log[tmp[0]] + gf4_log[root]) % 15];
+        tmp[0] = gf8_exp[(gf8_log[tmp[0]] + gf8_log[root]) % 255];
     }
-    for (int j = 0; j < RS4_NROOTS; j++)
-        rs4_gp[j] = (tmp[j] != 0) ? gf4_log[tmp[j]] : 255;
+    for (int j = 0; j < RSH_NROOTS; j++)
+        rsh_gp[j] = (tmp[j] != 0) ? gf8_log[tmp[j]] : 255;
 
-    gf4_ready = true;
-}
-
-static inline uint8_t gf4_mul(uint8_t a, uint8_t b)
-{
-    if (a == 0 || b == 0) return 0;
-    return gf4_exp[(int)gf4_log[a] + (int)gf4_log[b]];
-}
-
-static inline uint8_t gf4_inv(uint8_t a)
-{
-    return gf4_exp[15 - (int)gf4_log[a]];
+    rsh_ready = true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -226,7 +204,14 @@ int rs8_decode(uint8_t *block, int dlen)
             /* Error at position n-1-i in the full (non-shortened) codeword */
             int p = RS8_N - 1 - i - pad;
             if (p >= 0 && p < block_len) {
-                pos[nroots_found++] = p;
+                /* A genuine σ(x) of degree L has at most L roots; a spurious
+                 * extra one means the block is uncorrectable. Bound the
+                 * write against pos[]'s capacity BEFORE storing — writing
+                 * first and checking after (the original bug) let a 9th
+                 * root at L=8 write past pos[8], corrupting the stack. */
+                if (nroots_found < (int)(sizeof(pos) / sizeof(pos[0])))
+                    pos[nroots_found] = p;
+                nroots_found++;
                 if (nroots_found > L) break;
             }
         }
@@ -287,61 +272,69 @@ int rs8_decode(uint8_t *block, int dlen)
     return nerr;
 }
 
-/* ── RS(15,13) encode ────────────────────────────────────────────────────── */
-void rs4_encode(const uint8_t *data, uint8_t *parity)
+/* ── Header shortened-RS encode (GF(2^8), 2 roots) ──────────────────────── */
+void rsh_encode(const uint8_t *data, int dlen, uint8_t *parity)
 {
-    if (!gf4_ready) gf4_init();
+    if (!rsh_ready) rsh_init();
 
-    memset(parity, 0, RS4_NROOTS);
+    memset(parity, 0, RSH_NROOTS);
 
-    for (int i = 0; i < RS4_K; i++) {
+    for (int i = 0; i < dlen; i++) {
         uint8_t feedback = data[i] ^ parity[0];
         if (feedback != 0) {
-            int fl = gf4_log[feedback];
-            for (int j = 1; j < RS4_NROOTS; j++) {
-                if (rs4_gp[j] != 255)
-                    parity[j] ^= gf4_exp[fl + rs4_gp[j]];
+            int fl = gf8_log[feedback];
+            for (int j = 1; j < RSH_NROOTS; j++) {
+                if (rsh_gp[j] != 255)
+                    parity[j] ^= gf8_exp[fl + rsh_gp[j]];
             }
-            memmove(parity, parity + 1, RS4_NROOTS - 1);
-            parity[RS4_NROOTS - 1] = (rs4_gp[0] != 255) ? gf4_exp[fl + rs4_gp[0]] : 0;
+            memmove(parity, parity + 1, RSH_NROOTS - 1);
+            parity[RSH_NROOTS - 1] = (rsh_gp[0] != 255) ? gf8_exp[fl + rsh_gp[0]] : 0;
         } else {
-            memmove(parity, parity + 1, RS4_NROOTS - 1);
-            parity[RS4_NROOTS - 1] = 0;
+            memmove(parity, parity + 1, RSH_NROOTS - 1);
+            parity[RSH_NROOTS - 1] = 0;
         }
     }
 }
 
-/* ── RS(15,13) decode ────────────────────────────────────────────────────── */
-int rs4_decode(uint8_t *block)
+/* ── Header shortened-RS decode (GF(2^8), 2 roots, corrects ≤1 error) ────── *
+ * For a single error at symbol X with magnitude e (FCR=1, roots α^1,α^2):
+ *   S0 = e·X, S1 = e·X^2  ⇒  X = S1/S0  and  e = S0.
+ * This is the standard closed-form Forney result for the 2-root/t=1 case —
+ * no Berlekamp-Massey or Chien search needed. */
+int rsh_decode(uint8_t *block, int dlen)
 {
-    if (!gf4_ready) gf4_init();
+    if (!rsh_ready) rsh_init();
 
-    /* Syndromes s[0], s[1] for roots α^1, α^2 */
-    uint8_t s[RS4_NROOTS];
-    for (int i = 0; i < RS4_NROOTS; i++) {
+    int pad       = (RS8_N - RSH_NROOTS) - dlen; /* shortening, same convention as rs8_decode */
+    int block_len = dlen + RSH_NROOTS;
+
+    uint8_t s[RSH_NROOTS];
+    for (int i = 0; i < RSH_NROOTS; i++) {
         uint8_t syn = 0;
-        for (int j = 0; j < RS4_N; j++)
-            syn = gf4_mul(syn, gf4_exp[RS4_FCR + i]) ^ block[j];
+        for (int j = 0; j < block_len; j++)
+            syn = gf8_mul(syn, gf8_exp[RSH_FCR + i]) ^ block[j];
         s[i] = syn;
     }
 
     if (s[0] == 0 && s[1] == 0) return 0;
+    if (s[0] == 0) return -1; /* s[1] != 0 with s[0] == 0 can't come from 1 error */
 
-    /* For t=1 (one error), the error locator is σ(x) = 1 + σ_1 * x.
-     * σ_1 = s[0], and the root gives the position.
-     * Verify: s[1] = s[0]^2 (for t=1 with FCR=1 in GF(2^4)).  */
-    if (gf4_mul(s[0], s[0]) != s[1]) return -1; /* more than 1 error */
+    uint8_t X = gf8_mul(s[1], gf8_inv(s[0]));
+    if (X == 0) return -1;
 
-    /* Find position: α^(-(pos)) = σ_1 → pos = -log(s[0]) mod 15 */
-    if (s[0] == 0) return -1;
-    int err_pos = (15 - gf4_log[s[0]]) % 15;
-    if (err_pos >= RS4_N) return -1;
+    int xi_log = gf8_log[X];
+    int pos    = RS8_N - 1 - xi_log - pad;
+    if (pos < 0 || pos >= block_len) return -1;
 
-    /* Error magnitude: e = s[0] / α^(FCR * err_pos) = s[0] * α^(-err_pos) */
-    int xi_log = (15 - err_pos) % 15; /* log(α^(-err_pos)) */
-    uint8_t err_val = gf4_mul(s[0], gf4_exp[(uint32_t)xi_log * RS4_FCR % 15]);
+    uint8_t err = s[0];
+    block[pos] ^= err;
 
-    if (err_val == 0) return -1;
-    block[err_pos] ^= err_val;
+    /* Verify */
+    for (int i = 0; i < RSH_NROOTS; i++) {
+        uint8_t syn = 0;
+        for (int j = 0; j < block_len; j++)
+            syn = gf8_mul(syn, gf8_exp[RSH_FCR + i]) ^ block[j];
+        if (syn) return -1;
+    }
     return 1;
 }

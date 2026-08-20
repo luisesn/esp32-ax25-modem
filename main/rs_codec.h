@@ -3,8 +3,12 @@
  * Reed-Solomon codec for IL2P
  *
  * Two parameter sets used by IL2P (Improved Layer 2 Protocol):
- *   RS(255,239) over GF(2^8)  — payload blocks, 16 parity bytes, corrects ≤8 errors
- *   RS(15,13)   over GF(2^4)  — 13-byte header, 2 parity bytes, corrects ≤1 error
+ *   RS(255,239) over GF(2^8)         — payload blocks, 16 parity bytes, corrects ≤8 errors
+ *   Shortened RS over GF(2^8), 2 roots — header, 2 parity bytes, corrects ≤1 error
+ *
+ * The header FEC shares the GF(2^8) field with the payload codec (not a
+ * separate GF(2^4)): the header holds raw 8-bit bytes (packed callsigns,
+ * PID, control), and GF(2^4) symbols can only represent values 0-15.
  *
  * Adapted from Phil Karn's libfec (LGPL) / Direwolf by WB2OSZ.
  */
@@ -27,15 +31,17 @@ void rs8_encode(const uint8_t *data, int dlen, uint8_t *parity);
  */
 int  rs8_decode(uint8_t *block, int dlen);
 
-/* ── RS(15,13) over GF(2^4) ────────────────────────────────────────────────
- * data: exactly 13 bytes.  parity: output buffer of exactly 2 bytes.
+/* ── Shortened RS over GF(2^8), 2 parity bytes ─────────────────────────────
+ * dlen: actual header data length in bytes.  parity: output buffer of
+ * exactly 2 bytes.
  */
-void rs4_encode(const uint8_t *data, uint8_t *parity);
+void rsh_encode(const uint8_t *data, int dlen, uint8_t *parity);
 
-/* block: exactly 15 bytes (13 data + 2 parity), corrected in place.
+/* block = data (dlen bytes) followed by parity (2 bytes), total dlen+2.
+ * Corrects up to 1 symbol error in place.
  * Returns 0 (no error), 1 (corrected), or -1 (uncorrectable).
  */
-int  rs4_decode(uint8_t *block);
+int  rsh_decode(uint8_t *block, int dlen);
 
 #ifdef __cplusplus
 }

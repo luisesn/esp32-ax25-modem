@@ -4,7 +4,7 @@
  * Frame structure (after NRZI decoding):
  *   N × 0x7E        preamble (not scrambled)
  *   0xF1 0x5E 0x48  sync word (24 bits, not scrambled)
- *   15 bytes        RS(15,13) encoded header  (scrambled)
+ *   16 bytes        shortened-RS encoded header, 14 data + 2 parity (scrambled)
  *   K × 255 bytes   RS(255,239) payload blocks (scrambled, last block ≤255)
  *
  * LFSR polynomial x^9 + x^4 + 1, initial state 0x1FF, reset per frame.
@@ -28,8 +28,8 @@ static ax25_raw_callback_t s_cb       = NULL;
 
 /* ─── protocol constants ─────────────────────────────────────────────────── */
 #define IL2P_SYNC_WORD   0xF15E48UL   /* 24-bit, transmitted unscrambled      */
-#define IL2P_HEADER_BYTES 15          /* 13 data + 2 RS parity                */
-#define IL2P_HEADER_DATA  13
+#define IL2P_HEADER_BYTES 16          /* 14 data + 2 RS parity                */
+#define IL2P_HEADER_DATA  14          /* holds 110 packed bits (36+4+36+4+4+8+8+10), 2 bits unused */
 #define IL2P_RS_NROOTS    16          /* parity bytes per payload block       */
 #define IL2P_BLOCK_DATA   239
 #define IL2P_BLOCK_TOTAL  255
@@ -167,8 +167,8 @@ static int il2p_encode_header(const uint8_t *ax25, size_t ax25_len,
     /* Payload length: 10 bits */
     pack_bits(hdr, &bp, (uint32_t)payload_len, 10);
 
-    /* Padding bit (bp should be 104 = 13 bytes) */
-    if (bp < 104) pack_bits(hdr, &bp, 0, 104 - bp);
+    /* bp is now 110; the remaining 2 bits of the 14-byte buffer stay 0
+     * from the memset above (no fields left to pack). */
 
     return payload_len;
 }
@@ -243,7 +243,7 @@ static int il2p_build_ax25(char dest[7], int dest_ssid,
 typedef enum {
     IL2P_HUNT,    /* looking for 0x7E preamble  */
     IL2P_SYNC,    /* searching 24-bit sync word  */
-    IL2P_HEADER,  /* collecting 15 header bytes  */
+    IL2P_HEADER,  /* collecting 16 header bytes  */
     IL2P_PAYLOAD, /* collecting payload RS blocks */
 } il2p_state_t;
 
@@ -329,10 +329,10 @@ static void rx_header_byte(il2p_rx_t *rx, uint8_t b)
     rx->hdr_raw[rx->hdr_idx++] = b;
     if (rx->hdr_idx < IL2P_HEADER_BYTES) return;
 
-    /* All 15 header bytes received — RS decode */
+    /* All header bytes received — RS decode */
     uint8_t tmp[IL2P_HEADER_BYTES];
     memcpy(tmp, rx->hdr_raw, IL2P_HEADER_BYTES);
-    int res = rs4_decode(tmp);
+    int res = rsh_decode(tmp, IL2P_HEADER_DATA);
     if (res < 0) {
         ESP_LOGD(TAG, "Header RS decode fail");
         rx_reset(rx);
@@ -410,22 +410,27 @@ static void rx_process_bit(il2p_rx_t *rx, uint8_t bit)
 {
     switch (rx->state) {
     case IL2P_HUNT:
-        /* Assemble bytes and count 0x7E flags */
+        /* Slide the 8-bit window one bit at a time and test it against
+         * 0x7E on every bit, like IL2P_SYNC below already does for its
+         * word. Gating the test to only every 8th incoming bit (as this
+         * used to) required the transmitted flag bytes to land on that
+         * arbitrary byte boundary by chance — right ~1/8 of the time —
+         * so most preambles were never recognized. bit_count here now
+         * just tracks bits-since-last-match, to require the flags be
+         * back-to-back (contiguous) before counting them as a streak. */
         rx->sync_reg = ((rx->sync_reg << 1) | (bit & 1)) & 0xFF;
         rx->bit_count++;
-        if (rx->bit_count < 8) break;
-        rx->bit_count = 0;
         if (rx->sync_reg == 0x7E) {
-            rx->preamble_count++;
-        } else {
-            rx->preamble_count = 0;
-        }
-        rx->sync_reg = 0;
-        /* Switch to SYNC search after ≥ IL2P_PREAMBLE_MIN flags */
-        if (rx->preamble_count >= IL2P_PREAMBLE_MIN) {
-            rx->state     = IL2P_SYNC;
-            rx->sync_reg  = 0;
+            rx->preamble_count = (rx->preamble_count > 0 && rx->bit_count == 8)
+                                      ? rx->preamble_count + 1
+                                      : 1;
             rx->bit_count = 0;
+            /* Switch to SYNC search after ≥ IL2P_PREAMBLE_MIN flags */
+            if (rx->preamble_count >= IL2P_PREAMBLE_MIN) {
+                rx->state     = IL2P_SYNC;
+                rx->sync_reg  = 0;
+                rx->bit_count = 0;
+            }
         }
         break;
 
@@ -560,7 +565,7 @@ void il2p_tx_frame(const uint8_t *ax25_raw, size_t len)
     }
 
     uint8_t hdr_parity[2];
-    rs4_encode(hdr_data, hdr_parity);
+    rsh_encode(hdr_data, IL2P_HEADER_DATA, hdr_parity);
 
     /* Scramble header (data + parity) */
     uint16_t lfsr = 0x1FF;
