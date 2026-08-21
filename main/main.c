@@ -524,12 +524,18 @@ void app_main(void)
 
     // GPS y display se inician antes del WiFi para que la pantalla muestre
     // el estado de conexión durante el proceso.
-    gps_init(config_get());
-    display_init(config_get());
+    // config_get() ahora devuelve una copia (ver aux_config.c) que hay que
+    // liberar tras cada uso puntual.
+    cJSON *boot_cfg = config_get();
+    gps_init(boot_cfg);
+    display_init(boot_cfg);
+    config_free_json(boot_cfg);
 
 #  if KISS_TRANSPORT == KISS_TRANSPORT_WIFI
     transport_init(&transport_wifi_ops);
-    ax25ip_init(config_get());
+    boot_cfg = config_get();
+    ax25ip_init(boot_cfg);
+    config_free_json(boot_cfg);
 #  elif KISS_TRANSPORT == KISS_TRANSPORT_UART
     // transport_init(&transport_uart_ops);  // pendiente implementar
 #  elif KISS_TRANSPORT == KISS_TRANSPORT_BT
@@ -560,6 +566,7 @@ void app_main(void)
             }
         }
         APRS_setCallsign((char *)cs, cs_ssid);
+        config_free_json(cfg);
     }
 
     afsk_set_tx_fn(APRS_send_raw_frame);
@@ -567,7 +574,8 @@ void app_main(void)
 
     {
         bool il2p_en = false;
-        cJSON *il2p_cfg = cJSON_GetObjectItem(config_get(), "il2p");
+        boot_cfg = config_get();
+        cJSON *il2p_cfg = cJSON_GetObjectItem(boot_cfg, "il2p");
         if (il2p_cfg) {
             cJSON *en = cJSON_GetObjectItem(il2p_cfg, "enabled");
             if (cJSON_IsBool(en)) il2p_en = cJSON_IsTrue(en);
@@ -575,12 +583,15 @@ void app_main(void)
         il2p_init(il2p_en, on_ax25_raw_frame);
         if (il2p_en)
             afsk_set_tx_fn(smart_tx_frame);
+        config_free_json(boot_cfg);
     }
 
-    digi_init(config_get());
-    morse_init(config_get());
-    remote_cmd_init(config_get());
-    rf_console_init(config_get());
+    boot_cfg = config_get();
+    digi_init(boot_cfg);
+    morse_init(boot_cfg);
+    remote_cmd_init(boot_cfg);
+    rf_console_init(boot_cfg);
+    config_free_json(boot_cfg);
 
     // Streaming de audio: instala el hook y arranca servidor HTTP + WebSocket.
     // Debe llamarse después de transport_init (WiFi ya conectado).
@@ -589,9 +600,11 @@ void app_main(void)
     sstv_init();
     ota_init();
     ota_net_init();
-    delay_tune_init(config_get());
-    repeater_init(config_get());
-    squelch_sf_init(config_get());
+    boot_cfg = config_get();
+    delay_tune_init(boot_cfg);
+    repeater_init(boot_cfg);
+    squelch_sf_init(boot_cfg);
+    config_free_json(boot_cfg);
     afsk_set_channel_busy_fn(channel_is_busy);
     afsk_set_dispatch_hook(project_dispatch_hook);
 
@@ -613,6 +626,7 @@ void app_main(void)
             if (cJSON_IsNumber(ss)) ssid = (int)ss->valueint;
         }
     }
+    config_free_json(cfg);
     APRS_setCallsign(callsign, ssid);
     APRS_set_msg_hook(aprs_msg_callback);
     xTaskCreate(processPacket, "processPacket", 2048, NULL, 5, NULL);

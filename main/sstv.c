@@ -20,6 +20,13 @@
 #define SSTV_MAX_FILES  10
 #define SSTV_MAX_SIZE   (200 * 1024)
 #define SSTV_NAME_LEN   48
+// CONFIG_SPIFFS_OBJ_NAME_LEN=32 bounds the whole SPIFFS-relative path SPIFFS
+// actually stores ("/sstv/<name>" — the VFS layer strips the "/spiffs" mount
+// prefix before spiffs ever sees the path), which is smaller than the
+// SSTV_NAME_LEN=48 buffer parsed into below. A name past this real limit
+// used to silently fail fopen(create) with a generic upload error instead of
+// a clear "name too long" one.
+#define SSTV_MAX_NAME_LEN (32 - (int)(sizeof("/sstv/") - 1) - 1)
 #define SSTV_DAC_FS     48000
 #define SSTV_BUF_SIZE   AFSK_DAC_FRAME_SIZE   /* 2048 bytes */
 
@@ -298,6 +305,10 @@ typedef struct {
     const SstvModeParams *mp;
     uint8_t        cb_prev[160]; /* Robot 36: Cb from previous even line */
     int            lines_done;
+    /* Row-band flush tracking (see jpeg_output_cb / flush_band) */
+    int            band_top;
+    int            band_bottom;
+    bool           band_valid;
 } JpegCtx;
 
 /* Contexto (~15,5 KB) y work area (8 KB) se reservan en heap durante la TX y se
@@ -314,6 +325,51 @@ static UINT jpeg_input_cb(JDEC *jdec, BYTE *buf, UINT nbytes) {
         return nbytes;
     }
     return (UINT)fread(buf, 1, nbytes, ctx->f);
+}
+
+/* Transmit rows [band_top, band_bottom] of row_buf. Split out of
+ * jpeg_output_cb so it can also run once more after jd_decomp() returns, for
+ * the last row band (see call site + comment below). */
+static void flush_band(JpegCtx *ctx, int band_top, int band_bottom) {
+    const SstvModeParams *mp = ctx->mp;
+
+    for (int img_row = band_top; img_row <= band_bottom; img_row++) {
+        if (img_row >= mp->rows) break;  /* don't transmit past image height */
+
+        int rel_row = img_row % JPEG_ROW_BUF_HEIGHT;
+        const uint8_t *rgb = ctx->row_buf[rel_row];
+
+        if (mp->is_ycbcr) {
+            /* Robot modes */
+            uint8_t y_ch[320], cb_ch[160], cr_ch[160];
+            for (int x = 0; x < mp->cols; x++) {
+                uint8_t Y, Cb, Cr;
+                rgb_to_ycbcr(rgb[x*3], rgb[x*3+1], rgb[x*3+2], &Y, &Cb, &Cr);
+                y_ch[x] = Y;
+                if (x % 2 == 0) {
+                    uint8_t Y2, Cb2, Cr2;
+                    int nx = (x + 1 < mp->cols) ? x + 1 : x;
+                    rgb_to_ycbcr(rgb[nx*3], rgb[nx*3+1], rgb[nx*3+2], &Y2, &Cb2, &Cr2);
+                    cb_ch[x/2] = (uint8_t)((Cb + Cb2) / 2);
+                    cr_ch[x/2] = (uint8_t)((Cr + Cr2) / 2);
+                }
+            }
+            bool is_even = (img_row % 2 == 0);
+            tx_ycbcr_line(ctx->tg, mp, y_ch, cb_ch, cr_ch, is_even);
+        } else {
+            /* RGB modes (Martin, Scottie) */
+            uint8_t r_ch[320], g_ch[320], b_ch[320];
+            for (int x = 0; x < mp->cols; x++) {
+                r_ch[x] = rgb[x*3+0];
+                g_ch[x] = rgb[x*3+1];
+                b_ch[x] = rgb[x*3+2];
+            }
+            tx_rgb_line(ctx->tg, mp, r_ch, g_ch, b_ch);
+        }
+        ctx->lines_done++;
+        if (ctx->lines_done % 32 == 0)
+            ESP_LOGI(TAG, "SSTV line %d/%d", ctx->lines_done, mp->rows);
+    }
 }
 
 static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
@@ -352,50 +408,19 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
         memcpy(dst, src, bw * 3);
     }
 
-    /* When the rightmost MCU of this row band arrives, all rows are complete. */
-    if ((int)rect->right + 1 == img_w) {
-        int band_top    = (int)rect->top;
-        int band_bottom = (int)rect->bottom;
-        const SstvModeParams *mp = ctx->mp;
+    /* Flush the previous row band once TJpgDec moves on to a new one, instead
+     * of comparing rect->right to img_w (mp->cols): that comparison assumed
+     * every uploaded JPEG is pre-resized to exactly the SSTV mode's width, so
+     * a narrower image (rect->right never reaching mp->cols-1) meant this
+     * never fired and the whole image silently transmitted zero lines. The
+     * very last band has no "next" band to trigger this — the caller flushes
+     * it once more after jd_decomp() returns, using the same band_valid flag. */
+    if (ctx->band_valid && (int)rect->top != ctx->band_top)
+        flush_band(ctx, ctx->band_top, ctx->band_bottom);
 
-        for (int img_row = band_top; img_row <= band_bottom; img_row++) {
-            if (img_row >= mp->rows) break;  /* don't transmit past image height */
-
-            int rel_row = img_row % JPEG_ROW_BUF_HEIGHT;
-            const uint8_t *rgb = ctx->row_buf[rel_row];
-
-            if (mp->is_ycbcr) {
-                /* Robot modes */
-                uint8_t y_ch[320], cb_ch[160], cr_ch[160];
-                for (int x = 0; x < mp->cols; x++) {
-                    uint8_t Y, Cb, Cr;
-                    rgb_to_ycbcr(rgb[x*3], rgb[x*3+1], rgb[x*3+2], &Y, &Cb, &Cr);
-                    y_ch[x] = Y;
-                    if (x % 2 == 0) {
-                        uint8_t Y2, Cb2, Cr2;
-                        int nx = (x + 1 < mp->cols) ? x + 1 : x;
-                        rgb_to_ycbcr(rgb[nx*3], rgb[nx*3+1], rgb[nx*3+2], &Y2, &Cb2, &Cr2);
-                        cb_ch[x/2] = (uint8_t)((Cb + Cb2) / 2);
-                        cr_ch[x/2] = (uint8_t)((Cr + Cr2) / 2);
-                    }
-                }
-                bool is_even = (img_row % 2 == 0);
-                tx_ycbcr_line(ctx->tg, mp, y_ch, cb_ch, cr_ch, is_even);
-            } else {
-                /* RGB modes (Martin, Scottie) */
-                uint8_t r_ch[320], g_ch[320], b_ch[320];
-                for (int x = 0; x < mp->cols; x++) {
-                    r_ch[x] = rgb[x*3+0];
-                    g_ch[x] = rgb[x*3+1];
-                    b_ch[x] = rgb[x*3+2];
-                }
-                tx_rgb_line(ctx->tg, mp, r_ch, g_ch, b_ch);
-            }
-            ctx->lines_done++;
-            if (ctx->lines_done % 32 == 0)
-                ESP_LOGI(TAG, "SSTV line %d/%d", ctx->lines_done, mp->rows);
-        }
-    }
+    ctx->band_top    = (int)rect->top;
+    ctx->band_bottom = (int)rect->bottom;
+    ctx->band_valid  = true;
     return 1;
 }
 
@@ -563,6 +588,13 @@ void sstv_transmit(const SstvRequest *req) {
 
     /* Scale 0 = no scaling (output at full resolution). */
     rc = jd_decomp(&s_jdec, jpeg_output_cb, 0);
+    /* The last row band never sees a "next" band to trigger its flush inside
+     * jpeg_output_cb (see comment there) — flush it here once decoding is
+     * done, unless the decode was aborted/errored with nothing pending. */
+    if (jctx->band_valid && !jctx->error) {
+        flush_band(jctx, jctx->band_top, jctx->band_bottom);
+        jctx->band_valid = false;
+    }
     ESP_LOGI(TAG, "jd_decomp rc=%d, lines_done=%d", (int)rc, jctx->lines_done);
     if (rc != JDR_OK && rc != JDR_INTR) {
         ESP_LOGE(TAG, "jd_decomp error: rc=%d", (int)rc);
@@ -849,6 +881,14 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                         if (!isalnum((unsigned char)*p) &&
                             *p != '-' && *p != '_' && *p != '.')
                             *p = '_';
+                    }
+                    /* Truncate to what SPIFFS can actually store (see
+                     * SSTV_MAX_NAME_LEN), leaving room for a ".jpg" we might
+                     * still append below if there's no extension yet. */
+                    {
+                        bool has_ext = strrchr(img_name, '.') != NULL;
+                        int max_len = has_ext ? SSTV_MAX_NAME_LEN : SSTV_MAX_NAME_LEN - 4;
+                        if ((int)strlen(img_name) > max_len) img_name[max_len] = '\0';
                     }
                     /* Force .jpg extension */
                     char *dot = strrchr(img_name, '.');

@@ -47,6 +47,13 @@ static void cmd_tx_sstv(const char *src_call, int src_ssid,
         APRS_queue_msg(src_call, src_ssid, "ERR:tx,sstv needs filename");
         return;
     }
+    // Same check as the HTTP upload/list handlers (sstv.c) — SPIFFS is a flat
+    // namespace today so this is defense in depth, but a name coming in over
+    // RF should never be trusted more than one coming over HTTP.
+    if (strchr(fname, '/') || strchr(fname, '\\') || strstr(fname, "..")) {
+        APRS_queue_msg(src_call, src_ssid, "ERR:invalid filename");
+        return;
+    }
     if (!s_sstv_queue) {
         APRS_queue_msg(src_call, src_ssid, "ERR:SSTV not init");
         return;
@@ -121,28 +128,22 @@ typedef struct {
     int  count;
 } ListArgs;
 
-static void list_reply_task(void *arg) {
+// Runs the SPIFFS directory scan itself, not just the reply pacing —
+// opendir()/readdir() are blocking flash I/O and used to run synchronously
+// inside cmd_rx_sstv_list(), called directly from remote_cmd_handle() on
+// aprs_poll_task. If the scan was slow, it delayed draining rxFifo for the
+// next already-decoded frame, risking overflow/loss of HDLC bytes arriving
+// from receive_audio_task in the meantime. Moving the scan into this
+// low-priority one-shot task keeps aprs_poll_task's RX path non-blocking.
+static void list_scan_and_reply_task(void *arg) {
     ListArgs *a = (ListArgs *)arg;
-    for (int i = 0; i < a->count; i++) {
-        APRS_queue_msg(a->src_call, a->src_ssid, a->files[i]);
-        if (i < a->count - 1)
-            vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-    free(a);
-    vTaskDelete(NULL);
-}
 
-static void cmd_rx_sstv_list(const char *src_call, int src_ssid) {
     DIR *dir = opendir(SSTV_DIR);
     if (!dir) {
-        APRS_queue_msg(src_call, src_ssid, "SSTV:no files");
-        return;
+        APRS_queue_msg(a->src_call, a->src_ssid, "SSTV:no files");
+        free(a);
+        vTaskDelete(NULL);
     }
-
-    ListArgs *a = calloc(1, sizeof(ListArgs));
-    if (!a) { closedir(dir); return; }
-    strncpy(a->src_call, src_call, sizeof(a->src_call) - 1);
-    a->src_ssid = src_ssid;
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL && a->count < LIST_MAX_FILES) {
@@ -158,13 +159,27 @@ static void cmd_rx_sstv_list(const char *src_call, int src_ssid) {
     closedir(dir);
 
     if (a->count == 0) {
-        APRS_queue_msg(src_call, src_ssid, "SSTV:no files");
+        APRS_queue_msg(a->src_call, a->src_ssid, "SSTV:no files");
         free(a);
-        return;
+        vTaskDelete(NULL);
     }
 
-    // Low-priority one-shot task sends messages with 5-second gaps
-    if (xTaskCreate(list_reply_task, "sstv_list_rply", 3072, a, 2, NULL) != pdPASS) {
+    for (int i = 0; i < a->count; i++) {
+        APRS_queue_msg(a->src_call, a->src_ssid, a->files[i]);
+        if (i < a->count - 1)
+            vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+    free(a);
+    vTaskDelete(NULL);
+}
+
+static void cmd_rx_sstv_list(const char *src_call, int src_ssid) {
+    ListArgs *a = calloc(1, sizeof(ListArgs));
+    if (!a) return;
+    strncpy(a->src_call, src_call, sizeof(a->src_call) - 1);
+    a->src_ssid = src_ssid;
+
+    if (xTaskCreate(list_scan_and_reply_task, "sstv_list_rply", 3072, a, 2, NULL) != pdPASS) {
         APRS_queue_msg(src_call, src_ssid, "ERR:task alloc");
         free(a);
     }

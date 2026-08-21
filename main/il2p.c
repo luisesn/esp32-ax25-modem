@@ -390,9 +390,20 @@ static void rx_payload_byte(il2p_rx_t *rx, uint8_t b)
     if (rx->block_idx >= rx->blocks_total) {
         /* All blocks decoded — append payload to AX.25 frame */
         int remaining = (int)sizeof(rx->ax25_frame) - rx->ax25_len;
-        copy = (rx->payload_written < remaining) ? rx->payload_written : remaining;
-        memcpy(rx->ax25_frame + rx->ax25_len, rx->payload_buf, (size_t)copy);
-        rx->ax25_len  += copy;
+        if (rx->payload_written > remaining) {
+            /* IL2P_MAX_PAYLOAD (1023) is larger than AX25_MAX_FRAME_LEN once
+             * the built header (addresses+ctrl+pid) is added in, so this is
+             * reachable with a large enough decoded payload_len. Silently
+             * copying only `remaining` bytes used to hand callers
+             * (kiss_send_frame / ax25ip_rx_frame) a truncated-but-otherwise-
+             * valid-looking frame; drop it instead. */
+            ESP_LOGW(TAG, "IL2P frame too large for AX25 buffer (hdr=%d + payload=%d > %d) — dropping",
+                     rx->ax25_len, rx->payload_written, (int)sizeof(rx->ax25_frame));
+            rx_reset(rx);
+            return;
+        }
+        memcpy(rx->ax25_frame + rx->ax25_len, rx->payload_buf, (size_t)rx->payload_written);
+        rx->ax25_len  += rx->payload_written;
         rx->frame_ready = true;
         rx->state       = IL2P_HUNT;
         return;
@@ -538,8 +549,13 @@ void il2p_poll(void)
 
 /* ─── TX ─────────────────────────────────────────────────────────────────── */
 
-/* Max IL2P frame: preamble(16) + sync(3) + header(15) + payload_blocks(4×255) = ~1054 */
-#define IL2P_TX_MAX (16 + 3 + IL2P_HEADER_BYTES + (4 * IL2P_BLOCK_TOTAL) + 32)
+/* Max IL2P frame: preamble(16) + sync(3) + header(16) + payload blocks.
+ * IL2P_MAX_PAYLOAD=1023 needs ceil(1023/239)=5 blocks, not 4 — a payload_len
+ * of 957-1023 used to silently lose its last block because this buffer was
+ * one block short (masked today only because AX25_MAX_FRAME_LEN=600 keeps
+ * actual payloads well under that threshold). */
+#define IL2P_TX_NBLOCKS ((IL2P_MAX_PAYLOAD + IL2P_BLOCK_DATA - 1) / IL2P_BLOCK_DATA)
+#define IL2P_TX_MAX (16 + 3 + IL2P_HEADER_BYTES + (IL2P_TX_NBLOCKS * IL2P_BLOCK_TOTAL) + 32)
 
 void il2p_tx_frame(const uint8_t *ax25_raw, size_t len)
 {
@@ -598,19 +614,29 @@ void il2p_tx_frame(const uint8_t *ax25_raw, size_t len)
         uint8_t parity[IL2P_RS_NROOTS];
         rs8_encode(payload_ptr, block_data, parity);
 
+        /* IL2P_TX_MAX is sized for the worst case (IL2P_TX_NBLOCKS blocks), so
+         * this should never trip; bail loudly instead of silently truncating
+         * the frame if it ever does (e.g. AX25_MAX_FRAME_LEN raised later
+         * without revisiting this sizing). */
+        if (out_idx + block_data + IL2P_RS_NROOTS > IL2P_TX_MAX) {
+            ESP_LOGE(TAG, "il2p_tx: outbuf too small (idx=%d, need %d, max=%d) — aborting",
+                     out_idx, block_data + IL2P_RS_NROOTS, IL2P_TX_MAX);
+            return;
+        }
+
         /* Scramble data bytes */
         for (int i = 0; i < block_data; i++) {
             uint8_t b = payload_ptr[i], sb = 0;
             for (int bit = 7; bit >= 0; bit--)
                 sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-            if (out_idx < IL2P_TX_MAX) outbuf[out_idx++] = sb;
+            outbuf[out_idx++] = sb;
         }
         /* Scramble parity bytes */
         for (int i = 0; i < IL2P_RS_NROOTS; i++) {
             uint8_t b = parity[i], sb = 0;
             for (int bit = 7; bit >= 0; bit--)
                 sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-            if (out_idx < IL2P_TX_MAX) outbuf[out_idx++] = sb;
+            outbuf[out_idx++] = sb;
         }
 
         payload_ptr  += block_data;

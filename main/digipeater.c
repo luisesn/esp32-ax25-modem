@@ -249,38 +249,53 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
         char rpt_call[8]; int rpt_ssid; bool rpt_h, rpt_last;
         addr_read(p, rpt_call, &rpt_ssid, &rpt_h, &rpt_last);
 
-        if (!rpt_h) {
-            for (int ai = 0; ai < cfg_count; ai++) {
-                if (!call_eq(rpt_call, cfg_aliases[ai].call)) continue;
-                if (rpt_ssid != cfg_aliases[ai].ssid) continue;
-
-                int new_ssid = rpt_ssid - 1;
-
-                if (len + 7 > AX25_MAX_FRAME_LEN) break;   // no room
-
-                memmove(p + 7, p, (size_t)(end - p));
-                len += 7;
-                end += 7;
-
-                addr_write(p, cfg_call, cfg_ssid, /*last=*/false, /*h=*/true);
-                p += 7;
-
-                addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
-
-                char src_call[8]; int src_ssid; bool src_h, src_last;
-                addr_read(&frame[7], src_call, &src_ssid, &src_h, &src_last);
-                ESP_LOGI(TAG, "%s-%d digipeated via alias %s-%d → %s-%d (len=%u)",
-                         src_call, src_ssid,
-                         cfg_aliases[ai].call, cfg_aliases[ai].ssid,
-                         cfg_call, cfg_ssid, (unsigned)len);
-                did_digi = true;
-                break;
-            }
+        if (rpt_h) {
+            // Already repeated by someone else — skip past it to find the
+            // first still-unused hop, which is the only one we may act on.
+            cur_last = rpt_last;
+            p += 7;
+            continue;
         }
 
-        if (did_digi) break;
-        cur_last = rpt_last;
-        p += 7;
+        // p is now the first unused (H=0) address in the path. AX.25
+        // digipeating requires acting only on this entry: matching one of
+        // our aliases further down the path instead (the old behaviour,
+        // which kept scanning here on a miss) would digipeat via a later
+        // alias while leaving this earlier, unclaimed hop untouched —
+        // corrupting the WIDEn-N path order.
+        for (int ai = 0; ai < cfg_count; ai++) {
+            if (!call_eq(rpt_call, cfg_aliases[ai].call)) continue;
+            if (rpt_ssid != cfg_aliases[ai].ssid) continue;
+
+            // rpt_ssid==0 (e.g. an alias configured as "WIDE0-0") has nothing
+            // left to decrement; clamp instead of going negative — otherwise
+            // new_ssid==-1 wraps to 15 when addr_write() packs it, and the
+            // h==(new_ssid==0) check below stays false, leaving the entry
+            // marked "unused" so it (or a later digipeater) could act on it
+            // again.
+            int new_ssid = (rpt_ssid > 0) ? rpt_ssid - 1 : 0;
+
+            if (len + 7 > AX25_MAX_FRAME_LEN) break;   // no room
+
+            memmove(p + 7, p, (size_t)(end - p));
+            len += 7;
+            end += 7;
+
+            addr_write(p, cfg_call, cfg_ssid, /*last=*/false, /*h=*/true);
+            p += 7;
+
+            addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
+
+            char src_call[8]; int src_ssid; bool src_h, src_last;
+            addr_read(&frame[7], src_call, &src_ssid, &src_h, &src_last);
+            ESP_LOGI(TAG, "%s-%d digipeated via alias %s-%d → %s-%d (len=%u)",
+                     src_call, src_ssid,
+                     cfg_aliases[ai].call, cfg_aliases[ai].ssid,
+                     cfg_call, cfg_ssid, (unsigned)len);
+            did_digi = true;
+            break;
+        }
+        break;   // matched or not, the first unused hop is the only one we consider
     }
 
     if (did_digi)

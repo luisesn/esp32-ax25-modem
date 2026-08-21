@@ -6,6 +6,7 @@
 
 // lwIP
 #include "lwip/netif.h"
+#include "lwip/netifapi.h"
 #include "lwip/tcpip.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip4_addr.h"
@@ -282,14 +283,17 @@ bool ax25ip_init(cJSON *cfg)
         s_mtu = (uint16_t)m;
     }
 
-    // Add netif under lwIP core lock (lwIP already running via WiFi stack).
-    LOCK_TCPIP_CORE();
-    struct netif *r = netif_add(&s_netif, &addr, &mask, &gw,
-                                NULL, ax25ip_netif_init, tcpip_input);
-    UNLOCK_TCPIP_CORE();
-
-    if (!r) {
-        ESP_LOGE(TAG, "netif_add failed");
+    // netifapi_netif_add() marshals onto the tcpip thread (or takes the core
+    // lock, if enabled) to add the netif — needed because this project
+    // builds with CONFIG_LWIP_TCPIP_CORE_LOCKING disabled, which makes the
+    // LOCK_TCPIP_CORE()/UNLOCK_TCPIP_CORE() macros this used to call
+    // no-ops. Calling netif_add() directly from this task (not the tcpip
+    // thread) would then race the tcpip thread's own netif_list traversal
+    // during packet RX on the WiFi netif that's already up.
+    err_t netif_err = netifapi_netif_add(&s_netif, &addr, &mask, &gw,
+                                          NULL, ax25ip_netif_init, tcpip_input);
+    if (netif_err != ERR_OK) {
+        ESP_LOGE(TAG, "netif_add failed: %d", (int)netif_err);
         return false;
     }
 

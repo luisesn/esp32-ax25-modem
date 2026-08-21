@@ -4,12 +4,19 @@
 #include <sys/unistd.h>
 #include <sys/stat.h>
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 #include "cJSON.h"
 #include "aux_config.h"
 #include "aux_file_management.h"
 
 static const char *TAG = "Config";
 static cJSON *root = NULL;
+// Protects `root` against config_reload() (POST /api/config, on an httpd
+// worker task) freeing/replacing it while another task is mid-cJSON_Duplicate
+// in config_get()/config_load(). cJSON_Duplicate is pure memory copying (no
+// I/O, bounded by config.json's size), so a short spinlock is appropriate —
+// unlike e.g. the repeater's TX playback, this never blocks while held.
+static portMUX_TYPE s_config_lock = portMUX_INITIALIZER_UNLOCKED;
 
 // Internal function to load config from file
 static cJSON *config_load_from_file() {
@@ -54,37 +61,69 @@ static cJSON *config_load_from_file() {
     return parsed_root;
 }
 
+// Returns a deep copy, consistent with config_load()/config_reload() — the
+// caller must free it with config_free_json()/cJSON_Delete(). config_get()
+// used to hand back the shared `root` pointer directly, which any concurrent
+// config_reload() (triggered by POST /api/config from another task) could
+// free out from under a caller still reading it. A lazy-init caller such as
+// aprs_poll_v2() in LibAPRS.cpp can run this arbitrarily long after boot.
 cJSON *config_get() {
-    return root;
+    taskENTER_CRITICAL(&s_config_lock);
+    cJSON *dup = root ? cJSON_Duplicate(root, 1) : NULL;
+    taskEXIT_CRITICAL(&s_config_lock);
+    return dup;
 }
 
 cJSON *config_load() {
+    taskENTER_CRITICAL(&s_config_lock);
     if (root != NULL) {
         ESP_LOGD(TAG, "Config already loaded, returning cached version");
-        return cJSON_Duplicate(root, 1); // Return a deep copy
+        cJSON *dup = cJSON_Duplicate(root, 1); // Return a deep copy
+        taskEXIT_CRITICAL(&s_config_lock);
+        return dup;
     }
+    taskEXIT_CRITICAL(&s_config_lock);
 
-    root = config_load_from_file();
-    if (root != NULL) {
-        return cJSON_Duplicate(root, 1); // Return a deep copy
+    // File I/O must happen outside the critical section.
+    cJSON *loaded = config_load_from_file();
+
+    taskENTER_CRITICAL(&s_config_lock);
+    if (root == NULL) {
+        root = loaded;
+        loaded = NULL;
     }
-    return NULL;
+    cJSON *dup = root ? cJSON_Duplicate(root, 1) : NULL;
+    taskEXIT_CRITICAL(&s_config_lock);
+
+    if (loaded != NULL) {
+        // Lost the race to another concurrent config_load() — discard.
+        cJSON_Delete(loaded);
+    }
+    return dup;
 }
 
 cJSON *config_reload() {
     ESP_LOGI(TAG, "Reloading config...");
 
-    // Free existing config if it exists
-    if (root != NULL) {
-        cJSON_Delete(root);
-        root = NULL;
+    // File I/O must happen outside the critical section.
+    cJSON *fresh = config_load_from_file();
+    if (fresh == NULL) {
+        ESP_LOGE(TAG, "Reload failed, keeping previous config");
+        return config_get();
     }
 
-    // Load fresh config
-    root = config_load_from_file();
+    taskENTER_CRITICAL(&s_config_lock);
+    cJSON *old = root;
+    root = fresh;
+    cJSON *dup = cJSON_Duplicate(root, 1);
+    taskEXIT_CRITICAL(&s_config_lock);
+
+    if (old != NULL) {
+        cJSON_Delete(old);
+    }
     // Return a duplicate, consistent with config_load(), so callers can safely
     // pass the result to init functions without risk of freeing the internal root.
-    return root ? cJSON_Duplicate(root, 1) : NULL;
+    return dup;
 }
 
 void config_free_json(cJSON *config) {

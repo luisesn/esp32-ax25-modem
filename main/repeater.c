@@ -57,6 +57,16 @@ static uint32_t   s_courtesy_hz   = 1000;
 static uint32_t   s_courtesy_ms   = 200;
 static bool       s_cw_id         = true;
 
+// repeater_set_enabled(false) can be called from the httpd task (POST
+// /api/repeater/enable) while repeater_audio_hook()/repeater_dispatch_if_pending()
+// run on receive_audio_task and hold s_buf for as long as a recording or an
+// entire TX playback (up to several seconds). Freeing s_buf directly from the
+// httpd task while receive_audio_task might be mid-use of it on the other core
+// is a use-after-free, so a disable request just sets this flag; the actual
+// free happens in repeater_service_disable(), called only from
+// receive_audio_task, and only once it is safe (not RECORDING/TAIL/TX).
+static volatile bool s_disable_requested = false;
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 static void send_ws_state(const char *state_str)
@@ -139,6 +149,11 @@ void repeater_set_enabled(bool en)
     }
 #endif
     if (en) {
+        // Cancel any not-yet-applied disable so repeater_service_disable()
+        // (running on receive_audio_task) doesn't free the buffer out from
+        // under us right after we just decided to keep it.
+        s_disable_requested = false;
+
         if (!s_configured) {
             ESP_LOGW(TAG, "can't enable: no repeater section in config.json");
             return;
@@ -175,20 +190,44 @@ void repeater_set_enabled(bool en)
             ESP_LOGI(TAG, "buffer allocated: %u B (%.1f s), heap after=%u B",
                      s_buf_len, secs, (unsigned)esp_get_free_heap_size());
         }
+        s_enabled = true;
+        squelch_sf_set_repeater_active(true);
+        afsk_pause_rx(true);
+        ESP_LOGI(TAG, "enabled — RX decoding paused");
     } else {
-        s_state = REPEATER_STATE_IDLE;
-        s_rec_blocks = 0;
-        s_stage_pos  = 0;
-        s_lockout_until = 0;
-        s_min_rec_until = 0;
-        free(s_buf);
-        s_buf = NULL;
+        // Don't touch s_buf/s_enabled here — see repeater_service_disable().
+        s_disable_requested = true;
     }
-    s_enabled = en;
-    squelch_sf_set_repeater_active(en);
-    afsk_pause_rx(en);
-    ESP_LOGI(TAG, "%s — RX decoding %s", en ? "enabled" : "disabled, buffer freed",
-             en ? "paused" : "resumed");
+}
+
+// Applies a pending repeater_set_enabled(false) request. Called only from
+// receive_audio_task (top of repeater_dispatch_if_pending), which is the same
+// task that reads/writes s_buf everywhere else, so this needs no locking: as
+// long as the free only ever happens here, it can never race a concurrent use
+// of s_buf on the other core. Deferred until the buffer is not in use — mid
+// RECORDING/TAIL it would truncate data that's still being written, and mid
+// TX it would free the buffer repeater_dispatch_if_pending() is reading from.
+static void repeater_service_disable(void)
+{
+    if (!s_disable_requested) return;
+    if (s_state == REPEATER_STATE_RECORDING || s_state == REPEATER_STATE_TAIL ||
+        s_state == REPEATER_STATE_TX) {
+        return;
+    }
+    s_disable_requested = false;
+    if (!s_enabled) return;
+
+    s_enabled = false;
+    s_state = REPEATER_STATE_IDLE;
+    s_rec_blocks = 0;
+    s_stage_pos  = 0;
+    s_lockout_until = 0;
+    s_min_rec_until = 0;
+    free(s_buf);
+    s_buf = NULL;
+    squelch_sf_set_repeater_active(false);
+    afsk_pause_rx(false);
+    ESP_LOGI(TAG, "disabled, buffer freed — RX decoding resumed");
 }
 
 repeater_state_t repeater_get_state(void)  { return s_state; }
@@ -280,6 +319,7 @@ void repeater_audio_hook(int8_t sample)
 
 void repeater_dispatch_if_pending(void)
 {
+    repeater_service_disable();
     if (s_state != REPEATER_STATE_PENDING) return;
 
     // Safety guard: don't TX while emitter is still active.

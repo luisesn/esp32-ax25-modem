@@ -94,6 +94,7 @@ static void cmd_config(int fd)
         return;
     }
     char *js = cJSON_PrintUnformatted(cfg);
+    config_free_json(cfg);
     if (!js) {
         static const char *err = "error: cJSON_Print failed\r\n";
         send(fd, err, strlen(err), MSG_NOSIGNAL);

@@ -25,6 +25,11 @@
 
 #define TAG "audio_stream"
 
+// Must stay >= cfg.max_open_sockets below: httpd_get_client_list() only fills
+// as many fds as this array can hold, so a smaller array silently hides
+// clients past the cutoff from the WS broadcast loops (audio + JSON events).
+#define AUDIO_STREAM_MAX_CLIENT_FDS 3
+
 QueueHandle_t audio_stream_q = NULL;
 
 // ─── RAM log buffer (last s_log_max entries of persistent WS messages) ────────
@@ -181,8 +186,15 @@ static void build_wav_header(uint8_t *buf) {
 
 static httpd_handle_t s_httpd          = NULL;
 static QueueHandle_t  s_wav_q          = NULL; // blocks for WAV TCP client
+// Guards all reads/writes of s_wav_q across tasks. Copying the handle to a
+// local before use (as audio_stream_task did) is not enough: the copy can
+// still be read right before wav_server_task/audio_stream_stop_wav_server()
+// calls vQueueDelete() on the same handle, leaving audio_stream_task about to
+// send into freed memory. Both sides must serialize on this mutex instead.
+static SemaphoreHandle_t s_wav_q_mutex = NULL;
 static TaskHandle_t   s_wav_task_hdl   = NULL;
 static volatile int   s_wav_srv_fd     = -1;
+static volatile int   s_wav_client_fd  = -1; // fd of the connected WAV client, if any
 
 httpd_handle_t audio_stream_get_httpd(void) { return s_httpd; }
 
@@ -345,7 +357,7 @@ static bool ws_try_send(int fd, httpd_ws_frame_t *pkt) {
 static void audio_stream_task(void *arg) {
     adpcm_state_t state = { .predictor = 0, .step_index = 0 };
     int sample_count = 0;
-    int client_fds[5];
+    int client_fds[AUDIO_STREAM_MAX_CLIENT_FDS];
 
     for (;;) {
         int8_t sample;
@@ -390,10 +402,14 @@ static void audio_stream_task(void *arg) {
         }
 
         // Encolar para el cliente WAV TCP si está activo (lossy).
-        // Copy handle to local: 32-bit aligned read is atomic on Xtensa, preventing
-        // a race with audio_stream_stop_wav_server deleting the queue between check and use.
-        QueueHandle_t wav_q = s_wav_q;
-        if (wav_q) xQueueSendToBack(wav_q, s_adpcm_block, 0);
+        // s_wav_q_mutex serializes against wav_server_task/audio_stream_stop_wav_server
+        // deleting the queue; timeout 0 keeps this from ever blocking the audio
+        // pipeline — worst case this block is dropped, which the WAV stream
+        // already tolerates.
+        if (xSemaphoreTake(s_wav_q_mutex, 0) == pdTRUE) {
+            if (s_wav_q) xQueueSendToBack(s_wav_q, s_adpcm_block, 0);
+            xSemaphoreGive(s_wav_q_mutex);
+        }
     }
 }
 
@@ -435,18 +451,42 @@ static esp_err_t me_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Reads the whole request body into buf (capacity buf_cap, NUL-terminated on
+// success). A single httpd_req_recv() call only reads up to its own buffer
+// size — if content_len is bigger, the rest is left unread on the socket and
+// httpd misreads it as the start of the next request on a keep-alive
+// connection. Sends an HTTP error and returns -1 on failure/oversized body.
+static int recv_full_body(httpd_req_t *req, char *buf, size_t buf_cap) {
+    int remaining = req->content_len > 0 ? (int)req->content_len : (int)buf_cap - 1;
+    if (remaining > (int)buf_cap - 1) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return -1;
+    }
+    int total = 0, timeouts = 0;
+    while (total < remaining) {
+        int ret = httpd_req_recv(req, buf + total, (size_t)(remaining - total));
+        if (ret <= 0) {
+            // A client that keeps stalling could otherwise retry here forever,
+            // tying up an httpd worker indefinitely.
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 5) continue;
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
+            return -1;
+        }
+        timeouts = 0;
+        total += ret;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
 // POST /api/aprs/send
 // Body JSON: {"to":"NO0CAL","ssid":0,"text":"Hello"}
 // Encodes and queues an APRS message frame via afsk_queue_tx_frame (safe from
 // any task; dispatched by receive_audio_task). Works in both KISS TNC and APRS mode.
 static esp_err_t aprs_send_handler(httpd_req_t *req) {
     char body[256];
-    int len = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
-        return ESP_FAIL;
-    }
-    body[len] = '\0';
+    int len = recv_full_body(req, body, sizeof(body));
+    if (len <= 0) return ESP_FAIL;
 
     cJSON *root = cJSON_Parse(body);
     if (!root) {
@@ -484,12 +524,8 @@ static esp_err_t aprs_send_handler(httpd_req_t *req) {
 // Converts decimal coordinates to APRS uncompressed position and queues for TX.
 static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
     char body[256];
-    int len = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
-        return ESP_FAIL;
-    }
-    body[len] = '\0';
+    int len = recv_full_body(req, body, sizeof(body));
+    if (len <= 0) return ESP_FAIL;
 
     cJSON *root = cJSON_Parse(body);
     if (!root) {
@@ -574,6 +610,14 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (fsz < 0) {
+        // ftell() failure used to fall through as (size_t)-1 + 1 == 0 into
+        // malloc(0), followed by fread(buf, 1, (size_t)-1, f) — a huge read
+        // into a near-zero-size buffer.
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ftell failed");
+        return ESP_FAIL;
+    }
     char *buf = malloc((size_t)fsz + 1);
     if (!buf) { fclose(f); httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM"); return ESP_FAIL; }
     size_t rd = fread(buf, 1, (size_t)fsz, f); fclose(f); buf[rd] = '\0';
@@ -595,13 +639,17 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
         return ESP_FAIL;
     }
+    int timeouts = 0;
     while (total < remaining) {
         ret = httpd_req_recv(req, body + total, (size_t)(remaining - total));
         if (ret <= 0) {
-            if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            // A client that keeps stalling could otherwise retry here forever,
+            // tying up an httpd worker indefinitely.
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 5) continue;
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
             return ESP_FAIL;
         }
+        timeouts = 0;
         total += ret;
     }
     body[total] = '\0';
@@ -750,6 +798,7 @@ static void wav_server_task(void *arg) {
         socklen_t clen = sizeof(client);
         int fd = accept(srv, (struct sockaddr *)&client, &clen);
         if (fd < 0) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+        s_wav_client_fd = fd;
         ESP_LOGI(TAG, "Cliente WAV conectado");
 
         // Leer la petición HTTP (ignoramos el contenido, asumimos GET /audio)
@@ -772,11 +821,14 @@ static void wav_server_task(void *arg) {
         send(fd, wav_hdr, WAV_HEADER_LEN, 0);
 
         // Crear cola de bloques para esta sesión
-        s_wav_q = xQueueCreate(8, ADPCM_BLOCK_BYTES);
+        QueueHandle_t q = xQueueCreate(8, ADPCM_BLOCK_BYTES);
+        xSemaphoreTake(s_wav_q_mutex, portMAX_DELAY);
+        s_wav_q = q;
+        xSemaphoreGive(s_wav_q_mutex);
 
         uint8_t block[ADPCM_BLOCK_BYTES];
         while (1) {
-            if (xQueueReceive(s_wav_q, block, pdMS_TO_TICKS(500)) != pdTRUE) {
+            if (xQueueReceive(q, block, pdMS_TO_TICKS(500)) != pdTRUE) {
                 // Timeout: comprobar si el socket sigue vivo
                 if (send(fd, NULL, 0, MSG_NOSIGNAL) < 0) break;
                 continue;
@@ -785,8 +837,11 @@ static void wav_server_task(void *arg) {
         }
 
         ESP_LOGI(TAG, "Cliente WAV desconectado");
-        vQueueDelete(s_wav_q);
+        xSemaphoreTake(s_wav_q_mutex, portMAX_DELAY);
         s_wav_q = NULL;
+        xSemaphoreGive(s_wav_q_mutex);
+        vQueueDelete(q);
+        s_wav_client_fd = -1;
         close(fd);
     }
 }
@@ -921,7 +976,7 @@ void audio_stream_ws_send_text(const char *text) {
         .payload    = (uint8_t *)send_str,
         .len        = strlen(send_str),
     };
-    int    client_fds[5];
+    int    client_fds[AUDIO_STREAM_MAX_CLIENT_FDS];
     size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
     if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
         // Igual que el audio: nunca esperar por un cliente que no drena. Los
@@ -995,11 +1050,20 @@ static esp_err_t spiffs_upload_handler(httpd_req_t *req)
     static char buf[1024];
     int received = 0;
     bool ok = true;
+    int timeouts = 0;
     while (received < total) {
         int want = total - received;
         if (want > (int)sizeof(buf)) want = (int)sizeof(buf);
         int got = httpd_req_recv(req, buf, (size_t)want);
-        if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            // A client that keeps stalling could otherwise retry here forever,
+            // tying up an httpd worker indefinitely.
+            if (++timeouts <= 5) continue;
+            ESP_LOGE(TAG, "spiffs_upload: too many recv timeouts at %d/%d", received, total);
+            ok = false;
+            break;
+        }
+        timeouts = 0;
         if (got <= 0) {
             ESP_LOGE(TAG, "spiffs_upload: recv error at %d/%d (ret=%d)", received, total, got);
             ok = false;
@@ -1062,11 +1126,8 @@ static esp_err_t repeater_status_handler(httpd_req_t *req)
 static esp_err_t repeater_enable_handler(httpd_req_t *req)
 {
     char body[64] = {0};
-    int got = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (got <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body");
-        return ESP_FAIL;
-    }
+    int got = recv_full_body(req, body, sizeof(body));
+    if (got <= 0) return ESP_FAIL;
     cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
     if (!j) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
@@ -1091,8 +1152,8 @@ static esp_err_t repeater_enable_handler(httpd_req_t *req)
 static esp_err_t squelch_sf_config_handler(httpd_req_t *req)
 {
     char body[64] = {0};
-    int got = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    int got = recv_full_body(req, body, sizeof(body));
+    if (got <= 0) return ESP_FAIL;
     cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
     if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
 
@@ -1131,8 +1192,8 @@ static esp_err_t squelch_status_handler(httpd_req_t *req)
 static esp_err_t squelch_monitor_handler(httpd_req_t *req)
 {
     char body[32] = {0};
-    int got = httpd_req_recv(req, body, sizeof(body) - 1);
-    if (got <= 0) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body"); return ESP_FAIL; }
+    int got = recv_full_body(req, body, sizeof(body));
+    if (got <= 0) return ESP_FAIL;
     cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
     if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
     cJSON *en = cJSON_GetObjectItem(j, "active");
@@ -1160,14 +1221,30 @@ void audio_stream_stop_wav_server(void)
     s_wav_srv_fd = -1;
     if (fd >= 0) close(fd);
 
-    // Drop the per-session queue if a client was connected.
-    if (s_wav_q) {
-        vQueueDelete(s_wav_q);
-        s_wav_q = NULL;
-    }
+    // Close the connected client's socket too, if any — without this, forcibly
+    // deleting the task below (which may be blocked in send()/recv() on this fd,
+    // or simply never reaches its own close(fd) at the bottom of the loop) leaks
+    // the socket. lwIP has a small fixed socket pool, so repeated mode toggles
+    // would eventually exhaust it.
+    int cfd = s_wav_client_fd;
+    s_wav_client_fd = -1;
+    if (cfd >= 0) close(cfd);
 
+    // Delete the task BEFORE touching s_wav_q: it may be blocked inside
+    // xQueueReceive(s_wav_q, ...), and deleting a queue a task is still
+    // waiting on is unsafe. vTaskDelete() removes the task from the queue's
+    // wait list as part of teardown, so it's safe to free the queue after.
     vTaskDelete(s_wav_task_hdl);
     s_wav_task_hdl = NULL;
+
+    // audio_stream_task may still be sending into s_wav_q concurrently — take
+    // the mutex before freeing it out from under that read.
+    xSemaphoreTake(s_wav_q_mutex, portMAX_DELAY);
+    QueueHandle_t q = s_wav_q;
+    s_wav_q = NULL;
+    xSemaphoreGive(s_wav_q_mutex);
+    if (q) vQueueDelete(q);
+
     ESP_LOGI(TAG, "WAV server stopped (repeater mode)");
 }
 
@@ -1176,7 +1253,7 @@ void audio_stream_stop_wav_server(void)
 void audio_stream_init(void) {
     // Read configurable log capacity (aprs_msg.max_stored, default 25)
     {
-        const cJSON *cfg = config_get();
+        cJSON *cfg = config_get();
         if (cfg) {
             const cJSON *am = cJSON_GetObjectItem(cfg, "aprs_msg");
             if (am) {
@@ -1187,6 +1264,7 @@ void audio_stream_init(void) {
                     s_log_max = v;
                 }
             }
+            config_free_json(cfg);
         }
         ESP_LOGI(TAG, "log: max_stored=%d (ephemeral events not persisted)", s_log_max);
     }
@@ -1196,12 +1274,13 @@ void audio_stream_init(void) {
     // Antes de httpd_start(): en cuanto el servidor acepta clientes puede haber
     // envíos WS concurrentes.
     s_ws_tx_mutex = xSemaphoreCreateMutex();
+    s_wav_q_mutex = xSemaphoreCreateMutex();
 
     // HTTP server (index.html + WebSocket)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = AUDIO_HTTP_PORT;
     cfg.stack_size       = 8192;
-    cfg.max_open_sockets   = 9;    // 2 WS clients + captive-portal burst (3-5) + margin
+    cfg.max_open_sockets   = AUDIO_STREAM_MAX_CLIENT_FDS; // 2 WS clients + captive-portal burst (3-5) + margin
     cfg.lru_purge_enable   = true; // evict oldest idle socket when limit reached
     cfg.max_uri_handlers   = 32;
     // Por defecto son 5 s: un cliente que no drena su socket bloqueaba la tarea

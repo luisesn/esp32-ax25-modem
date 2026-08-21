@@ -90,6 +90,11 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     int received = 0;
     bool magic_ok = false;
     int next_report = 4 * 1024;
+    int timeouts = 0;
+    // Each timeout already waits up to OTA_SOCK_TIMEOUT_S (raised above for
+    // sector-erase stalls); a client that never sends another byte would
+    // otherwise retry here forever, tying up an httpd worker indefinitely.
+    #define OTA_MAX_CONSEC_TIMEOUTS 5
 
     while (received < total) {
         int want = total - received;
@@ -97,9 +102,14 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 
         int got = httpd_req_recv(req, (char *)buf, want);
         if (got == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > OTA_MAX_CONSEC_TIMEOUTS) {
+                ESP_LOGE(TAG, "too many recv timeouts at %d/%d — aborting", received, total);
+                goto abort_ota;
+            }
             ESP_LOGW(TAG, "recv timeout at %d/%d — retrying", received, total);
             continue;
         }
+        timeouts = 0;
         if (got <= 0) {
             ESP_LOGE(TAG, "recv failed at %d/%d (ret=%d, errno=%d)", received, total, got, errno);
             goto abort_ota;
