@@ -4,7 +4,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <errno.h>
 
@@ -24,10 +23,37 @@
 static int s_port = 23;
 
 // ---------------------------------------------------------------------------
+// Per-connection write buffer
+// Accumulates output so that banner + response + prompt travel as one TCP
+// segment over the slow RF link, avoiding TCP reordering stalls at the client.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    int  fd;
+    char buf[1024];
+    int  len;
+} conn_t;
+
+static void conn_write(conn_t *c, const char *data, int n)
+{
+    if (c->len + n > (int)sizeof(c->buf)) {
+        if (c->len > 0) { send(c->fd, c->buf, c->len, MSG_NOSIGNAL); c->len = 0; }
+        if (n >= (int)sizeof(c->buf)) { send(c->fd, data, n, MSG_NOSIGNAL); return; }
+    }
+    memcpy(c->buf + c->len, data, n);
+    c->len += n;
+}
+
+static void conn_flush(conn_t *c)
+{
+    if (c->len > 0) { send(c->fd, c->buf, c->len, MSG_NOSIGNAL); c->len = 0; }
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch
 // ---------------------------------------------------------------------------
 
-static void cmd_help(int fd)
+static void cmd_help(conn_t *c)
 {
     static const char *msg =
         "Commands:\r\n"
@@ -35,10 +61,10 @@ static void cmd_help(int fd)
         "  status  - system status\r\n"
         "  config  - dump config JSON\r\n"
         "  quit    - close connection\r\n";
-    send(fd, msg, strlen(msg), MSG_NOSIGNAL);
+    conn_write(c, msg, strlen(msg));
 }
 
-static void cmd_status(int fd)
+static void cmd_status(conn_t *c)
 {
     char rsp[512];
     int  n = 0;
@@ -82,31 +108,31 @@ static void cmd_status(int fd)
     n += snprintf(rsp + n, sizeof(rsp) - (size_t)n,
                   "Uptime   : %lu s\r\n", (unsigned long)uptime_s);
 
-    send(fd, rsp, (size_t)n, MSG_NOSIGNAL);
+    conn_write(c, rsp, (size_t)n);
 }
 
-static void cmd_config(int fd)
+static void cmd_config(conn_t *c)
 {
     cJSON *cfg = config_get();
     if (!cfg) {
         static const char *err = "error: config not loaded\r\n";
-        send(fd, err, strlen(err), MSG_NOSIGNAL);
+        conn_write(c, err, strlen(err));
         return;
     }
     char *js = cJSON_PrintUnformatted(cfg);
     config_free_json(cfg);
     if (!js) {
         static const char *err = "error: cJSON_Print failed\r\n";
-        send(fd, err, strlen(err), MSG_NOSIGNAL);
+        conn_write(c, err, strlen(err));
         return;
     }
-    send(fd, js, strlen(js), MSG_NOSIGNAL);
-    send(fd, "\r\n", 2, MSG_NOSIGNAL);
+    conn_write(c, js, strlen(js));
+    conn_write(c, "\r\n", 2);
     free(js);
 }
 
 // Dispatch a NUL-terminated, trimmed line. Returns true to keep connection open.
-static bool dispatch(int fd, char *line)
+static bool dispatch(conn_t *c, char *line)
 {
     // Strip trailing whitespace
     int len = (int)strlen(line);
@@ -115,7 +141,7 @@ static bool dispatch(int fd, char *line)
         line[--len] = '\0';
 
     if (len == 0) {
-        send(fd, "> ", 2, MSG_NOSIGNAL);
+        conn_write(c, "> ", 2);
         return true;
     }
 
@@ -126,21 +152,21 @@ static bool dispatch(int fd, char *line)
         if (*p >= 'A' && *p <= 'Z') *p += 32;
 
     if (strcmp(lower, "help") == 0 || strcmp(lower, "?") == 0) {
-        cmd_help(fd);
+        cmd_help(c);
     } else if (strcmp(lower, "status") == 0) {
-        cmd_status(fd);
+        cmd_status(c);
     } else if (strcmp(lower, "config") == 0) {
-        cmd_config(fd);
+        cmd_config(c);
     } else if (strcmp(lower, "quit") == 0 || strcmp(lower, "exit") == 0) {
-        send(fd, "Bye\r\n", 5, MSG_NOSIGNAL);
+        conn_write(c, "Bye\r\n", 5);
         return false;
     } else {
         char unk[80];
         snprintf(unk, sizeof(unk), "Unknown command: %s\r\n", line);
-        send(fd, unk, strlen(unk), MSG_NOSIGNAL);
+        conn_write(c, unk, strlen(unk));
     }
 
-    send(fd, "> ", 2, MSG_NOSIGNAL);
+    conn_write(c, "> ", 2);
     return true;
 }
 
@@ -160,6 +186,7 @@ static void handle_client(int fd, const char *client_ip)
     // response — by then recv() has returned, so we know RF client→ESP is working,
     // which means ESP→client will also work.
 
+    conn_t c = { .fd = fd, .len = 0 };
     char line[128];
     int  pos = 0;
     bool skip_lf   = false;
@@ -177,10 +204,12 @@ static void handle_client(int fd, const char *client_ip)
             line[pos] = '\0';
             if (need_banner) {
                 static const char *banner = "RF Console (type 'help' for commands)\r\n";
-                send(fd, banner, strlen(banner), MSG_NOSIGNAL);
+                conn_write(&c, banner, strlen(banner));
                 need_banner = false;
             }
-            if (!dispatch(fd, line)) break;
+            bool keep = dispatch(&c, line);
+            conn_flush(&c);
+            if (!keep) break;
             pos = 0;
         } else {
             skip_lf = false;
@@ -190,7 +219,8 @@ static void handle_client(int fd, const char *client_ip)
                 // Line too long: flush and report
                 line[pos] = '\0';
                 static const char *err = "error: line too long\r\n> ";
-                send(fd, err, strlen(err), MSG_NOSIGNAL);
+                conn_write(&c, err, strlen(err));
+                conn_flush(&c);
                 pos = 0;
             }
         }
@@ -249,8 +279,8 @@ static void rf_console_task(void *arg)
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
 
-        int nodelay = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+        int sndbuf = 512;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
         struct timeval tv = { .tv_sec = 120, .tv_usec = 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
@@ -286,5 +316,5 @@ void rf_console_init(const cJSON *cfg)
         return;
     }
 
-    xTaskCreate(rf_console_task, "rf_console", 4096, addr, 3, NULL);
+    xTaskCreate(rf_console_task, "rf_console", 6144, addr, 3, NULL);
 }
