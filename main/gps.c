@@ -6,11 +6,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "LibAPRS-esp32-i2s/src/LibAPRS.h"
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-#define GPS_UART        UART_NUM_2
+#define GPS_UART       UART_NUM_2
 #define GPS_RX_BUF_SZ   512
 #define GPS_LINE_MAX    96
 
@@ -22,6 +24,9 @@ static SemaphoreHandle_t s_pos_mutex;
 static uint8_t s_prev_quality = 0xFF; // sentinel "unknown"
 static uint8_t s_prev_sats    = 0xFF;
 static bool    s_first_fix    = true;
+
+static volatile bool s_beacon_enabled  = false;
+static volatile int  s_beacon_period_s = 600;
 
 void gps_lock_pos(void)   { xSemaphoreTake(s_pos_mutex, portMAX_DELAY); }
 void gps_unlock_pos(void) { xSemaphoreGive(s_pos_mutex); }
@@ -176,6 +181,42 @@ static void gps_task(void *arg) {
     }
 }
 
+// Periodic APRS position beacon. Only queues a frame (APRS_queue_beacon is
+// non-blocking); the actual TX happens in receive_audio_task.
+static void gps_beacon_task(void *arg) {
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS((uint32_t)s_beacon_period_s * 1000u));
+
+        gps_lock_pos();
+        bool   valid  = g_gps_pos.valid;
+        double lat    = g_gps_pos.lat;
+        double lon    = g_gps_pos.lon;
+        float  course = g_gps_pos.course_deg;
+        float  speed  = g_gps_pos.speed_knots;
+        gps_unlock_pos();
+
+        if (!valid) {
+            ESP_LOGW(TAG, "beacon: no GPS fix, skipping");
+            continue;
+        }
+
+        double abs_lat = fabs(lat);
+        int    dlat    = (int)abs_lat;
+        double mlat    = (abs_lat - dlat) * 60.0;
+        double abs_lon = fabs(lon);
+        int    dlon    = (int)abs_lon;
+        double mlon    = (abs_lon - dlon) * 60.0;
+
+        char info[48];
+        snprintf(info, sizeof(info), "!%02d%05.2f%c/%03d%05.2f%c>%03.0f/%03.0f",
+                 dlat, mlat, lat >= 0.0 ? 'N' : 'S',
+                 dlon, mlon, lon >= 0.0 ? 'E' : 'W',
+                 (double)course, (double)speed);
+        APRS_queue_beacon(info);
+        ESP_LOGI(TAG, "beacon sent: %s", info);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -191,6 +232,11 @@ void gps_init(cJSON *cfg) {
             if (cJSON_IsBool(en)) enabled = cJSON_IsTrue(en);
             cJSON *bd = cJSON_GetObjectItem(g, "baud");
             if (cJSON_IsNumber(bd)) baud = bd->valueint;
+            cJSON *beacon = cJSON_GetObjectItem(g, "use_for_beacon");
+            if (cJSON_IsBool(beacon)) s_beacon_enabled = cJSON_IsTrue(beacon);
+            cJSON *period = cJSON_GetObjectItem(g, "beacon_period_s");
+            if (cJSON_IsNumber(period) && period->valueint > 0)
+                s_beacon_period_s = period->valueint;
         }
     }
 
@@ -216,6 +262,10 @@ void gps_init(cJSON *cfg) {
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     xTaskCreate(gps_task, "gps_task", 2048, NULL, 4, NULL);
+    if (s_beacon_enabled) {
+        xTaskCreate(gps_beacon_task, "gps_beacon", 3072, NULL, 3, NULL);
+        ESP_LOGI(TAG, "beacon enabled, period=%ds", s_beacon_period_s);
+    }
     ESP_LOGI(TAG, "UART2 RX=GPIO%d TX=GPIO%d @ %d baud",
              GPIO_GPS_RX, GPIO_GPS_TX, baud);
 }
