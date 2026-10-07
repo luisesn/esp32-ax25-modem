@@ -864,10 +864,19 @@ Usa la versión TCP de [markqvist/tncattach](https://github.com/markqvist/tncatt
 
 ```bash
 # Instalar tncattach
-git clone https://github.com/markqvist/tncattach && cd tncattach && make && sudo make install
+
+git clone https://github.com/luisesn/tncattach
+# https://github.com/markqvist/tncattach tiene un bug...
+git switch fix--memcpy-signature
+cd tncattach 
+make && sudo make install
 
 # Crear interfaz TUN (asigna IP al host en la misma /24 que el ESP32)
 sudo ./tncattach -T -H <ip_wifi_del_esp32> -P 8001 --mtu 250 --noipv6 --ipv4 44.61.3.73/24
+
+# Estos dos comandos mejoran bastante la comunicación sobretodo desde la parte cliente
+sudo ip route change 44.61.3.0/24 dev tnc0 initrwnd 1 initcwnd 1
+sudo ip link set tnc0 txqueuelen 1
 
 # El ESP32 tiene 44.61.3.75 → ping de prueba:
 ping 44.61.3.75

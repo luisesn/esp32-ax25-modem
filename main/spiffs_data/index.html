@@ -58,6 +58,9 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .digi-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;
   background:#0d0d1e;border:1px solid #4a6aaa;border-radius:2px;
   color:#8090d0;margin-right:.35rem;vertical-align:middle}
+.third-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;
+  background:#0d1a1a;border:1px solid #4a9a9a;border-radius:2px;
+  color:#80d0d0;margin-right:.35rem;vertical-align:middle}
 .pkt-ack{background:#1a1400;border-left:2px solid #c8a04a}
 .ack-badge{display:inline-block;font-size:.6rem;padding:.05rem .3rem;
   background:#2a2000;border:1px solid #c8a04a;border-radius:2px;
@@ -687,14 +690,22 @@ function aprsExtractAckId(info){
   }
   return null;
 }
+// Tráfico de terceros ('}'): el paquete original va embebido en el info.
+function parseThirdParty(info){
+  if(!info||info[0]!=='}')return null;
+  const m=/^\}([^>]+)>([^,:]+)((?:,[^:]*)?):(.*)$/s.exec(info);
+  return m?{src:m[1],dst:m[2],path:m[3].replace(/^,/,''),info:m[4]}:null;
+}
 function appendLog(src,dst,path,info,isDigi){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt';
   const ts=new Date().toLocaleTimeString('es',
     {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  const isAck=aprsIsAck(info);
-  const isToMe=isMessageToMe(info);
+  const tp=parseThirdParty(info);
+  const dInfo=tp?tp.info:info;
+  const isAck=aprsIsAck(dInfo);
+  const isToMe=isMessageToMe(dInfo);
   if(isDigi)d.classList.add('pkt-digi');
   if(isAck)d.classList.add('pkt-ack');
   else if(isToMe)d.classList.add('pkt-me');
@@ -702,17 +713,19 @@ function appendLog(src,dst,path,info,isDigi){
   if(isDigi)badge='<span class="digi-badge">DIGI</span>';
   else if(isAck)badge='<span class="ack-badge">ACK</span>';
   else if(isToMe)badge='<span class="me-badge">PARA MÍ</span>';
-  const pos=parseAPRSPos(info);
+  const pos=parseAPRSPos(dInfo);
   const mapLink=pos
     ?` <a class="map-link" href="https://maps.google.com/?q=${pos.lat},${pos.lon}" target="_blank" rel="noopener" title="Ver en Google Maps (${pos.lat},${pos.lon})">&#x1F5FA;&#xFE0F;</a>`
     :'';
   d.innerHTML=`<span class="ts">${ts}</span>${badge}`+
-    `<span class="src" onclick="fillDest('${esc(src)}')" title="Copiar al destino">${esc(src)}</span>`+
+    (tp?'<span class="third-badge">3RD</span>':'')+
+    `<span class="src" onclick="fillDest('${esc(tp?tp.src:src)}')" title="Copiar al destino">${esc(tp?tp.src:src)}</span>`+
     `<span class="sep"> &gt; </span>`+
-    `<span class="dst">${esc(dst)}</span>`+
-    (path?`<span class="sep"> via </span><span class="path">${fmtHops(path)}</span>`:'')+
+    `<span class="dst">${esc(tp?tp.dst:dst)}</span>`+
+    (tp?`<span class="sep"> vía </span><span class="path">${esc(src)}</span>`
+       :(path?`<span class="sep"> via </span><span class="path">${fmtHops(path)}</span>`:''))+
     ` `+
-    `<span class="info">${esc(info)}</span>`+
+    `<span class="info">${esc(dInfo)}</span>`+
     mapLink;
   log.prepend(d);
   const tsISO=new Date().toISOString();
