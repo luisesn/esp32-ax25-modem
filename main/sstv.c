@@ -391,7 +391,7 @@ static UINT jpeg_output_cb(JDEC *jdec, void *bitmap, JRECT *rect) {
      * wider than the SSTV mode (e.g. an unresized camera photo uploaded
      * directly via the API) would make rect->left/bw index past that row,
      * corrupting the heap. Bail out instead of overflowing. */
-    if (rect->left < 0 || bw <= 0 ||
+    if (bw <= 0 ||
         ((size_t)rect->left + (size_t)bw) * 3 > sizeof(ctx->row_buf[0])) {
         ESP_LOGE(TAG, "MCU block [%d,%d] out of bounds for %d-px row buffer — image too wide?",
                  rect->left, bw, img_w);

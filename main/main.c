@@ -369,8 +369,51 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 
 static const char *TAG = "ax25rx";
 
+// Ventana de deduplicación RX. Con rx.active_modem = "best" los dos módems
+// (v1 y v2 en LibAPRS.cpp) demodulan el mismo audio y entregan la MISMA trama
+// por separado a este hook, separadas por unos pocos ms (observado: 10 ms).
+// Sin filtro, cada trama recibida provoca dos inyecciones en lwIP (ax25ip),
+// dos ACK automáticos y dos digipeticiones: en un ping por RF eso se ve como
+// respuesta duplicada (DUP!) y dos ciclos TX completos.
+//
+// 300 ms es holgadamente mayor que la separación entre ambas entregas y muy
+// inferior a lo que tarda en poder repetirse una trama idéntica por el aire:
+// 88 B a 1200 bps son ~0,6 s de datos más el preámbulo (~350 ms). Ninguna
+// retransmisión real cabe dentro de la ventana.
+#define RX_DUP_WINDOW_MS 300
+
+// true si esta trama es una copia de la anterior entregada dentro de la ventana.
+// Comparación byte a byte: no hay riesgo de descartar por colisión de hash.
+static bool rx_frame_is_duplicate(const uint8_t *buf, size_t len) {
+    static uint8_t    last_buf[AX25_MAX_FRAME_LEN];
+    static size_t     last_len  = 0;
+    static TickType_t last_tick = 0;
+
+    TickType_t now = xTaskGetTickCount();
+
+    if (last_len == len && len <= sizeof(last_buf) &&
+        (now - last_tick) < pdMS_TO_TICKS(RX_DUP_WINDOW_MS) &&
+        memcmp(last_buf, buf, len) == 0) {
+        // No se actualiza last_tick: la ventana cuenta desde la primera copia,
+        // así una trama que de verdad se repita no queda encadenada.
+        return true;
+    }
+
+    last_len = (len <= sizeof(last_buf)) ? len : 0;
+    if (last_len) memcpy(last_buf, buf, last_len);
+    last_tick = now;
+    return false;
+}
+
 // Trama AX.25 recibida por radio → codificar en KISS → enviar al host.
 static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
+    // Filtrar antes de cualquier efecto secundario (incluido el reinicio de la
+    // ventana de inhibición post-RX, que ya hizo la primera copia).
+    if (rx_frame_is_duplicate(buf, len)) {
+        ESP_LOGI(TAG, "dup frame %u B descartada (doble módem)", (unsigned)len);
+        return;
+    }
+
     afsk_notify_rx_frame();  // restart post-RX TX inhibit window
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
