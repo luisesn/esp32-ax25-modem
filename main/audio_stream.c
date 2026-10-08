@@ -10,6 +10,7 @@
 #include <lwip/sockets.h>
 #include <errno.h>
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -451,6 +452,35 @@ static esp_err_t me_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// GET /api/sys → heap libre/mínimo/bloque mayor y high-water mark (bytes libres
+// de stack) de las tareas conocidas, para vigilar fragmentación y stacks justos.
+static esp_err_t sys_handler(httpd_req_t *req) {
+    static const char *const tasks[] = {
+        "receive_audio_task", "aprs_poll_task", "processPacket", "audio_lvl",
+        "gps_task", "gps_beacon", "morse_beacon", "audio_stream", "wav_server",
+        "kiss_tcp_srv", "wifi_reconn", "display_task", "rf_console", "delay_tune",
+    };
+    char buf[768];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"uptime_s\":%lld,\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,\"stacks\":{",
+        (long long)(esp_timer_get_time() / 1000000LL),
+        (unsigned)esp_get_free_heap_size(),
+        (unsigned)esp_get_minimum_free_heap_size(),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    bool first = true;
+    for (size_t i = 0; i < sizeof(tasks) / sizeof(tasks[0]) && n < (int)sizeof(buf) - 64; i++) {
+        TaskHandle_t h = xTaskGetHandle(tasks[i]);
+        if (!h) continue;
+        n += snprintf(buf + n, sizeof(buf) - n, "%s\"%s\":%u", first ? "" : ",",
+                      tasks[i], (unsigned)uxTaskGetStackHighWaterMark(h));
+        first = false;
+    }
+    snprintf(buf + n, sizeof(buf) - n, "}}");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
 // Reads the whole request body into buf (capacity buf_cap, NUL-terminated on
 // success). A single httpd_req_recv() call only reads up to its own buffer
 // size — if content_len is bigger, the rest is left unread on the socket and
@@ -631,7 +661,8 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 // POST /api/config → guarda el body como nuevo config.json, recarga en RAM.
 // El body debe ser JSON válido (<= 2 KB). Recarga immediate sin reiniciar.
 static esp_err_t config_post_handler(httpd_req_t *req) {
-    // Límite de 2 KB para el body
+    // Límite de 2 KB para el body. static es seguro: el servidor httpd tiene un
+    // único hilo, así que los handlers nunca se ejecutan en paralelo.
     static char body[2048];
     int total = 0, ret;
     int remaining = req->content_len > 0 ? (int)req->content_len : (int)sizeof(body) - 1;
@@ -1047,7 +1078,7 @@ static esp_err_t spiffs_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    static char buf[1024];
+    static char buf[1024];  // seguro: httpd es mono-hilo (ver config_post_handler)
     int received = 0;
     bool ok = true;
     int timeouts = 0;
@@ -1323,6 +1354,11 @@ void audio_stream_init(void) {
         .method  = HTTP_GET,
         .handler = me_handler,
     };
+    static const httpd_uri_t uri_sys = {
+        .uri     = "/api/sys",
+        .method  = HTTP_GET,
+        .handler = sys_handler,
+    };
     static const httpd_uri_t uri_beacon = {
         .uri     = "/api/aprs/beacon",
         .method  = HTTP_POST,
@@ -1370,6 +1406,7 @@ void audio_stream_init(void) {
     httpd_register_uri_handler(s_httpd, &uri_ws);
     httpd_register_uri_handler(s_httpd, &uri_aprs_send);
     httpd_register_uri_handler(s_httpd, &uri_me);
+    httpd_register_uri_handler(s_httpd, &uri_sys);
     httpd_register_uri_handler(s_httpd, &uri_beacon);
     httpd_register_uri_handler(s_httpd, &uri_cfg_get);
     httpd_register_uri_handler(s_httpd, &uri_cfg_post);

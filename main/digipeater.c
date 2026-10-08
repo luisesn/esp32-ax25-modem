@@ -1,4 +1,5 @@
 #include "digipeater.h"
+#include "dedup.h"
 #include "LibAPRS-esp32-i2s/src/AFSK.h"   // afsk_queue_tx_frame, AX25_MAX_FRAME_LEN
 #include "LibAPRS-esp32-i2s/src/AX25.h"
 #include "LibAPRS-esp32-i2s/src/HDLC.h"
@@ -123,37 +124,8 @@ bool digi_is_enabled(void)     { return s_enabled; }
 #define DEDUP_SLOTS   32
 #define DEDUP_TTL_US  (30LL * 1000000LL)   // 30 seconds in microseconds
 
-typedef struct {
-    uint32_t hash;
-    int64_t  ts_us;   // esp_timer_get_time() at insertion
-} dedup_entry_t;
-
-static dedup_entry_t s_dedup[DEDUP_SLOTS];
-static int           s_dedup_next = 0;   // next slot to overwrite (ring)
-
-// FNV-1a 32-bit hash of arbitrary byte sequence.
-static uint32_t fnv1a(const uint8_t *data, size_t len) {
-    uint32_t h = 0x811c9dc5u;
-    for (size_t i = 0; i < len; i++)
-        h = (h ^ data[i]) * 0x01000193u;
-    return h;
-}
-
-// Returns true if this hash was seen within DEDUP_TTL_US; otherwise records it.
-static bool dedup_check_and_add(uint32_t hash) {
-    int64_t now = esp_timer_get_time();
-    for (int i = 0; i < DEDUP_SLOTS; i++) {
-        if (s_dedup[i].hash == hash &&
-            (now - s_dedup[i].ts_us) < DEDUP_TTL_US) {
-            return true;   // duplicate
-        }
-    }
-    // Not found (or expired) — record in ring slot and return false
-    s_dedup[s_dedup_next].hash   = hash;
-    s_dedup[s_dedup_next].ts_us  = now;
-    s_dedup_next = (s_dedup_next + 1) % DEDUP_SLOTS;
-    return false;
-}
+static dedup_entry_t s_dedup_entries[DEDUP_SLOTS];
+static dedup_t       s_dedup = { s_dedup_entries, DEDUP_SLOTS, 0, DEDUP_TTL_US };
 
 // ─── AX.25 address helpers ───────────────────────────────────────────────────
 
@@ -207,8 +179,8 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
     if (len < 16 || cfg_call[0] == '\0' || cfg_count == 0) return false;
 
     // ── Duplicate check (on the original frame before we modify it) ──────────
-    uint32_t frame_hash = fnv1a(buf, len);
-    if (dedup_check_and_add(frame_hash)) {
+    uint32_t frame_hash = dedup_hash(buf, len);
+    if (dedup_check_and_add(&s_dedup, frame_hash)) {
         ESP_LOGD(TAG, "Duplicate frame suppressed (hash=0x%08" PRIx32 ")", frame_hash);
         return false;
     }

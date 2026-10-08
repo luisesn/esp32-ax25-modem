@@ -13,6 +13,7 @@
  */
 
 #include "il2p.h"
+#include "dedup.h"
 #include "rs_codec.h"
 #include "AFSK.h"
 #include <string.h>
@@ -482,35 +483,12 @@ static void rx_process_bit(il2p_rx_t *rx, uint8_t bit)
 #define DEDUP_SLOTS 8
 #define DEDUP_WINDOW_MS 500
 
-typedef struct { uint16_t hash; int64_t ts_us; } dedup_entry_t;
-static dedup_entry_t s_dedup[DEDUP_SLOTS];
-static int           s_dedup_head = 0;
-
-static uint16_t frame_hash(const uint8_t *buf, size_t len)
-{
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= (uint16_t)buf[i];
-        for (int j = 0; j < 8; j++)
-            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
-    }
-    return crc;
-}
+static dedup_entry_t s_dedup_entries[DEDUP_SLOTS];
+static dedup_t       s_dedup;
 
 static bool dedup_seen(const uint8_t *buf, size_t len)
 {
-    uint16_t h = frame_hash(buf, len);
-    int64_t  now = esp_timer_get_time();
-    for (int i = 0; i < DEDUP_SLOTS; i++) {
-        if (s_dedup[i].hash == h &&
-            (now - s_dedup[i].ts_us) < (int64_t)(DEDUP_WINDOW_MS * 1000))
-            return true;
-    }
-    /* Record */
-    s_dedup[s_dedup_head].hash  = h;
-    s_dedup[s_dedup_head].ts_us = now;
-    s_dedup_head = (s_dedup_head + 1) % DEDUP_SLOTS;
-    return false;
+    return dedup_check_and_add(&s_dedup, dedup_hash(buf, len));
 }
 
 /* ─── Public API ─────────────────────────────────────────────────────────── */
@@ -520,7 +498,7 @@ void il2p_init(bool enabled, ax25_raw_callback_t cb)
     s_enabled = enabled;
     s_cb      = cb;
     memset(s_rx,    0, sizeof(s_rx));
-    memset(s_dedup, 0, sizeof(s_dedup));
+    dedup_init(&s_dedup, s_dedup_entries, DEDUP_SLOTS, (int64_t)DEDUP_WINDOW_MS * 1000);
     for (int i = 0; i < 2; i++) rx_reset(&s_rx[i]);
     if (enabled)
         ESP_LOGI(TAG, "IL2P enabled — RX dual-modem, TX smart routing by PID");

@@ -13,6 +13,7 @@ idf_component_register(
         "audio_stream.c"
         "ax25ip.c"
         "digipeater.c"
+        "dedup.c"
         "morse.c"
         "rx_stats.c"
         "sstv.c"
