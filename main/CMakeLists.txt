@@ -35,6 +35,7 @@ idf_component_register(
         "LibAPRS-esp32-i2s/src/"
     REQUIRES
         esp_wifi
+        mbedtls
         nvs_flash
         esp_netif
         lwip

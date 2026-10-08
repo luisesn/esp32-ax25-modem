@@ -1,4 +1,5 @@
 #include "transport_wifi.h"
+#include "esp_sntp.h"
 #include "kiss.h"
 #include "config.h"
 #include "aux_config.h"
@@ -27,6 +28,12 @@
 #define DEFAULT_CONNECT_TIMEOUT_S 30
 #define RECONNECT_DELAY_US  (3LL * 1000000LL)   // 3 s tras perder la conexión
 #define RETRY_NO_NET_US     (60LL * 1000000LL)  // 60 s cuando no hay ninguna red
+// Tras perder la conexión se reintentan las redes guardadas con backoff
+// exponencial (5, 10, 20, 40, 60 s...) antes de caer al AP, que es terminal:
+// un reinicio del router no debe dejar al nodo en hotspot para siempre.
+#define RECONNECT_MAX_ROUNDS    5
+#define RECONNECT_BACKOFF_BASE_US (5LL * 1000000LL)
+#define RECONNECT_BACKOFF_MAX_US  (60LL * 1000000LL)
 #define ASSOC_RETRY_MS      1000                // reintento de asociación dentro del timeout
 
 static EventGroupHandle_t s_wifi_eg;
@@ -121,6 +128,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "IP obtenida: %s", ip_str);
         g_wifi_status.state = WIFI_STATUS_CONNECTED;
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+        // Reloj del sistema: SNTP cuando hay red (con Internet; sin ella no hace nada).
+        if (!esp_sntp_enabled()) {
+            esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+        }
     }
 }
 
@@ -540,6 +553,7 @@ static void server_task(void *arg) {
 // ---------------------------------------------------------------------------
 
 static void wifi_reconnect_task(void *arg) {
+    int fail_rounds = 0;
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -550,8 +564,19 @@ static void wifi_reconnect_task(void *arg) {
         esp_timer_stop(s_reconnect_timer);
         ESP_LOGI(TAG, "Reconexión: probando %d red(es) guardada(s)...", s_net_count);
 
-        if (!wifi_try_saved_nets())
+        if (wifi_try_saved_nets()) {
+            fail_rounds = 0;
+        } else if (++fail_rounds < RECONNECT_MAX_ROUNDS) {
+            int64_t backoff = RECONNECT_BACKOFF_BASE_US << (fail_rounds - 1);
+            if (backoff > RECONNECT_BACKOFF_MAX_US) backoff = RECONNECT_BACKOFF_MAX_US;
+            ESP_LOGW(TAG, "Reconexión fallida (%d/%d): nuevo intento en %d s",
+                     fail_rounds, RECONNECT_MAX_ROUNDS, (int)(backoff / 1000000LL));
+            g_wifi_status.state = WIFI_STATUS_CONNECTING;
+            schedule_retry(backoff);
+        } else {
+            fail_rounds = 0;
             wifi_enter_fallback();
+        }
     }
 }
 

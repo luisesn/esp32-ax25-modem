@@ -9,6 +9,9 @@
 #include <esp_http_server.h>
 #include <sys/socket.h>
 
+#include <stdio.h>
+#include <errno.h>
+#include <psa/crypto.h>
 #include "audio_stream.h"
 
 #define TAG "ota"
@@ -68,6 +71,16 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // SHA-256 opcional: cabecera "X-SHA256: <64 hex>" con el hash del .bin.
+    // Si se envía y no coincide, la imagen no se activa.
+    char want_hex[65] = "";
+    bool check_sha = httpd_req_get_hdr_value_str(req, "X-SHA256", want_hex, sizeof(want_hex)) == ESP_OK
+                     && strlen(want_hex) == 64;
+    psa_hash_operation_t sha = PSA_HASH_OPERATION_INIT;
+    bool sha_ok = psa_crypto_init() == PSA_SUCCESS &&
+                  psa_hash_setup(&sha, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    if (check_sha && !sha_ok) check_sha = false;
+
     s_ota_in_progress = true;
 
     // Raise socket recv timeout: sector erases stall both cores for ~30-50ms each;
@@ -125,6 +138,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
             }
         }
 
+        if (sha_ok) psa_hash_update(&sha, buf, (size_t)got);
         err = esp_ota_write(ota_handle, buf, (size_t)got);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write: %s", esp_err_to_name(err));
@@ -142,6 +156,28 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
                      received, total);
             audio_stream_ws_send_text(msg);
             next_report += 4 * 1024;
+        }
+    }
+
+    {
+        uint8_t dig[32];
+        size_t dlen = 0;
+        if (sha_ok) { psa_hash_finish(&sha, dig, sizeof(dig), &dlen); sha_ok = false; }
+        if (check_sha) {
+            char got_hex[65];
+            for (int i = 0; i < 32; i++) snprintf(got_hex + 2 * i, 3, "%02x", dig[i]);
+            if (strcasecmp(got_hex, want_hex) != 0) {
+                ESP_LOGE(TAG, "SHA-256 mismatch: got %s expected %s", got_hex, want_hex);
+                esp_ota_abort(ota_handle);
+                s_ota_in_progress = false;
+                audio_stream_ws_send_text(
+                    "{\"type\":\"ota_error\",\"msg\":\"SHA-256 mismatch\"}");
+                httpd_resp_set_status(req, "400 Bad Request");
+                httpd_resp_set_type(req, "application/json");
+                httpd_resp_sendstr(req, "{\"error\":\"sha256 mismatch\"}");
+                return ESP_OK;
+            }
+            ESP_LOGI(TAG, "SHA-256 OK");
         }
     }
 
@@ -178,6 +214,7 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     return ESP_OK;
 
 abort_ota:
+    if (sha_ok) psa_hash_abort(&sha);
     esp_ota_abort(ota_handle);
     s_ota_in_progress = false;
     audio_stream_ws_send_text(

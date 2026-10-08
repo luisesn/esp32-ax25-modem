@@ -22,6 +22,13 @@ static portMUX_TYPE s_config_lock = portMUX_INITIALIZER_UNLOCKED;
 static cJSON *config_load_from_file() {
     file_management_list_files();
 
+    // Recuperación tras corte durante save_config(): config.tmp completo, sin config.json.
+    if (!file_management_file_exists(CONFIG_FILE_PATH) &&
+        file_management_file_exists("/spiffs/config.tmp")) {
+        ESP_LOGW(TAG, "config.json missing, recovering from config.tmp");
+        rename("/spiffs/config.tmp", CONFIG_FILE_PATH);
+    }
+
     if (!file_management_file_exists(CONFIG_FILE_PATH)) {
         ESP_LOGE(TAG, "Config file does not exist: %s", CONFIG_FILE_PATH);
         return NULL;
@@ -132,18 +139,32 @@ void config_free_json(cJSON *config) {
     }
 }
 
+// Escritura segura: se escribe a config.tmp y sólo entonces se sustituye
+// config.json. Un corte de corriente durante la escritura deja el config.json
+// anterior intacto; si el corte ocurre entre remove y rename, config_load_from_file()
+// recupera config.tmp (completo y verificado por tamaño).
+#define CONFIG_TMP_PATH "/spiffs/config.tmp"
+
 bool save_config(const char *json_str) {
-    FILE *f = fopen(CONFIG_FILE_PATH, "w");
+    size_t len = strlen(json_str);
+    FILE *f = fopen(CONFIG_TMP_PATH, "w");
     if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open config file for writing: %s", CONFIG_FILE_PATH);
+        ESP_LOGE(TAG, "Failed to open temp config for writing: %s", CONFIG_TMP_PATH);
         return false;
     }
 
-    size_t written = fwrite(json_str, 1, strlen(json_str), f);
-    fclose(f);
+    size_t written = fwrite(json_str, 1, len, f);
+    int close_rc = fclose(f);
+    struct stat st;
+    if (written != len || close_rc != 0 || stat(CONFIG_TMP_PATH, &st) != 0 || (size_t)st.st_size != len) {
+        ESP_LOGE(TAG, "Failed to write complete config to temp file");
+        unlink(CONFIG_TMP_PATH);
+        return false;
+    }
 
-    if (written != strlen(json_str)) {
-        ESP_LOGE(TAG, "Failed to write complete config to file");
+    unlink(CONFIG_FILE_PATH);   // SPIFFS no sobrescribe en rename()
+    if (rename(CONFIG_TMP_PATH, CONFIG_FILE_PATH) != 0) {
+        ESP_LOGE(TAG, "rename(%s -> %s) failed; temp kept for recovery", CONFIG_TMP_PATH, CONFIG_FILE_PATH);
         return false;
     }
 

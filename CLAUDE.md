@@ -227,6 +227,8 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **Repetidor deshabilitado**: `REPEATER_ENABLED 0` en `config.h` (reservar ~15 KB contiguos de heap, pausa RX y detiene el servidor WAV). Con 0, ni `config.json` ni `/api/repeater/enable` pueden activarlo. Hay presión de heap: vigilar buffers `static` grandes y stacks de tareas.
 
+- **Robustez (informe §3.5)**: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (requiere reflashear bootloader por cable una vez); `ota_validate_task` (main.c) confirma la imagen a los 30 s. OTA HTTP acepta cabecera opcional `X-SHA256`. `save_config` escribe `config.tmp` y lo renombra (recuperación en `config_load_from_file`). Reconexión WiFi con backoff (5 rondas) antes de caer al AP. Reloj: SNTP al obtener IP + hora GPS (`gps_sync_system_time`). `GET /api/sys` da heap y stacks. Dedup compartido en `dedup.[ch]`; códec en `adpcm.c`.
+
 - **`config_load()` devuelve copia**: `aux_config.c` devuelve `cJSON_Duplicate(root, 1)` — el llamador es responsable de liberar el objeto con `config_free_json()`. No usar el puntero después de liberar.
 
 - **Cola TX entre tareas (`s_tx_queue`)**: en modo KISS TNC, `server_task` **no puede** llamar `APRS_send_raw_frame` directamente porque internamente invoca `adc_continuous_stop`, que debe ejecutarse desde la misma tarea FreeRTOS que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). Solución: `QueueHandle_t s_tx_queue` de capacidad 4 × `afsk_tx_frame_t`. `server_task` encola con `afsk_queue_tx_frame()` (no bloqueante); `receive_audio_task` despacha al inicio de cada iteración. **Es obligatorio llamar `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` antes de `APRS_set_raw_hook`.**

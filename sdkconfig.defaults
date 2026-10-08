@@ -22,3 +22,6 @@ CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_IPV6=n
 CONFIG_LWIP_TCP_RTO_TIME=8000
+
+# OTA: rollback automático si la imagen nueva no se confirma (main.c: ota_validate_task)
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

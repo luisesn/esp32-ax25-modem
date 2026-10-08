@@ -30,6 +30,7 @@
 #include "squelch_sf.h"
 #include "il2p.h"
 #include "esp_heap_caps.h"
+#include "esp_ota_ops.h"
 
 #include "device.h"
 
@@ -149,6 +150,24 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
 // ---------------------------------------------------------------------------
 // Monitor de nivel de audio (250 ms)
 // ---------------------------------------------------------------------------
+
+// Con CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE una imagen OTA nueva arranca en
+// estado PENDING_VERIFY: si se reinicia (panic/WDT) antes de confirmarla, el
+// bootloader vuelve a la partición anterior. Se confirma tras 30 s estables.
+#define OTA_VALIDATE_DELAY_MS 30000
+
+static void ota_validate_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(OTA_VALIDATE_DELAY_MS));
+    esp_ota_img_states_t st;
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI("main", "OTA: imagen confirmada (%s)", esp_err_to_name(e));
+    }
+    vTaskDelete(NULL);
+}
 
 static void audio_level_task(void *arg)
 {
@@ -677,4 +696,5 @@ void app_main(void)
 #endif  // TNC_MODE
 
     xTaskCreate(audio_level_task, "audio_lvl", 2048, NULL, 3, NULL);
+    xTaskCreate(ota_validate_task, "ota_valid", 2048, NULL, 1, NULL);
 }

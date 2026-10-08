@@ -7,6 +7,10 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
+#include "esp_timer.h"
+#include "esp_sntp.h"
+#include <sys/time.h>
+#include <time.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -71,6 +75,32 @@ static int csv_split(char *buf, char **fields, int max) {
 // Sentence parsers (fields[] starts at sentence-type, e.g. fields[0]="GPRMC")
 // ---------------------------------------------------------------------------
 
+// Pone el reloj del sistema con la hora UTC del GPS (HHMMSS.ss, DDMMYY), como
+// mucho una vez cada 10 min y sólo si SNTP no lo ha sincronizado ya.
+static void gps_sync_system_time(const char *hhmmss, const char *ddmmyy) {
+    static int64_t s_last_sync_us = 0;
+    int64_t now_us = esp_timer_get_time();
+    if (s_last_sync_us && now_us - s_last_sync_us < 600LL * 1000000LL) return;
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) return;
+    if (strlen(hhmmss) < 6 || strlen(ddmmyy) < 6) return;
+    int v[6];
+    const char *src[6] = { hhmmss, hhmmss + 2, hhmmss + 4, ddmmyy, ddmmyy + 2, ddmmyy + 4 };
+    for (int i = 0; i < 6; i++) {
+        if (src[i][0] < '0' || src[i][0] > '9' || src[i][1] < '0' || src[i][1] > '9') return;
+        v[i] = (src[i][0] - '0') * 10 + (src[i][1] - '0');
+    }
+    struct tm t = { .tm_hour = v[0], .tm_min = v[1], .tm_sec = v[2],
+                    .tm_mday = v[3], .tm_mon = v[4] - 1, .tm_year = 100 + v[5] };
+    if (t.tm_year < 124 || t.tm_mon < 0 || t.tm_mon > 11 || t.tm_mday < 1 || t.tm_mday > 31) return;
+    setenv("TZ", "UTC0", 1); tzset();
+    time_t secs = mktime(&t);
+    struct timeval tv = { .tv_sec = secs, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    s_last_sync_us = now_us;
+    ESP_LOGI("gps", "Reloj del sistema ajustado desde GPS: %04d-%02d-%02d %02d:%02d:%02d UTC",
+             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+}
+
 static void parse_rmc(char **f, int n) {
     // $GxRMC,HHMMSS.ss,status,lat,NS,lon,EW,speed,course,DDMMYY,...*hh
     // f[0]=type, f[1]=time, f[2]=status, f[3]=lat, f[4]=NS, f[5]=lon,
@@ -89,6 +119,8 @@ static void parse_rmc(char **f, int n) {
         snprintf(g_gps_pos.date_utc, sizeof(g_gps_pos.date_utc), "%.6s", f[9]);
     }
     gps_unlock_pos();
+
+    if (active) gps_sync_system_time(f[1], f[9]);
 
     if (active && s_first_fix) {
         s_first_fix = false;
