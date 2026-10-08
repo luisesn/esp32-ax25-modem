@@ -1,8 +1,8 @@
 build/
-sdkconfig
-sdkconfig.old
 managed_components/
 doc/*
 dependencies.lock
 main/spiffs_data/sstv/*
+main/spiffs_data/config.json
+main/spiffs_data/config.json.normal
 main/spiffs_data/config.json
