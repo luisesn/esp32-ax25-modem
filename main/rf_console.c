@@ -25,20 +25,31 @@ static int s_port = 23;
 // ---------------------------------------------------------------------------
 // Per-connection write buffer
 // Accumulates output so that banner + response + prompt travel as one TCP
-// segment over the slow RF link, avoiding TCP reordering stalls at the client.
+// segment (or one UDP datagram) over the slow RF link, avoiding TCP
+// reordering stalls at the client.
 // ---------------------------------------------------------------------------
 
 typedef struct {
     int  fd;
+    bool is_udp;
+    struct sockaddr_in peer;  // UDP destination (unused for TCP)
     char buf[1024];
     int  len;
 } conn_t;
 
+static void conn_send_raw(conn_t *c, const char *data, int n)
+{
+    if (c->is_udp)
+        sendto(c->fd, data, n, 0, (struct sockaddr *)&c->peer, sizeof(c->peer));
+    else
+        send(c->fd, data, n, MSG_NOSIGNAL);
+}
+
 static void conn_write(conn_t *c, const char *data, int n)
 {
     if (c->len + n > (int)sizeof(c->buf)) {
-        if (c->len > 0) { send(c->fd, c->buf, c->len, MSG_NOSIGNAL); c->len = 0; }
-        if (n >= (int)sizeof(c->buf)) { send(c->fd, data, n, MSG_NOSIGNAL); return; }
+        if (c->len > 0) { conn_send_raw(c, c->buf, c->len); c->len = 0; }
+        if (n >= (int)sizeof(c->buf)) { conn_send_raw(c, data, n); return; }
     }
     memcpy(c->buf + c->len, data, n);
     c->len += n;
@@ -46,7 +57,7 @@ static void conn_write(conn_t *c, const char *data, int n)
 
 static void conn_flush(conn_t *c)
 {
-    if (c->len > 0) { send(c->fd, c->buf, c->len, MSG_NOSIGNAL); c->len = 0; }
+    if (c->len > 0) { conn_send_raw(c, c->buf, c->len); c->len = 0; }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +197,7 @@ static void handle_client(int fd, const char *client_ip)
     // response — by then recv() has returned, so we know RF client→ESP is working,
     // which means ESP→client will also work.
 
-    conn_t c = { .fd = fd, .len = 0 };
+    conn_t c = { .fd = fd, .is_udp = false, .len = 0 };
     char line[128];
     int  pos = 0;
     bool skip_lf   = false;
@@ -231,7 +242,67 @@ static void handle_client(int fd, const char *client_ip)
 }
 
 // ---------------------------------------------------------------------------
-// Server task
+// UDP server task
+// Stateless: each received datagram is one command; each sendto() is one reply.
+// No banner, no session state — avoids TCP ordering stalls entirely.
+// ---------------------------------------------------------------------------
+
+static void rf_console_udp_task(void *arg)
+{
+    ip4_addr_t rf_ip = *(ip4_addr_t *)arg;
+    free(arg);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "udp socket() failed: %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_port        = htons((uint16_t)s_port),
+        .sin_addr.s_addr = rf_ip.addr,
+    };
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "udp bind() failed: %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    char ip_str[16];
+    inet_ntop(AF_INET, &rf_ip.addr, ip_str, sizeof(ip_str));
+    ESP_LOGI(TAG, "udp listening on %s:%d", ip_str, s_port);
+
+    char rxbuf[128];
+    for (;;) {
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+        int n = recvfrom(sock, rxbuf, sizeof(rxbuf) - 1, 0,
+                         (struct sockaddr *)&peer, &peer_len);
+        if (n <= 0) continue;
+        rxbuf[n] = '\0';
+
+        // Trim trailing CR/LF
+        while (n > 0 && (rxbuf[n - 1] == '\r' || rxbuf[n - 1] == '\n'))
+            rxbuf[--n] = '\0';
+
+        char peer_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
+        ESP_LOGD(TAG, "udp cmd from %s: %s", peer_ip, rxbuf);
+
+        conn_t c = { .fd = sock, .is_udp = true, .peer = peer, .len = 0 };
+        dispatch(&c, rxbuf);
+        conn_flush(&c);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TCP server task
 // ---------------------------------------------------------------------------
 
 static void rf_console_task(void *arg)
@@ -294,27 +365,51 @@ static void rf_console_task(void *arg)
 
 void rf_console_init(const cJSON *cfg)
 {
+    bool enable_tcp = true;
+    bool enable_udp = false;
+
     if (cfg) {
         cJSON *con = cJSON_GetObjectItem(cfg, "console");
         if (con) {
+            // Legacy: "enabled" controls TCP (backward compat)
             cJSON *en = cJSON_GetObjectItem(con, "enabled");
-            if (cJSON_IsBool(en) && !cJSON_IsTrue(en)) return;
+            if (cJSON_IsBool(en)) enable_tcp = cJSON_IsTrue(en);
+
+            // Explicit per-protocol flags override legacy "enabled"
+            cJSON *tcp = cJSON_GetObjectItem(con, "tcp");
+            if (cJSON_IsBool(tcp)) enable_tcp = cJSON_IsTrue(tcp);
+            cJSON *udp = cJSON_GetObjectItem(con, "udp");
+            if (cJSON_IsBool(udp)) enable_udp = cJSON_IsTrue(udp);
+
             cJSON *port = cJSON_GetObjectItem(con, "port");
             if (cJSON_IsNumber(port) && port->valueint > 0)
                 s_port = port->valueint;
         }
     }
 
-    ip4_addr_t *addr = malloc(sizeof(ip4_addr_t));
-    if (!addr) {
-        ESP_LOGE(TAG, "malloc failed");
-        return;
-    }
-    if (!ax25ip_get_addr(addr)) {
+    if (!enable_tcp && !enable_udp) return;
+
+    ip4_addr_t rf_ip;
+    if (!ax25ip_get_addr(&rf_ip)) {
         ESP_LOGW(TAG, "ax25ip not up — console disabled");
-        free(addr);
         return;
     }
 
-    xTaskCreate(rf_console_task, "rf_console", 6144, addr, 3, NULL);
+    if (enable_tcp) {
+        ip4_addr_t *addr = malloc(sizeof(ip4_addr_t));
+        if (!addr) { ESP_LOGE(TAG, "malloc failed"); }
+        else {
+            *addr = rf_ip;
+            xTaskCreate(rf_console_task, "rf_console", 6144, addr, 3, NULL);
+        }
+    }
+
+    if (enable_udp) {
+        ip4_addr_t *addr = malloc(sizeof(ip4_addr_t));
+        if (!addr) { ESP_LOGE(TAG, "malloc failed"); }
+        else {
+            *addr = rf_ip;
+            xTaskCreate(rf_console_udp_task, "rf_console_u", 4096, addr, 3, NULL);
+        }
+    }
 }
