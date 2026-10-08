@@ -4,6 +4,7 @@ Compila el proyecto usando el workaround obligatorio de IDF 6.1 y reporta el tam
 
 ## Pasos
 
+0. Comprueba que existe `main/LibAPRS-esp32-i2s/src/AFSK.cpp`. Si no, la librería (repo git anidado, no incluido en el clon) falta: indica `git clone https://github.com/luisesn/LibAPRS-esp32-i2s main/LibAPRS-esp32-i2s` y detente.
 1. Ejecuta `idf.py reconfigure` para regenerar `build/config/sdkconfig.cmake` antes de que ninja lo necesite.
 2. Ejecuta `ninja -C build` para compilar.
 3. Si la compilación falla, muestra el error y detente — no continúes al paso siguiente.
@@ -12,6 +13,9 @@ Compila el proyecto usando el workaround obligatorio de IDF 6.1 y reporta el tam
 6. Reporta: tamaño binario total, % de flash libre, y si hubo warnings nuevos respecto a la última compilación.
 
 ## Notas
+
+- La configuración de IDF procede de `sdkconfig.defaults` (`sdkconfig` es local y está ignorado). Tras `--clean` o borrar `sdkconfig`, el `reconfigure` lo regenera.
+- Referencia de tamaño actual: ≈ 928 KB, ≈ 46 % libre de la partición de app (1,625 MB).
 
 - No usar `idf.py build` directamente — lanza ninja demasiado pronto y falla con "FAILED: build.ninja" en build directories recién limpiados.
 - Si el usuario pasa un argumento (ej. `--clean`), ejecuta `idf.py fullclean` antes del reconfigure.

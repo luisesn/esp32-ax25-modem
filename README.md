@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-06-07): compila limpio (binary ~921 KB, 46 % libre). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json`. RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-10-08): compila limpio (binario ~928 KB, ~46 % libre de la partición de app). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (squelch HFNE) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json`. **Novedades desde junio**: WiFi multi-red con reconexión; KISS TCP con keepalive, escritura con buffer y contrapresión; deduplicación de tramas del doble módem (`on_ax25_raw_frame`, 300 ms); tráfico de terceros en el log; baliza GPS periódica (`gps.use_for_beacon`); consola RF por TCP y/o UDP; `sdkconfig.defaults` completo (build reproducible); `APRS_poll()` en tarea propia (`aprs_poll_task`). RX pendiente verificación con señal RF real.**
 
 ---
 
@@ -53,7 +53,7 @@ Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-e
 - **Salida de audio (TX)**: DAC1 en GPIO 25 (`dac_continuous`, muestras 8-bit directas). Sin filtro externo necesario para la mayoría de transceptores.
 - **Entrada de audio (RX)**: GPIO 35 / ADC1_CH7 (`adc_continuous` DMA a 48 kHz, atenuación 12 dB → rango 0–3,1 V). Entrada AC-acoplada desde la salida de altavoz del transceptor.
 - **PTT**: GPIO 26, activo en nivel alto (1 = transmitir, 0 = reposo). Restricción de hardware (también es DAC2). Definido en `config.h`.
-- **GPS**: UART2 a 9600 baud. RX = GPIO 16 (pin SD DAT2 liberado), TX = GPIO 4 (pin SD DAT1 liberado, opcional para configurar el módulo GPS).
+- **GPS**: UART2 a 9600 baud. RX = GPIO 4, TX = GPIO 16 (opcional, para configurar el módulo GPS); ambos GPIOs libres, no son pines SD.
 - **Display LCD**: SSD1306 128×64 OLED por I2C. SDA = GPIO 13, SCL = GPIO 19.
 
 ## Modos de operación
@@ -71,7 +71,7 @@ Seleccionado en `config.h` con `TNC_MODE` (requiere recompilación):
 esp32-aprs-modem/
 ├── CMakeLists.txt                     proyecto ESP-IDF raíz
 ├── sdkconfig                          configuración IDF (target = esp32)
-├── sdkconfig.defaults                 valores por defecto (incluye CONFIG_LWIP_IP_FORWARD=y)
+├── sdkconfig.defaults                 configuración reproducible: flash 4 MB, partitions.csv, WS, lwIP (IP_FORWARD…), WiFi
 ├── partitions.csv                     tabla de particiones (NVS + OTA×2 + SPIFFS 704 KB)
 ├── main/
 │   ├── CMakeLists.txt                 fuentes, dependencias y creación de imagen SPIFFS
@@ -112,17 +112,17 @@ esp32-aprs-modem/
 │   │                                  150–2000 ms; REST: /api/tune/start, /api/tune/stop
 │   ├── il2p.h / il2p.c                IL2P: RX state machine + TX encoder; Reed-Solomon FEC +
 │   │                                  LFSR scrambling sobre AFSK Bell-202; routing smart_tx_frame
-│   ├── rs_codec.h / rs_codec.c        codec Reed-Solomon para IL2P: RS(255,239) GF(2⁸) y
-│   │                                  RS(15,13) GF(2⁴); BM + Chien + Forney con verificación
+│   ├── rs_codec.h / rs_codec.c        codec Reed-Solomon para IL2P sobre GF(2⁸): payload RS(255,239) y
+│   │                                  cabecera (2 raíces); BM + Chien + Forney con verificación
 │   ├── ax25ip.h / ax25ip.c            gateway IP sobre radio; modo TUN (tncattach) o AX.25 RFC 1226;
 │   │                                  paquetes IP logueados en el log APRS de la UI web
 │   ├── aux_config.h / aux_config.c    carga/guarda config JSON desde SPIFFS (/spiffs/config.json)
 │   ├── aux_file_management.h / .c     utilidades de sistema de ficheros SPIFFS
 │   ├── spiffs_data/config.json        configuración activa (credenciales reales — no subir a git)
-│   ├── spiffs_data/config.json.example  esqueleto de configuración con todos los campos
+│   ├── spiffs_data/config.json.normal   copia local de referencia con todos los campos (en .gitignore)
 │   ├── spiffs_data/index.html         UI web completa (log APRS, mensajes, baliza posición,
 │   │                                  audio IMA ADPCM, grabación WAV, editor de configuración)
-│   ├── idf_component.yml              declaración de dependencias (esp-dsp — pendiente eliminar)
+│   ├── idf_component.yml              declaración de dependencias (espressif/cjson)
 │   └── LibAPRS-esp32-i2s/src/
 │       ├── LibAPRS.{h,cpp}            API de alto nivel (APRS_init, queue_msg, queue_ack,
 │       │                              queue_beacon, getCallsign…)
@@ -150,7 +150,10 @@ esp32-aprs-modem/
 ## Compilación y flasheo
 
 ```bash
-# Antes: editar main/spiffs_data/config.json con tus credenciales WiFi
+# Antes: si falta, traer la librería (repo git anidado, no incluida en el clon):
+#   git clone https://github.com/luisesn/LibAPRS-esp32-i2s main/LibAPRS-esp32-i2s
+# Editar main/spiffs_data/config.json con tus credenciales WiFi (no commitearlas)
+# La configuración de IDF sale de sdkconfig.defaults
 idf.py set-target esp32
 idf.py reconfigure   # necesario en IDF 6.1 antes del primer build
 ninja -C build       # o: idf.py build (puede fallar en primer build sin reconfigure)
@@ -178,7 +181,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
    - Notifica a los clientes WebSocket con JSON `{"src":..., "dst":..., "path":..., "info":...}`.
 6. `digi_init()` configura el digipeater WIDEn-N desde `config.json`.
 7. `morse_init()` configura la baliza morse CW. `sstv_init()` crea el directorio `/spiffs/sstv` y registra los endpoints REST de SSTV. `ota_init()` registra el endpoint `POST /api/ota/upload`. Los dos primeros se despachan desde `receive_audio_task` mediante el hook registrado con `afsk_set_dispatch_hook()`.
-8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, GPIO16/GPIO4, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
+8. `gps_init()` arranca la tarea FreeRTOS GPS (UART2, RX=GPIO4 / TX=GPIO16, 9600 baud). Parsea $GPRMC y $GPGGA y actualiza la struct global `g_gps_pos` bajo mutex.
 9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO13/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
 10. `rf_console_init()` arranca el servidor de consola TCP sobre la IP RF (`ip.addr`) si `console.enabled: true` en config.json. Acepta una conexión telnet a la vez, emite prompt `> `, y atiende los comandos `status` (callsign, IPs, heap libre, uptime), `config` (vuelca config.json), `help` y `quit`.
 11. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
@@ -498,8 +501,8 @@ El firmware incluye un receptor GPS por UART2 que parsea sentencias NMEA estánd
 
 | Señal | GPIO |
 |-------|------|
-| UART2 RX (datos del GPS) | GPIO 16 (pin SD DAT2 liberado) |
-| UART2 TX (configuración del GPS, opcional) | GPIO 4 (pin SD DAT1 liberado) |
+| UART2 RX (datos del GPS) | GPIO 4 |
+| UART2 TX (configuración del GPS, opcional) | GPIO 16 |
 
 ### Protocolo y parsing
 
@@ -552,12 +555,14 @@ O establece `CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y` en `menuconfig`.
 "gps": {
   "enabled": true,
   "baud": 9600,
-  "use_for_beacon": false
+  "use_for_beacon": false,
+  "beacon_period_s": 600
 }
 ```
 
 - `enabled: false` deshabilita UART2 y la tarea GPS; el firmware arranca igualmente.
-- `use_for_beacon`: reservado para uso futuro (tomar lat/lon del GPS en balizas APRS automáticas).
+- `use_for_beacon`: si es `true`, una tarea transmite periódicamente una baliza de posición con la posición del GPS.
+- `beacon_period_s`: periodo de la baliza en segundos (600 por defecto).
 - La tarea GPS (`gps_task`) tiene prioridad 4, stack 2048 B.
 
 ---
@@ -643,7 +648,7 @@ IL2P reemplaza el framing AX.25/HDLC con **Reed-Solomon FEC** y **scrambling LFS
 | Mecanismo | Descripción |
 |-----------|-------------|
 | **Scrambling LFSR** | Polinomio x⁹+x⁴+1, estado inicial 0x1FF. Evita largas rachas de ceros/unos que dificultan la sincronización de símbolo |
-| **RS(15,13) header** | Cabecera de 13 bytes → 2 bytes de paridad. Corrige hasta 1 error de byte |
+| **RS header (GF(2⁸))** | Cabecera de 13 bytes → 2 bytes de paridad (2 raíces). Corrige hasta 1 error de byte |
 | **RS(255,239) payload** | Bloques de hasta 239 bytes de datos → 16 bytes de paridad. Corrige hasta 8 errores de byte por bloque |
 | **Sync word** | `0xF1 0x5E 0x48` (24 bits, no scrambled), precedido de ≥4 flags `0x7E` de preámbulo |
 
@@ -711,12 +716,16 @@ telnet <ip.addr> 23
 ```json
 "console": {
   "enabled": true,
-  "port": 23
+  "port": 23,
+  "tcp": true,
+  "udp": false
 }
 ```
 
 - Solo acepta conexiones entrantes por la interfaz RF (`ip.addr`); no escucha en la interfaz WiFi.
-- Un único cliente simultáneo; una segunda conexión no se acepta hasta que se cierre la activa.
+- `tcp` / `udp` activan cada transporte por separado (por defecto TCP sí, UDP no). UDP envía cada respuesta en un datagrama único, evitando el handshake TCP sobre el enlace lento.
+- Un único cliente simultáneo; una segunda conexión no se acepta hasta que se cierre la activa. (TCP)
+- Sin autenticación: está pensada para la interfaz RF.
 - `enabled: false` (o si el gateway IP no está activo) desactiva el servidor completamente.
 
 ---
@@ -914,7 +923,7 @@ direwolf -c direwolf.conf
 
 ## Configuración antes de flashear
 
-Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y rellena tus datos. La estructura completa con todos los campos es:
+Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.normal`) y rellena tus datos. **Cuidado**: este fichero está seguido por git y contiene credenciales WiFi; no las incluyas en commits. La estructura completa con todos los campos es:
 
 ```json
 {
@@ -1016,7 +1025,7 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 | `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo, sin dedup) |
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
-| `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre (squelch HFNE cerrado) antes de transmitir |
+| `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre (squelch HFNE cerrado) antes de transmitir. **Sólo efectivo si el squelch HFNE está activo (modo monitor o repetidor)**; si no, el canal se considera siempre libre |
 | `tx` | `lbt_max_wait_ms` | int | Tiempo máximo de espera LBT (ms); si expira, transmite de todas formas con aviso en log |
 | `il2p` | `enabled` | bool | Activa IL2P: RX acepta IL2P en paralelo con AX.25; TX enruta tráfico IP (PID=0xCC) vía IL2P y APRS vía AX.25 normal |
 | `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo |
@@ -1037,7 +1046,6 @@ Copia `main/spiffs_data/config.json.example` a `main/spiffs_data/config.json` y 
 - **SD e I2C comparten GPIO13** — GPIO13 es el CS/DAT3 de la SD y también el SDA del bus I2C (SSD1306). No se puede usar la tarjeta SD si el display está conectado.
 - **Un solo cliente TCP KISS a la vez** — el servidor acepta reconexiones, pero no conexiones simultáneas.
 - **FIFOs internos** (report.md §2.6) — protegidos con `portMUX_TYPE`; riesgo residual bajo en escenarios de alta carga.
-- **`esp-dsp`** sigue declarado en `idf_component.yml` sin uso activo — alarga el build innecesariamente.
 - **Pestaña TUNE sin guardar automático** — al terminar el barrido solo muestra la recomendación; el valor debe aplicarse manualmente en la pestaña CONFIG.
 
 ## Indicativo y licencia de radioaficionado
@@ -1065,8 +1073,8 @@ Estos son los GPIO **configurados en el código** y los que usa activamente el f
 | GPIO37 | `GPIO_AUDIO_TRIGGER` | Trigger de audio (sin uso activo) | Solo entrada |
 | GPIO13 | `GPIO_I2C_SDA` | I2C SDA — bus SSD1306 y periféricos I2C | |
 | GPIO19 | `GPIO_I2C_SCL` | I2C SCL — bus SSD1306 y periféricos I2C | |
-| GPIO16 | `GPIO_GPS_RX`  | UART2 RX — datos NMEA del módulo GPS | Era SD DAT2 (no conectar SD si se usa GPS) |
-| GPIO4  | `GPIO_GPS_TX`  | UART2 TX — configuración módulo GPS (opcional) | Era SD DAT1 |
+| GPIO4  | `GPIO_GPS_RX`  | UART2 RX — datos NMEA del módulo GPS | GPIO libre |
+| GPIO16 | `GPIO_GPS_TX`  | UART2 TX — configuración módulo GPS (opcional) | GPIO libre |
 
 GPIO_LED_TX está desactivado (`-1`) en `config.h`. GPIO22 (LED integrado Lolin32) está ahora libre.
 
@@ -1093,9 +1101,9 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 | GPIO18 | `SD CARD CLK / SCK` | SD en modo SPI |
 | GPIO5  | `SD CARD ENABLE` | Alimentación/enable SD — no libre |
 | GPIO0  | `TOUCH PAD 1` | Entrada táctil / strapping boot |
-| GPIO4  | — | GPIO libre — **usado como GPS UART2 TX** |
+| GPIO4  | — | GPIO libre — **usado como GPS UART2 RX** |
 | GPIO6  | `TOUCH SENSOR` | Sensor táctil — no libre |
-| GPIO16 | — | GPIO libre — **usado como GPS UART2 RX** |
+| GPIO16 | — | GPIO libre — **usado como GPS UART2 TX** |
 | GPIO17 | `TOUCH SENSOR` | Sensor táctil — no libre |
 
 ---
@@ -1140,8 +1148,8 @@ Conexiones del hardware ESPRI. Los pines de audio y PTT coinciden con la configu
 
 | Función | GPIO |
 |---------|------|
-| UART2 RX (datos GPS) | GPIO16 |
-| UART2 TX (config GPS, opcional) | GPIO4 |
+| UART2 RX (datos GPS) | GPIO4 |
+| UART2 TX (config GPS, opcional) | GPIO16 |
 
 - Velocidad por defecto: 9600 baud. Configurable en `config.json` (`gps.baud`).
 - GPIO16 y GPIO4 son GPIOs libres en la Lolin32 Lite (no forman parte del circuito SD de la ESPRI).
@@ -1193,7 +1201,7 @@ La SD está conectada en modo SPI:
 | GPIO22 | Libre (LED integrado Lolin32 — no usado por firmware) |
 | GPIO32 | Libre (LED verde ESPRI — no usado por firmware) |
 
-> GPIO33 → **LED verde RX** (`GPIO_LED_RX`). GPIO23 → **LED rojo WARN** (`GPIO_LED_WARN`). GPIO19 → **I2C SCL** (SSD1306). GPIO13 → **I2C SDA** (SSD1306). GPIO16 → **GPS UART2 RX**. GPIO4 → **GPS UART2 TX**. Todos asignados en `config.h`.
+> GPIO33 → **LED verde RX** (`GPIO_LED_RX`). GPIO23 → **LED rojo WARN** (`GPIO_LED_WARN`). GPIO19 → **I2C SCL** (SSD1306). GPIO13 → **I2C SDA** (SSD1306). GPIO4 → **GPS UART2 RX**. GPIO16 → **GPS UART2 TX**. Todos asignados en `config.h`.
 
 #### Usos recomendados para los pines libres restantes
 - SPI auxiliar
@@ -1255,7 +1263,7 @@ No sirven para:
 - GPIO25, GPIO26, GPIO35 (audio TX/PTT/RX)
 - GPIO33 (LED_RX verde), GPIO23 (LED_WARN rojo)
 - GPIO13, GPIO19 (I2C SDA/SCL — SSD1306)
-- GPIO16, GPIO4 (GPS UART2 RX/TX)
+- GPIO4, GPIO16 (GPS UART2 RX/TX)
 
 #### Libres “buenos”
 - GPIO22, GPIO32

@@ -7,7 +7,9 @@ Mucho más rápido que un flash completo cuando solo cambia la UI web o la confi
 
 - Offset: `0x350000`
 - Tamaño: `0xb0000` (704 KB)
-- Binario generado: `build/spiffs.bin`
+- Binario generado: `build/spiffs.bin` (valores de `partitions.csv`; verifícalos si se cambia la tabla)
+
+> **Credenciales**: `main/spiffs_data/config.json` contiene el WiFi real y está seguido por git. Flashearlo es correcto; commitearlo no.
 
 ## Pasos
 

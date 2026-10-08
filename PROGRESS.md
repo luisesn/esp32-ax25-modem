@@ -1,9 +1,9 @@
 # Progreso de arreglos — esp32-aprs-modem
 
-Seguimiento de la resolución de problemas listados en [report.md](report.md).
+Seguimiento de la resolución de problemas listados en [doc/obsolete/report.md](doc/obsolete/report.md) (informe original, ya no versionado en la raíz). Análisis de mejoras actual: [informe_mejoras.md](informe_mejoras.md).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-06-05
+Última actualización: 2026-10-08
 
 ---
 
@@ -30,14 +30,14 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 | # | Problema | Estado |
 |---|----------|--------|
 | 2.1 | Eliminar buffers FFT | ✅ eliminados de facto en ronda 2026-04-17 |
-| 2.2 | `freeMemory()` constante ficticia | ⬜ pendiente |
+| 2.2 | `freeMemory()` constante ficticia | ✅ ver más abajo |
 | 2.3 | `Afsk` estático en lugar de `malloc` | ✅ ya es estático (AFSK.cpp) |
 | 2.4 | Macros deprecated I2S/ADC en `device.h` | ✅ renombradas a `AUDIO_ADC_*` |
 | 2.5 | Pausar RX durante TX | ✅ resuelto 2026-04-27 (ver bitácora) |
 | 2.6 | FIFOs sin protección de concurrencia | ✅ variantes `_locked` ahora `static inline` con `portMUX_TYPE` |
-| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ⬜ pendiente en modo APRS; en KISS el callback es rápido |
+| 2.7 | `APRS_poll` en tarea RX — desacoplar callback | ✅ `aprs_poll_task` (prio 9); el raw_hook corre en esa tarea |
 | 2.8 | `FakeArduino::Serial` stub sin implementación | ⬜ pendiente |
-| 3.1-3.6 | Limpieza restos AVR, `src.ino`, logs, etc. | ⬜ pendiente |
+| 3.1-3.6 | Limpieza restos AVR, `src.ino`, logs, etc. | ⬜ parcial (herencia AVR/Arduino aún en `constants.h`, `FakeArduino`) |
 | 3.3 | `aprs_msg_callback` como global implícita | ✅ `main.c` reescrito con hooks explícitos; ya no aplica |
 | nuevo | Indicativo y SSID desde config.json en KISS | ✅ 2026-04-30 |
 | nuevo | UI web con log APRS, envío y audio | ✅ 2026-04-30 |
@@ -514,3 +514,28 @@ En `try_auto_ack`, `remote_cmd_handle` se llamaba **antes** de `APRS_queue_ack`.
 - **Prevención de zoom iOS**: `font-size: 16px !important` en `input, select, textarea` bajo `≤700px` (iOS no hace zoom si el font-size del campo es ≥16 px).
 - **Touch targets**: `.tab-btn` con `min-width: 2.75rem; padding: .5rem .35rem` en móvil para facilitar el toque con el dedo.
 - **Meter**: `width: 100%; max-width: none` en móvil.
+
+---
+
+## 2026-10-08 — Sincronización de documentación y estado desde junio
+
+Resumen de lo incorporado desde la entrada de 2026-06-05 (según el código actual):
+
+- **IL2P + Reed-Solomon** (`il2p.c`, `rs_codec.c`): FEC y scrambler sobre el mismo AFSK; RS sobre GF(2⁸) para payload y cabecera; `smart_tx_frame` enruta PID 0xCC por IL2P. Verificación HW / interoperabilidad con Dire Wolf pendientes ⚠️.
+- **WiFi multi-red** con reconexión automática y fallback AP; **KISS TCP** con keepalive, escritura con buffer y contrapresión (`KISS_TX_ENQUEUE_TIMEOUT_MS` = 15 s).
+- **Dedup RX** del doble módem en `on_ax25_raw_frame()` (300 ms): evita doble ACK / digipetición / inyección IP.
+- **Tráfico de terceros** parseado y mostrado en el log APRS.
+- **Baliza GPS periódica** (`gps.use_for_beacon`, `gps.beacon_period_s`) y pines GPS documentados correctamente (RX=GPIO4, TX=GPIO16).
+- **Consola RF** por TCP y/o UDP (`console.tcp`, `console.udp`).
+- **LBT + inhibición post-RX** (`tx.lbt_enabled`, `tx.lbt_max_wait_ms`, `aprs.post_rx_tx_delay_ms`); LBT sólo efectivo con squelch HFNE activo.
+- **`APRS_poll()` en `aprs_poll_task`** (prio 9), desacoplado de `receive_audio_task`.
+- **`sdkconfig.defaults` completo**: `idf.py reconfigure` desde cero regenera un `sdkconfig` idéntico.
+- Dependencia `esp-dsp` eliminada de `idf_component.yml`; binario ≈ 928 KB (≈ 46 % libre).
+- Repetidor de voz deshabilitado por defecto (`REPEATER_ENABLED 0`, presión de heap).
+- Documentación: CLAUDE.md, README.md, skills (`/build`, `/flash-spiffs`, `/trap-check`) e `informe_mejoras.md` actualizados.
+
+### Pendiente
+- ⚠️ Verificación RX con señal RF real; HW de repetidor, IL2P y display.
+- ⬜ `LibAPRS-esp32-i2s` como repo anidado sin enlazar (convertir en submódulo; 5 ficheros con cambios sin commit).
+- ⬜ `config.json` con credenciales seguido por git (también en el historial).
+- ⬜ FIFOs no `_locked` en rutas multi-tarea sin auditar; sin tests ni CI.

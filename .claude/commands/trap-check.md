@@ -5,7 +5,7 @@ documentadas para este proyecto. Detecta regresiones antes de compilar o flashea
 
 ## Pasos
 
-1. Obtén el diff completo: `git diff HEAD` (incluye staged y unstaged).
+1. Obtén el diff completo: `git diff HEAD` (incluye staged y unstaged) **y** el de la librería, que es un repo anidado y no aparece en el anterior: `git -C main/LibAPRS-esp32-i2s diff HEAD`.
    Si no hay cambios, indica que no hay nada que revisar.
 
 2. Para cada trampa de la lista siguiente, comprueba si el diff toca código relevante
@@ -47,6 +47,23 @@ documentadas para este proyecto. Detecta regresiones antes de compilar o flashea
 
 ### AX25 / HDLC / CRC
 - ¿Algún cambio toca `AX25.cpp`, `AX25.h`, `HDLC.h`, o `CRC-CCIT.c`? Estos ficheros son código maduro — cualquier cambio requiere justificación explícita.
+
+### Callback RX y deduplicación
+- ¿Se añade un filtro de duplicados fuera de `on_ax25_raw_frame()` (LibAPRS, `ax25ip.c`, `digipeater.c`)? El dedup del doble módem vive sólo ahí (`rx_frame_is_duplicate`, 300 ms); otro filtro rompe `rx_stats_v1/v2`.
+- ¿El `raw_hook` o `aprs_poll_task` bloquea (mutex, WS lento, `vTaskDelay` largo)? Se ejecuta en `aprs_poll_task` (prio 9); bloquear llena los FIFOs de RX.
+- ¿Se usan `fifo_*` sin lock en una ruta multi-tarea/ISR? Usar variantes `_locked`.
+
+### LBT / inhibición post-RX
+- LBT usa `channel_is_busy()` = squelch HFNE activo y abierto: sin monitor/repetidor activo no hace nada. ¿El cambio asume lo contrario?
+- ¿Se rompe `afsk_notify_rx_frame()` o `post_rx_tx_delay_ms` (se salta la ventana de inhibición)?
+
+### Configuración, credenciales y repos
+- ¿Se cambia un ajuste de `sdkconfig` sin trasladarlo a `sdkconfig.defaults`?
+- ¿El diff incluye credenciales WiFi reales en `main/spiffs_data/config.json`? No commitearlas.
+- ¿Hay cambios en `main/LibAPRS-esp32-i2s/`? Deben commitearse dentro del repo anidado, no en el principal.
+
+### PTT: no invertir
+- Reconfirmar que ninguna llamada `gpio_set_level(GPIO_PTT_OUT, …)` cambia de polaridad (activo alto).
 
 ## Formato del informe
 
