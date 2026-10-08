@@ -61,95 +61,6 @@ static bool log_is_ephemeral(const char *text) {
            strstr(text, "\"type\":\"rx_stats\"")       != NULL;
 }
 
-// ─── IMA ADPCM ───────────────────────────────────────────────────────────────
-
-static const int step_table[89] = {
-    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41,
-    45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190,
-    209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-    876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499,
-    2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845,
-    8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385,
-    24623, 27086, 29794, 32767
-};
-static const int index_table[8] = { -1, -1, -1, -1, 2, 4, 6, 8 };
-
-static uint8_t adpcm_encode(adpcm_state_t *st, int16_t sample) {
-    int diff = sample - (int16_t)st->predictor;
-    uint8_t nibble = 0;
-    if (diff < 0) { nibble = 8; diff = -diff; }
-    int step = step_table[(int)st->step_index];
-    if (diff >= step)       { nibble |= 4; diff -= step; }
-    if (diff >= (step >> 1)){ nibble |= 2; diff -= step >> 1; }
-    if (diff >= (step >> 2)){ nibble |= 1; }
-
-    int delta = step >> 3;
-    if (nibble & 4) delta += step;
-    if (nibble & 2) delta += step >> 1;
-    if (nibble & 1) delta += step >> 2;
-    if (nibble & 8) st->predictor -= delta;
-    else            st->predictor += delta;
-    if (st->predictor >  32767) st->predictor =  32767;
-    if (st->predictor < -32768) st->predictor = -32768;
-
-    st->step_index += index_table[nibble & 7];
-    if (st->step_index < 0)  st->step_index = 0;
-    if (st->step_index > 88) st->step_index = 88;
-    return nibble & 0x0F;
-}
-
-// Codifica 1017 muestras int8 en un bloque ADPCM WAV de 512 bytes.
-// samples[0] se guarda como predictor de cabecera (no encoded); samples[1..1016]
-// se empacan como nibbles (low nibble primero), 2 por byte → 508 bytes de datos.
-void encode_block(adpcm_state_t *st, const int8_t *samples, uint8_t *block) {
-    // La primera muestra es el predictor inicial (no se codifica como nibble)
-    int16_t first = (int16_t)samples[0] << 8;
-    st->predictor  = first;
-    // step_index se hereda del bloque anterior (estado continuo)
-
-    block[0] = (uint8_t)(st->predictor & 0xFF);
-    block[1] = (uint8_t)((st->predictor >> 8) & 0xFF);
-    block[2] = (uint8_t)st->step_index;
-    block[3] = 0;
-
-    for (int i = 0; i < 508; i++) {
-        int si = 1 + i * 2;
-        uint8_t lo = adpcm_encode(st, (int16_t)samples[si]     << 8);
-        uint8_t hi = adpcm_encode(st, (int16_t)samples[si + 1] << 8);
-        block[4 + i] = (uint8_t)(lo | (hi << 4));
-    }
-}
-
-static int8_t adpcm_decode_nibble(adpcm_state_t *st, uint8_t nibble) {
-    int step  = step_table[(int)st->step_index];
-    int delta = step >> 3;
-    if (nibble & 4) delta += step;
-    if (nibble & 2) delta += step >> 1;
-    if (nibble & 1) delta += step >> 2;
-    if (nibble & 8) st->predictor -= delta;
-    else            st->predictor += delta;
-    if (st->predictor >  32767) st->predictor =  32767;
-    if (st->predictor < -32768) st->predictor = -32768;
-    st->step_index += index_table[nibble & 7];
-    if (st->step_index < 0)  st->step_index = 0;
-    if (st->step_index > 88) st->step_index = 88;
-    return (int8_t)(st->predictor >> 8);
-}
-
-void decode_block(const uint8_t *block, int8_t *samples) {
-    adpcm_state_t st;
-    st.predictor  = (int16_t)((uint16_t)block[0] | ((uint16_t)block[1] << 8));
-    st.step_index = (int8_t)block[2];
-    if (st.step_index < 0)  st.step_index = 0;
-    if (st.step_index > 88) st.step_index = 88;
-    samples[0] = (int8_t)(st.predictor >> 8);
-    for (int i = 0; i < 508; i++) {
-        uint8_t byte = block[4 + i];
-        samples[1 + i * 2]     = adpcm_decode_nibble(&st, byte & 0x0F);
-        samples[1 + i * 2 + 1] = adpcm_decode_nibble(&st, byte >> 4);
-    }
-}
-
 // ─── WAV header ──────────────────────────────────────────────────────────────
 
 // nAvgBytesPerSec = 512 * 9600 / 1017 = 4834
@@ -1332,121 +1243,110 @@ void audio_stream_init(void) {
         return;
     }
 
-    static const httpd_uri_t uri_index = {
-        .uri     = "/",
-        .method  = HTTP_GET,
-        .handler = index_handler,
-    };
-    static const httpd_uri_t uri_ws = {
-        .uri         = "/ws",
-        .method      = HTTP_GET,
-        .handler     = ws_handler,
-        .is_websocket = true,
-        .ws_post_handshake_cb = ws_post_handshake,
-    };
-    static const httpd_uri_t uri_aprs_send = {
-        .uri     = "/api/aprs/send",
-        .method  = HTTP_POST,
-        .handler = aprs_send_handler,
-    };
-    static const httpd_uri_t uri_me = {
-        .uri     = "/api/me",
-        .method  = HTTP_GET,
-        .handler = me_handler,
-    };
-    static const httpd_uri_t uri_sys = {
-        .uri     = "/api/sys",
-        .method  = HTTP_GET,
-        .handler = sys_handler,
-    };
-    static const httpd_uri_t uri_beacon = {
-        .uri     = "/api/aprs/beacon",
-        .method  = HTTP_POST,
-        .handler = aprs_beacon_handler,
-    };
-    static const httpd_uri_t uri_cfg_get = {
-        .uri     = "/api/config",
-        .method  = HTTP_GET,
-        .handler = config_get_handler,
-    };
-    static const httpd_uri_t uri_cfg_post = {
-        .uri     = "/api/config",
-        .method  = HTTP_POST,
-        .handler = config_post_handler,
-    };
-    static const httpd_uri_t uri_morse_trigger = {
-        .uri     = "/api/morse/trigger",
-        .method  = HTTP_POST,
-        .handler = morse_trigger_handler,
-    };
-    static const httpd_uri_t uri_log = {
-        .uri     = "/api/log",
-        .method  = HTTP_GET,
-        .handler = log_handler,
-    };
-    static const httpd_uri_t uri_rx_stats = {
-        .uri     = "/api/rx/stats",
-        .method  = HTTP_GET,
-        .handler = rx_stats_handler,
-    };
-    static const httpd_uri_t uri_reboot = {
-        .uri     = "/api/reboot",
-        .method  = HTTP_POST,
-        .handler = reboot_handler,
-    };
-    static const httpd_uri_t uri_spiffs_upload = {
-        .uri     = "/api/spiffs/upload",
-        .method  = HTTP_POST,
-        .handler = spiffs_upload_handler,
-    };
 
     s_log_mutex = xSemaphoreCreateMutex();
 
-    httpd_register_uri_handler(s_httpd, &uri_index);
-    httpd_register_uri_handler(s_httpd, &uri_ws);
-    httpd_register_uri_handler(s_httpd, &uri_aprs_send);
-    httpd_register_uri_handler(s_httpd, &uri_me);
-    httpd_register_uri_handler(s_httpd, &uri_sys);
-    httpd_register_uri_handler(s_httpd, &uri_beacon);
-    httpd_register_uri_handler(s_httpd, &uri_cfg_get);
-    httpd_register_uri_handler(s_httpd, &uri_cfg_post);
-    httpd_register_uri_handler(s_httpd, &uri_morse_trigger);
-    httpd_register_uri_handler(s_httpd, &uri_log);
-    httpd_register_uri_handler(s_httpd, &uri_rx_stats);
-    httpd_register_uri_handler(s_httpd, &uri_reboot);
-    httpd_register_uri_handler(s_httpd, &uri_spiffs_upload);
+    static const httpd_uri_t routes[] = {
+        {
+            .uri     = "/",
+            .method  = HTTP_GET,
+            .handler = index_handler,
+        },
+        {
+            .uri         = "/ws",
+            .method      = HTTP_GET,
+            .handler     = ws_handler,
+            .is_websocket = true,
+            .ws_post_handshake_cb = ws_post_handshake,
+        },
+        {
+            .uri     = "/api/aprs/send",
+            .method  = HTTP_POST,
+            .handler = aprs_send_handler,
+        },
+        {
+            .uri     = "/api/me",
+            .method  = HTTP_GET,
+            .handler = me_handler,
+        },
+        {
+            .uri     = "/api/sys",
+            .method  = HTTP_GET,
+            .handler = sys_handler,
+        },
+        {
+            .uri     = "/api/aprs/beacon",
+            .method  = HTTP_POST,
+            .handler = aprs_beacon_handler,
+        },
+        {
+            .uri     = "/api/config",
+            .method  = HTTP_GET,
+            .handler = config_get_handler,
+        },
+        {
+            .uri     = "/api/config",
+            .method  = HTTP_POST,
+            .handler = config_post_handler,
+        },
+        {
+            .uri     = "/api/morse/trigger",
+            .method  = HTTP_POST,
+            .handler = morse_trigger_handler,
+        },
+        {
+            .uri     = "/api/log",
+            .method  = HTTP_GET,
+            .handler = log_handler,
+        },
+        {
+            .uri     = "/api/rx/stats",
+            .method  = HTTP_GET,
+            .handler = rx_stats_handler,
+        },
+        {
+            .uri     = "/api/reboot",
+            .method  = HTTP_POST,
+            .handler = reboot_handler,
+        },
+        {
+            .uri     = "/api/spiffs/upload",
+            .method  = HTTP_POST,
+            .handler = spiffs_upload_handler,
+        },
+        {
+            .uri     = "/api/repeater/status",
+            .method  = HTTP_GET,
+            .handler = repeater_status_handler,
+        },
+        {
+            .uri     = "/api/repeater/enable",
+            .method  = HTTP_POST,
+            .handler = repeater_enable_handler,
+        },
+        {
+            .uri     = "/api/squelch/sf_config",
+            .method  = HTTP_POST,
+            .handler = squelch_sf_config_handler,
+        },
+        {
+            .uri     = "/api/squelch/status",
+            .method  = HTTP_GET,
+            .handler = squelch_status_handler,
+        },
+        {
+            .uri     = "/api/squelch/monitor",
+            .method  = HTTP_POST,
+            .handler = squelch_monitor_handler,
+        },
+    };
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        if (httpd_register_uri_handler(s_httpd, &routes[i]) != ESP_OK)
+            ESP_LOGE(TAG, "register_uri %s failed", routes[i].uri);
+    }
 
-    static const httpd_uri_t uri_rep_status = {
-        .uri     = "/api/repeater/status",
-        .method  = HTTP_GET,
-        .handler = repeater_status_handler,
-    };
-    static const httpd_uri_t uri_rep_enable = {
-        .uri     = "/api/repeater/enable",
-        .method  = HTTP_POST,
-        .handler = repeater_enable_handler,
-    };
-    httpd_register_uri_handler(s_httpd, &uri_rep_status);
-    httpd_register_uri_handler(s_httpd, &uri_rep_enable);
 
-    static const httpd_uri_t uri_sf_config = {
-        .uri     = "/api/squelch/sf_config",
-        .method  = HTTP_POST,
-        .handler = squelch_sf_config_handler,
-    };
-    static const httpd_uri_t uri_sq_status = {
-        .uri     = "/api/squelch/status",
-        .method  = HTTP_GET,
-        .handler = squelch_status_handler,
-    };
-    static const httpd_uri_t uri_sq_monitor = {
-        .uri     = "/api/squelch/monitor",
-        .method  = HTTP_POST,
-        .handler = squelch_monitor_handler,
-    };
-    httpd_register_uri_handler(s_httpd, &uri_sf_config);
-    httpd_register_uri_handler(s_httpd, &uri_sq_status);
-    httpd_register_uri_handler(s_httpd, &uri_sq_monitor);
+
 
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
