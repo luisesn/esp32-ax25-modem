@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,6 +34,7 @@
 #define HOST_MAX          64
 #define CONNECT_TIMEOUT_S 30
 #define TX_HIST           6
+#define PING_TIMEOUT_MS   30000
 
 typedef enum { ND_IDLE = 0, ND_PING, ND_TCP, ND_UDP } nd_mode_t;
 static const char *const MODE_NAME[] = { "idle", "ping", "tcp", "udp" };
@@ -112,11 +114,15 @@ static void buf_printf(const char *fmt, ...)
     if (n < 0) return;
     if (n >= (int)sizeof(tmp)) n = sizeof(tmp) - 1;
     buf_put(tmp, (size_t)n);
+    ESP_LOGI(TAG, "%.*s", n > 0 && tmp[n - 1] == '\n' ? n - 1 : n, tmp);
 }
 
-static void finish(void)
+// Sólo actúa si la operación sigue siendo la del worker que llama (un stop
+// forzado incrementa s_gen y deja a un worker atascado sin efecto).
+static void finish(uint32_t gen)
 {
     xSemaphoreTake(s_mx, portMAX_DELAY);
+    if (gen != s_gen) { xSemaphoreGive(s_mx); return; }
     if (s_fd >= 0) { close(s_fd); s_fd = -1; }
     s_connected = false;
     s_ping_task = NULL;
@@ -134,9 +140,19 @@ static bool resolve(const char *host, uint16_t port, int socktype, struct addrin
 }
 
 // ── Ping ────────────────────────────────────────────────────────────────────
+// Cada sesión lleva un contexto propio. Al abortar, el worker no espera a que
+// termine el ping (el timeout puede ser largo): marca el contexto como
+// "detached" y es on_ping_end quien borra la sesión y libera el contexto.
+typedef struct {
+    uint32_t    gen;
+    TaskHandle_t task;
+    bool        ended, detached;
+} ping_ctx_t;
+static portMUX_TYPE s_ping_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static void on_ping_success(esp_ping_handle_t h, void *a)
 {
-    (void)a;
+    if (((ping_ctx_t *)a)->gen != s_gen) return;
     uint16_t seq; uint8_t ttl; uint32_t size, ms; ip_addr_t addr;
     esp_ping_get_profile(h, ESP_PING_PROF_SEQNO, &seq, sizeof(seq));
     esp_ping_get_profile(h, ESP_PING_PROF_TTL, &ttl, sizeof(ttl));
@@ -151,7 +167,7 @@ static void on_ping_success(esp_ping_handle_t h, void *a)
 
 static void on_ping_timeout(esp_ping_handle_t h, void *a)
 {
-    (void)a;
+    if (((ping_ctx_t *)a)->gen != s_gen) return;
     uint16_t seq;
     esp_ping_get_profile(h, ESP_PING_PROF_SEQNO, &seq, sizeof(seq));
     buf_printf("seq=%u: tiempo agotado\n", seq);
@@ -159,17 +175,27 @@ static void on_ping_timeout(esp_ping_handle_t h, void *a)
 
 static void on_ping_end(esp_ping_handle_t h, void *a)
 {
-    (void)h;
-    xTaskNotifyGive((TaskHandle_t)a);
+    ping_ctx_t *c = a;
+    portENTER_CRITICAL(&s_ping_mux);
+    c->ended = true;
+    bool det = c->detached;
+    portEXIT_CRITICAL(&s_ping_mux);
+    if (det) {
+        esp_ping_delete_session(h);
+        free(c);
+    } else {
+        xTaskNotifyGive(c->task);
+    }
 }
 
 static void ping_task(void *arg)
 {
     (void)arg;
+    const uint32_t gen = s_gen;
     struct addrinfo *res = NULL;
     if (!resolve(s_host, 0, SOCK_DGRAM, &res)) {
         buf_printf("No se pudo resolver %s\n", s_host);
-        finish();
+        finish(gen);
         vTaskDelete(NULL);
     }
     ip_addr_t target = {};
@@ -180,44 +206,63 @@ static void ping_task(void *arg)
     ip4addr_ntoa_r(ip_2_ip4(&target), ip, sizeof(ip));
     buf_printf("PING %s (%s) %d bytes de datos\n", s_host, ip, s_ping_size);
 
+    ping_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) { buf_printf("Sin memoria\n"); finish(gen); vTaskDelete(NULL); }
+    ctx->gen = s_gen;
+    ctx->task = xTaskGetCurrentTaskHandle();
+
     esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
     cfg.target_addr = target;
     cfg.count       = (uint32_t)s_ping_count;
     cfg.data_size   = (uint32_t)s_ping_size;
     cfg.interval_ms = 1000;
-    cfg.timeout_ms  = 8000;           // el enlace RF a 1200 bps es lento
+    cfg.timeout_ms  = PING_TIMEOUT_MS;  // el enlace RF a 1200 bps es lento
     cfg.task_stack_size = 3072;
     cfg.task_prio   = 2;
     esp_ping_callbacks_t cbs = {
-        .cb_args = xTaskGetCurrentTaskHandle(),
+        .cb_args = ctx,
         .on_ping_success = on_ping_success,
         .on_ping_timeout = on_ping_timeout,
         .on_ping_end = on_ping_end,
     };
     esp_ping_handle_t h;
     if (esp_ping_new_session(&cfg, &cbs, &h) != ESP_OK) {
-        buf_printf("Error creando la sesión de ping\n");
-        finish();
+        buf_printf("Error creando la sesion de ping\n");
+        free(ctx);
+        finish(gen);
         vTaskDelete(NULL);
     }
     esp_ping_start(h);
     // Techo duro por si on_ping_end no llega nunca.
-    int slices = (s_ping_count * (1000 + 8000) + 5000) / 250;
+    int slices = (s_ping_count * (1000 + PING_TIMEOUT_MS) + 5000) / 250;
     bool ended = false;
     for (int i = 0; i < slices && !s_abort; i++)
         if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250))) { ended = true; break; }
-    if (!ended) esp_ping_stop(h);
 
     uint32_t tx = 0, rx = 0, dur = 0;
     esp_ping_get_profile(h, ESP_PING_PROF_REQUEST, &tx, sizeof(tx));
     esp_ping_get_profile(h, ESP_PING_PROF_REPLY, &rx, sizeof(rx));
     esp_ping_get_profile(h, ESP_PING_PROF_DURATION, &dur, sizeof(dur));
-    buf_printf("--- %s: %lu enviados, %lu recibidos, %lu%% perdidos, %lu ms%s\n",
-               s_host, (unsigned long)tx, (unsigned long)rx,
-               (unsigned long)(tx ? (tx - rx) * 100 / tx : 100), (unsigned long)dur,
-               ended ? "" : " (interrumpido)");
-    esp_ping_delete_session(h);
-    finish();
+    if (ended) {
+        buf_printf("--- %s: %lu enviados, %lu recibidos, %lu%% perdidos, %lu ms\n",
+                   s_host, (unsigned long)tx, (unsigned long)rx,
+                   (unsigned long)(tx ? (tx - rx) * 100 / tx : 100), (unsigned long)dur);
+    } else {
+        buf_printf("--- %s: interrumpido (%lu enviados, %lu recibidos)\n",
+                   s_host, (unsigned long)tx, (unsigned long)rx);
+        esp_ping_stop(h);
+    }
+
+    // Si la sesión ya terminó la borramos aquí; si no, lo hará on_ping_end.
+    portENTER_CRITICAL(&s_ping_mux);
+    bool done = ctx->ended;
+    if (!done) ctx->detached = true;
+    portEXIT_CRITICAL(&s_ping_mux);
+    if (done) {
+        esp_ping_delete_session(h);
+        free(ctx);
+    }
+    finish(gen);
     vTaskDelete(NULL);
 }
 
@@ -225,19 +270,20 @@ static void ping_task(void *arg)
 static void conn_task(void *arg)
 {
     bool tcp = (s_mode == ND_TCP);
+    const uint32_t gen = s_gen;
     (void)arg;
     struct addrinfo *res = NULL;
-    buf_printf("Conectando (%s) a %s:%u…\n", tcp ? "TCP" : "UDP", s_host, s_port);
+    buf_printf("Conectando (%s) a %s:%u ...\n", tcp ? "TCP" : "UDP", s_host, s_port);
     if (!resolve(s_host, s_port, tcp ? SOCK_STREAM : SOCK_DGRAM, &res)) {
         buf_printf("No se pudo resolver %s\n", s_host);
-        finish();
+        finish(gen);
         vTaskDelete(NULL);
     }
     int fd = socket(AF_INET, tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
     if (fd < 0) {
         buf_printf("Error creando socket (errno %d)\n", errno);
         freeaddrinfo(res);
-        finish();
+        finish(gen);
         vTaskDelete(NULL);
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
@@ -248,23 +294,24 @@ static void conn_task(void *arg)
     if (rc < 0 && errno == EINPROGRESS) {
         ok = false;
         for (int i = 0; i < CONNECT_TIMEOUT_S * 4 && !s_abort; i++) {
-            fd_set w; FD_ZERO(&w); FD_SET(fd, &w);
+            // lwIP sólo señala los errores (RST, ICMP) por exceptfds.
+            fd_set w, x; FD_ZERO(&w); FD_ZERO(&x); FD_SET(fd, &w); FD_SET(fd, &x);
             struct timeval tv = { 0, 250000 };
-            if (select(fd + 1, NULL, &w, NULL, &tv) > 0) {
+            if (select(fd + 1, NULL, &w, &x, &tv) > 0) {
                 int err = 0; socklen_t el = sizeof(err);
                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
-                if (err) buf_printf("Conexión fallida (errno %d)\n", err);
+                if (err) buf_printf("Conexion fallida: %s (errno %d)\n", strerror(err), err);
                 else ok = true;
                 goto connected;
             }
         }
-        if (!s_abort) buf_printf("Tiempo de conexión agotado\n");
+        if (!s_abort) buf_printf("Tiempo de conexion agotado\n");
     } else if (rc < 0) {
-        buf_printf("Conexión fallida (errno %d)\n", errno);
+        buf_printf("Conexion fallida: %s (errno %d)\n", strerror(errno), errno);
         ok = false;
     }
 connected:
-    if (!ok) { close(fd); finish(); vTaskDelete(NULL); }
+    if (!ok) { close(fd); finish(gen); vTaskDelete(NULL); }
 
     xSemaphoreTake(s_mx, portMAX_DELAY);
     s_fd = fd;
@@ -274,19 +321,19 @@ connected:
 
     char rx[256];
     while (!s_abort) {
-        fd_set r; FD_ZERO(&r); FD_SET(fd, &r);
+        fd_set r, x; FD_ZERO(&r); FD_ZERO(&x); FD_SET(fd, &r); FD_SET(fd, &x);
         struct timeval tv = { 0, 250000 };
-        if (select(fd + 1, &r, NULL, NULL, &tv) <= 0) continue;
+        if (select(fd + 1, &r, NULL, &x, &tv) <= 0) continue;
         int n = recv(fd, rx, sizeof(rx), 0);
         if (n > 0) buf_put(rx, (size_t)n);
-        else if (n == 0 && tcp) { buf_printf("[conexión cerrada por el remoto]\n"); break; }
+        else if (n == 0 && tcp) { buf_printf("[conexion cerrada por el remoto]\n"); break; }
         else if (n < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
-            buf_printf("[error de recepción, errno %d]\n", errno);
+            buf_printf("[error de recepcion, errno %d]\n", errno);
             break;
         }
     }
     if (s_abort) buf_printf("[desconectado]\n");
-    finish();
+    finish(gen);
     vTaskDelete(NULL);
 }
 
@@ -354,7 +401,7 @@ static esp_err_t ping_handler(httpd_req_t *req)
         return reply(req, "400 Bad Request", "{\"error\":\"host inválido\"}");
     }
     cJSON *jc = cJSON_GetObjectItem(j, "count"), *js = cJSON_GetObjectItem(j, "size");
-    int count = cJSON_IsNumber(jc) ? (int)jc->valuedouble : 4;
+    int count = cJSON_IsNumber(jc) ? (int)jc->valuedouble : 1;
     int size  = cJSON_IsNumber(js) ? (int)js->valuedouble : 32;
     s_ping_count = count < 1 ? 1 : (count > 10 ? 10 : count);
     s_ping_size  = size < 1 ? 1 : (size > 200 ? 200 : size);
@@ -365,7 +412,7 @@ static esp_err_t ping_handler(httpd_req_t *req)
     cJSON_Delete(j);
     if (xTaskCreate(ping_task, "nd_ping", 4096, NULL, 3, &s_ping_task) != pdPASS) {
         buf_printf("Error creando la tarea\n");
-        finish();
+        finish(s_gen);
         return reply(req, "500 Internal Server Error", "{\"error\":\"task create failed\"}");
     }
     return reply(req, NULL, "{\"ok\":true}");
@@ -390,7 +437,7 @@ static esp_err_t connect_handler(httpd_req_t *req)
     cJSON_Delete(j);
     if (xTaskCreate(conn_task, "nd_conn", 4096, NULL, 3, NULL) != pdPASS) {
         buf_printf("Error creando la tarea\n");
-        finish();
+        finish(s_gen);
         return reply(req, "500 Internal Server Error", "{\"error\":\"task create failed\"}");
     }
     return reply(req, NULL, "{\"ok\":true}");
@@ -426,7 +473,7 @@ static esp_err_t send_handler(httpd_req_t *req)
             if (n == 0 || out[n - 1] != '\n') buf_put_locked("\n", 1);
         } else {
             char m[48];
-            int l = snprintf(m, sizeof(m), "[envío fallido, errno %d]\n", w < 0 ? errno : 0);
+            int l = snprintf(m, sizeof(m), "[envio fallido, errno %d]\n", w < 0 ? errno : 0);
             buf_put_locked(m, (size_t)l);
             r = ESP_FAIL;
         }
@@ -442,6 +489,19 @@ static esp_err_t send_handler(httpd_req_t *req)
 static esp_err_t stop_handler(httpd_req_t *req)
 {
     s_abort = true;
+    // Los workers comprueban s_abort cada 250 ms; si tras 2 s sigue ocupada
+    // (p. ej. atascado en DNS) se fuerza el reinicio del estado.
+    for (int i = 0; i < 20 && s_mode != ND_IDLE; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    xSemaphoreTake(s_mx, portMAX_DELAY);
+    if (s_mode != ND_IDLE) {
+        ESP_LOGW(TAG, "stop: operacion atascada, forzando reinicio");
+        if (s_fd >= 0) { close(s_fd); s_fd = -1; }
+        s_connected = false;
+        s_mode = ND_IDLE;
+        s_gen++;
+        s_total = 0;
+    }
+    xSemaphoreGive(s_mx);
     return reply(req, NULL, "{\"ok\":true}");
 }
 

@@ -1507,7 +1507,10 @@ function netPoll(){
         (e.pid===204?' · IP':'')).join('<br>');
     }
     f('net-tx').innerHTML=h;
-  }).catch(()=>{});
+  }).catch(()=>{
+    const st=document.getElementById('net-status');
+    st.style.color='#e88080';st.textContent='Sin respuesta del módem';
+  });
 }
 function netStart(){if(!netTimer){netPoll();netTimer=setInterval(netPoll,1000);}}
 function netStopPoll(){clearInterval(netTimer);netTimer=null;}
@@ -1515,7 +1518,7 @@ function netErr(j){if(j&&j.error){const st=document.getElementById('net-status')
 function netPing(){
   const host=document.getElementById('net-host').value.trim();
   if(!host)return;
-  netPost('ping',{host,count:4}).then(j=>{netErr(j);netPoll();});
+  netPost('ping',{host,count:1}).then(j=>{netErr(j);netPoll();});
 }
 function netConnect(){
   const host=document.getElementById('net-host').value.trim();
