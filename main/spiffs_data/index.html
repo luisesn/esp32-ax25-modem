@@ -504,7 +504,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
         <input id="net-host" placeholder="IP o host" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:8rem">
         <input id="net-port" type="number" min="1" max="65535" placeholder="puerto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;width:5rem">
-        <select id="net-proto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+        <select id="net-proto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="tcp">TCP</option><option value="telnet">TELNET</option><option value="udp">UDP</option></select>
       </div>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
         <button id="net-ping-btn" onclick="netPing()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a">Ping</button>
@@ -1469,10 +1469,17 @@ function netPost(path,body){
   return fetch('/api/netdiag/'+path,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body||{})}).then(r=>r.json());
 }
+let netPolling=false,netPollAgain=false;
 function netPoll(){
-  fetch('/api/netdiag?gen='+netGen+'&since='+netSince).then(r=>r.json()).then(d=>{
+  if(netPolling){netPollAgain=true;return;}   // evita respuestas solapadas/desordenadas
+  netPolling=true;
+  fetch('/api/netdiag?gen='+netGen+'&since='+netSince).then(r=>{
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(d=>{
     const out=document.getElementById('net-out');
-    if(d.gen!==netGen||d.from<netSince){out.textContent='';}
+    if(d.gen!==netGen){out.textContent='';}          // nueva operación
+    else if(d.from<netSince)return;                  // respuesta vieja: ignorar
     netGen=d.gen;
     if(d.text){
       const atEnd=out.scrollTop+out.clientHeight>=out.scrollHeight-8;
@@ -1486,7 +1493,7 @@ function netPoll(){
     if(!netFormInit&&d.host){
       f('net-host').value=d.host;
       if(d.port)f('net-port').value=d.port;
-      if(d.mode==='tcp'||d.mode==='udp')f('net-proto').value=d.mode;
+      if(d.mode==='tcp'||d.mode==='udp')f('net-proto').value=(d.mode==='tcp'&&d.telnet)?'telnet':d.mode;
       netFormInit=true;
     }
     f('net-ping-btn').disabled=netBusy;
@@ -1498,7 +1505,7 @@ function netPoll(){
     st.style.color=netBusy?'#c8a04a':'#888';
     st.textContent=d.mode==='idle'?'Libre':
       d.mode==='ping'?'Ping a '+d.host+'…':
-      (d.mode.toUpperCase()+' '+d.host+':'+d.port+(d.connected?' — conectado':' — conectando…'));
+      ((d.telnet?'TELNET':d.mode.toUpperCase())+' '+d.host+':'+d.port+(d.connected?' — conectado':' — conectando…')+' · RX '+d.rx_pkts+' pkt / '+d.rx_bytes+' B');
     const t=d.tx;
     let h='TX pendientes: <b>'+t.pending+'</b> · enviadas: <b>'+t.sent+'</b> · descartadas: <b>'+t.dropped+
       '</b> · retardo post-RX: '+t.post_rx_ms+' ms';
@@ -1507,9 +1514,12 @@ function netPoll(){
         (e.pid===204?' · IP':'')).join('<br>');
     }
     f('net-tx').innerHTML=h;
-  }).catch(()=>{
+  }).catch(e=>{
     const st=document.getElementById('net-status');
-    st.style.color='#e88080';st.textContent='Sin respuesta del módem';
+    st.style.color='#e88080';st.textContent='Sin respuesta del módem ('+(e&&e.message?e.message:e)+')';
+  }).finally(()=>{
+    netPolling=false;
+    if(netPollAgain){netPollAgain=false;netPoll();}
   });
 }
 function netStart(){if(!netTimer){netPoll();netTimer=setInterval(netPoll,1000);}}
@@ -1522,9 +1532,12 @@ function netPing(){
 }
 function netConnect(){
   const host=document.getElementById('net-host').value.trim();
-  const port=parseInt(document.getElementById('net-port').value,10);
+  const proto=document.getElementById('net-proto').value;
+  const pe=document.getElementById('net-port');
+  if(!pe.value&&proto==='telnet')pe.value=23;
+  const port=parseInt(pe.value,10);
   if(!host||!port)return;
-  netPost('connect',{host,port,proto:document.getElementById('net-proto').value}).then(j=>{netErr(j);netPoll();});
+  netPost('connect',{host,port,proto}).then(j=>{netErr(j);netPoll();});
 }
 function netStop(){netPost('stop').then(()=>setTimeout(netPoll,300));}
 function netSend(){
