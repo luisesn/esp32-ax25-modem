@@ -241,6 +241,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('spiffs',this)">SPIFFS</button>
       <button class="tab-btn" onclick="showTab('rep',this)">REPEATER</button>
       <button class="tab-btn" onclick="showTab('tune',this)">TUNE</button>
+      <button class="tab-btn" onclick="showTab('net',this)">RED</button>
     </div>
     <div id="tab-log" class="tab-pane active">
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
@@ -498,6 +499,28 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <tbody id="tune-tbody"></tbody>
       </table>
     </div>
+    <div id="tab-net" class="tab-pane" style="justify-content:flex-start;gap:.6rem">
+      <div style="font-size:.65rem;color:#888">Diagnóstico de red: ping y miniconsola TCP/UDP. Una sola operación a la vez; la salida se conserva en el módem aunque recargues o abras otro cliente.</div>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+        <input id="net-host" placeholder="IP o host" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:8rem">
+        <input id="net-port" type="number" min="1" max="65535" placeholder="puerto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;width:5rem">
+        <select id="net-proto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+      </div>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
+        <button id="net-ping-btn" onclick="netPing()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a">Ping</button>
+        <button id="net-conn-btn" onclick="netConnect()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2230;color:#80b0e8;border:1px solid #2a4060">Conectar</button>
+        <button id="net-stop-btn" onclick="netStop()" disabled style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#2a1a1a;color:#e88080;border:1px solid #5a2a2a">&#x25A0; Detener</button>
+        <span id="net-status" style="font-size:.65rem;color:#888;flex:1"></span>
+      </div>
+      <pre id="net-out" style="flex:1;min-height:8rem;max-height:45vh;overflow:auto;margin:0;padding:.4rem;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:4px;font-size:.65rem;color:#bdbdbd;white-space:pre-wrap;word-break:break-all"></pre>
+      <div style="display:flex;gap:.4rem;align-items:center">
+        <input id="net-send" disabled placeholder="texto a enviar" onkeydown="if(event.key==='Enter')netSend()" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1">
+        <select id="net-eol" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="crlf">CRLF</option><option value="lf">LF</option><option value="cr">CR</option><option value="none">sin fin</option></select>
+        <button id="net-send-btn" onclick="netSend()" disabled style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2230;color:#80b0e8;border:1px solid #2a4060">Enviar</button>
+      </div>
+      <div style="font-size:.6rem;color:#666;font-family:monospace">Debug TX (RF)</div>
+      <div id="net-tx" style="font-size:.62rem;font-family:monospace;color:#999;padding:.35rem .5rem;background:#0d0d0d;border:1px solid #222;border-radius:4px"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -666,7 +689,7 @@ function aprsExtractMsg(info){
   if(!info)return info;
   // APRS message format: ":ADDRESSEE:text{NNN}" (addressee is 9 chars padded)
   if(info[0]===':'&&info.length>11&&info[10]===':'){
-    return info.slice(11).replace(/\{\d+\}$/,'').trimEnd();
+    return info.slice(11).replace(/\{[A-Za-z0-9]{1,5}\}?$/,'').trimEnd();
   }
   return info;
 }
@@ -1048,6 +1071,7 @@ function showTab(name,btn){
   clearInterval(statsTimer);statsTimer=null;
   if(name==='stats'){loadStats();statsTimer=setInterval(loadStats,5000);}
   if(name==='sstv') loadSstvGallery();
+  if(name==='net') netStart(); else netStopPoll();
 }// ── Config editor ───────────────────────────────────────────────────
 let cfgLoaded=false;
 function loadCfg(){
@@ -1439,6 +1463,73 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 });
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
 window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});repRefresh();});
+// ── Diagnóstico de red ───────────────────────────────────────────────────
+let netGen=-1,netSince=0,netTimer=null,netFormInit=false,netBusy=false;
+function netPost(path,body){
+  return fetch('/api/netdiag/'+path,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body||{})}).then(r=>r.json());
+}
+function netPoll(){
+  fetch('/api/netdiag?gen='+netGen+'&since='+netSince).then(r=>r.json()).then(d=>{
+    const out=document.getElementById('net-out');
+    if(d.gen!==netGen||d.from<netSince){out.textContent='';}
+    netGen=d.gen;
+    if(d.text){
+      const atEnd=out.scrollTop+out.clientHeight>=out.scrollHeight-8;
+      out.textContent+=d.text;
+      if(out.textContent.length>20000)out.textContent=out.textContent.slice(-16000);
+      if(atEnd)out.scrollTop=out.scrollHeight;
+    }
+    netSince=d.total;
+    netBusy=d.mode!=='idle';
+    const f=(id)=>document.getElementById(id);
+    if(!netFormInit&&d.host){
+      f('net-host').value=d.host;
+      if(d.port)f('net-port').value=d.port;
+      if(d.mode==='tcp'||d.mode==='udp')f('net-proto').value=d.mode;
+      netFormInit=true;
+    }
+    f('net-ping-btn').disabled=netBusy;
+    f('net-conn-btn').disabled=netBusy;
+    f('net-stop-btn').disabled=!netBusy;
+    const can=d.connected;
+    f('net-send').disabled=!can;f('net-send-btn').disabled=!can;
+    const st=f('net-status');
+    st.style.color=netBusy?'#c8a04a':'#888';
+    st.textContent=d.mode==='idle'?'Libre':
+      d.mode==='ping'?'Ping a '+d.host+'…':
+      (d.mode.toUpperCase()+' '+d.host+':'+d.port+(d.connected?' — conectado':' — conectando…'));
+    const t=d.tx;
+    let h='TX pendientes: <b>'+t.pending+'</b> · enviadas: <b>'+t.sent+'</b> · descartadas: <b>'+t.dropped+
+      '</b> · retardo post-RX: '+t.post_rx_ms+' ms';
+    if(t.recent&&t.recent.length){
+      h+='<br>'+t.recent.map(e=>'hace '+e.age_s+' s · '+esc(e.src)+'&gt;'+esc(e.dst)+' · '+e.len+' B'+
+        (e.pid===204?' · IP':'')).join('<br>');
+    }
+    f('net-tx').innerHTML=h;
+  }).catch(()=>{});
+}
+function netStart(){if(!netTimer){netPoll();netTimer=setInterval(netPoll,1000);}}
+function netStopPoll(){clearInterval(netTimer);netTimer=null;}
+function netErr(j){if(j&&j.error){const st=document.getElementById('net-status');st.style.color='#e88080';st.textContent=j.error;}}
+function netPing(){
+  const host=document.getElementById('net-host').value.trim();
+  if(!host)return;
+  netPost('ping',{host,count:4}).then(j=>{netErr(j);netPoll();});
+}
+function netConnect(){
+  const host=document.getElementById('net-host').value.trim();
+  const port=parseInt(document.getElementById('net-port').value,10);
+  if(!host||!port)return;
+  netPost('connect',{host,port,proto:document.getElementById('net-proto').value}).then(j=>{netErr(j);netPoll();});
+}
+function netStop(){netPost('stop').then(()=>setTimeout(netPoll,300));}
+function netSend(){
+  const el=document.getElementById('net-send');
+  const data=el.value;
+  if(el.disabled)return;
+  netPost('send',{data,eol:document.getElementById('net-eol').value}).then(j=>{netErr(j);if(!j.error)el.value='';netPoll();});
+}
 // ── Delay tuner ───────────────────────────────────────────────────────────
 function tuneSetRunning(running){
   document.getElementById('tune-start-btn').disabled=running;

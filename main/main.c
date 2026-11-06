@@ -26,6 +26,7 @@
 #include "ota.h"
 #include "ota_net.h"
 #include "delay_tune.h"
+#include "netdiag.h"
 #include "repeater.h"
 #include "squelch_sf.h"
 #include "il2p.h"
@@ -576,6 +577,15 @@ static void audio_sample_hook(int8_t sample) {
     squelch_sf_push_sample(sample);
 }
 
+// Envoltorio de la función TX: anota la trama para el panel de debug de
+// netdiag y delega en la función real (AX.25 o smart_tx_frame con IL2P).
+static void (*s_real_tx_fn)(const uint8_t *, size_t) = NULL;
+static void tx_noted_frame(const uint8_t *data, size_t len)
+{
+    netdiag_note_tx(data, len);
+    if (s_real_tx_fn) s_real_tx_fn(data, len);
+}
+
 void app_main(void)
 {
     file_management_init();
@@ -631,7 +641,8 @@ void app_main(void)
         config_free_json(cfg);
     }
 
-    afsk_set_tx_fn(APRS_send_raw_frame);
+    s_real_tx_fn = APRS_send_raw_frame;
+    afsk_set_tx_fn(tx_noted_frame);
     APRS_set_raw_hook(on_ax25_raw_frame);
 
     {
@@ -644,7 +655,7 @@ void app_main(void)
         }
         il2p_init(il2p_en, on_ax25_raw_frame);
         if (il2p_en)
-            afsk_set_tx_fn(smart_tx_frame);
+            s_real_tx_fn = smart_tx_frame;
         config_free_json(boot_cfg);
     }
 
@@ -664,6 +675,7 @@ void app_main(void)
     ota_net_init();
     boot_cfg = config_get();
     delay_tune_init(boot_cfg);
+    netdiag_init();
     repeater_init(boot_cfg);
     squelch_sf_init(boot_cfg);
     config_free_json(boot_cfg);

@@ -25,6 +25,7 @@ idf_component_register(
         "ota.c"
         "ota_net.c"
         "delay_tune.c"
+        "netdiag.c"
         "repeater.c"
         "squelch_sf.c"
         "rs_codec.c"
