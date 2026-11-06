@@ -18,6 +18,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
 #include "ping/ping_sock.h"
@@ -46,6 +47,8 @@ static uint32_t   s_gen;
 static nd_mode_t  s_mode;             // protegido por s_mx
 static volatile bool s_abort;
 static volatile bool s_connected;
+static bool       s_telnet;           // TCP con negociación IAC rechazada
+static volatile uint32_t s_rx_pkts, s_rx_bytes;   // recibidos en la operación actual
 static int        s_fd = -1;          // protegido por s_mx
 static char       s_host[HOST_MAX];
 static uint16_t   s_port;
@@ -61,7 +64,13 @@ static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
 static void call_str(const uint8_t *a, char *out)
 {
     int n = 0;
-    for (int i = 0; i < 6; i++) { char c = a[i] >> 1; if (c != ' ') out[n++] = c; }
+    // Las tramas IP (modo TUN) llevan bytes arbitrarios en las direcciones:
+    // sólo ASCII imprimible y sin comillas/barras, para no romper el JSON.
+    for (int i = 0; i < 6; i++) {
+        char c = a[i] >> 1;
+        if (c == ' ') continue;
+        out[n++] = (c < 0x21 || c > 0x7E || c == '"' || c == '\\') ? '?' : c;
+    }
     int ssid = (a[6] >> 1) & 0x0F;
     if (ssid) n += snprintf(out + n, 10 - n, "-%d", ssid);
     out[n] = '\0';
@@ -266,6 +275,40 @@ static void ping_task(void *arg)
     vTaskDelete(NULL);
 }
 
+// ── Filtro Telnet ───────────────────────────────────────────────────────────
+// Elimina las secuencias IAC del flujo y rechaza toda opción (DO→WONT,
+// WILL→DONT): es lo más barato por un enlace de 1200 bps.
+typedef struct { uint8_t st, verb; } tn_t;
+
+static size_t telnet_filter(int fd, tn_t *t, uint8_t *b, size_t n)
+{
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = b[i];
+        switch (t->st) {
+        case 0:
+            if (c == 255) t->st = 1; else b[o++] = c;
+            break;
+        case 1:                                   // tras IAC
+            if (c == 255) { b[o++] = 255; t->st = 0; }
+            else if (c >= 251 && c <= 254) { t->verb = c; t->st = 2; }
+            else if (c == 250) t->st = 3;         // SB
+            else t->st = 0;                       // NOP, GA…
+            break;
+        case 2: {                                 // opción de WILL/WONT/DO/DONT
+            uint8_t rsp[3] = { 255, 0, c };
+            if (t->verb == 253) rsp[1] = 252;       // DO   → WONT
+            else if (t->verb == 251) rsp[1] = 254;  // WILL → DONT
+            if (rsp[1]) send(fd, rsp, 3, 0);
+            t->st = 0;
+            break; }
+        case 3: if (c == 255) t->st = 4; break;   // dentro de SB
+        case 4: t->st = (c == 240) ? 0 : 3; break; // IAC SE termina SB
+        }
+    }
+    return o;
+}
+
 // ── Consola TCP/UDP ─────────────────────────────────────────────────────────
 static void conn_task(void *arg)
 {
@@ -273,7 +316,7 @@ static void conn_task(void *arg)
     const uint32_t gen = s_gen;
     (void)arg;
     struct addrinfo *res = NULL;
-    buf_printf("Conectando (%s) a %s:%u ...\n", tcp ? "TCP" : "UDP", s_host, s_port);
+    buf_printf("Conectando (%s) a %s:%u ...\n", !tcp ? "UDP" : (s_telnet ? "TELNET" : "TCP"), s_host, s_port);
     if (!resolve(s_host, s_port, tcp ? SOCK_STREAM : SOCK_DGRAM, &res)) {
         buf_printf("No se pudo resolver %s\n", s_host);
         finish(gen);
@@ -317,18 +360,32 @@ connected:
     s_fd = fd;
     s_connected = true;
     xSemaphoreGive(s_mx);
-    buf_printf(tcp ? "Conectado.\n" : "Socket UDP listo (sin conexión real).\n");
+    buf_printf(tcp ? "Conectado.\n" : "Socket UDP listo (sin conexion real).\n");
 
     char rx[256];
+    tn_t tn = {0, 0};
+    const bool telnet = tcp && s_telnet;
     while (!s_abort) {
         fd_set r, x; FD_ZERO(&r); FD_ZERO(&x); FD_SET(fd, &r); FD_SET(fd, &x);
         struct timeval tv = { 0, 250000 };
         if (select(fd + 1, &r, NULL, &x, &tv) <= 0) continue;
         int n = recv(fd, rx, sizeof(rx), 0);
-        if (n > 0) buf_put(rx, (size_t)n);
+        if (n > 0 && telnet) {
+            n = (int)telnet_filter(fd, &tn, (uint8_t *)rx, (size_t)n);
+            if (n == 0) continue;               // sólo negociación: no es un cierre
+        }
+        if (n > 0) {
+            s_rx_pkts++;
+            s_rx_bytes += (uint32_t)n;
+            ESP_LOGI(TAG, "rx %d bytes (%02x %02x %02x ...)", n, rx[0],
+                     n > 1 ? rx[1] : 0, n > 2 ? rx[2] : 0);
+            if (!tcp) buf_put("< ", 2);             // cada datagrama en su línea
+            buf_put(rx, (size_t)n);
+            if (!tcp && rx[n - 1] != '\n') buf_put("\n", 1);
+        }
         else if (n == 0 && tcp) { buf_printf("[conexion cerrada por el remoto]\n"); break; }
         else if (n < 0 && errno != EWOULDBLOCK && errno != EAGAIN) {
-            buf_printf("[error de recepcion, errno %d]\n", errno);
+            buf_printf("[error de recepcion: %s (errno %d)]\n", strerror(errno), errno);
             break;
         }
     }
@@ -382,6 +439,7 @@ static bool begin_op(nd_mode_t mode, const char *host, uint16_t port)
         s_mode = mode;
         s_abort = false;
         s_connected = false;
+        s_rx_pkts = s_rx_bytes = 0;
         s_total = 0;
         s_gen++;
         snprintf(s_host, sizeof(s_host), "%s", host);
@@ -430,10 +488,12 @@ static esp_err_t connect_handler(httpd_req_t *req)
         return reply(req, "400 Bad Request", "{\"error\":\"host o puerto inválido\"}");
     }
     bool udp = cJSON_IsString(jt) && strcmp(jt->valuestring, "udp") == 0;
+    bool telnet = cJSON_IsString(jt) && strcmp(jt->valuestring, "telnet") == 0;
     if (!begin_op(udp ? ND_UDP : ND_TCP, jh->valuestring, (uint16_t)port)) {
         cJSON_Delete(j);
         return reply(req, "409 Conflict", "{\"error\":\"hay otra operación en curso\"}");
     }
+    s_telnet = telnet;   // el worker aún no ha arrancado
     cJSON_Delete(j);
     if (xTaskCreate(conn_task, "nd_conn", 4096, NULL, 3, NULL) != pdPASS) {
         buf_printf("Error creando la tarea\n");
@@ -472,8 +532,9 @@ static esp_err_t send_handler(httpd_req_t *req)
             buf_put_locked(out, (size_t)n);
             if (n == 0 || out[n - 1] != '\n') buf_put_locked("\n", 1);
         } else {
-            char m[48];
-            int l = snprintf(m, sizeof(m), "[envio fallido, errno %d]\n", w < 0 ? errno : 0);
+            char m[80];
+            int e = w < 0 ? errno : 0;
+            int l = snprintf(m, sizeof(m), "[envio fallido: %s (errno %d)]\n", e ? strerror(e) : "parcial", e);
             buf_put_locked(m, (size_t)l);
             r = ESP_FAIL;
         }
@@ -524,14 +585,17 @@ static esp_err_t status_handler(httpd_req_t *req)
     if (from > total) from = 0;
     if (total - from > BUF_SZ) from = total - BUF_SZ;
     int hn = snprintf(head, sizeof(head),
-        "{\"mode\":\"%s\",\"connected\":%s,\"host\":\"%s\",\"port\":%u,"
+        "{\"mode\":\"%s\",\"telnet\":%s,\"connected\":%s,\"host\":\"%s\",\"port\":%u,"
+        "\"rx_pkts\":%lu,\"rx_bytes\":%lu,"
         "\"gen\":%lu,\"from\":%lu,\"total\":%lu,\"text\":\"",
-        MODE_NAME[mode], s_connected ? "true" : "false", s_host, s_port,
+        MODE_NAME[mode], s_telnet ? "true" : "false",
+        s_connected ? "true" : "false", s_host, s_port,
+        (unsigned long)s_rx_pkts, (unsigned long)s_rx_bytes,
         (unsigned long)gen, (unsigned long)from, (unsigned long)total);
     xSemaphoreGive(s_mx);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send_chunk(req, head, hn);
+    esp_err_t se = httpd_resp_send_chunk(req, head, hn);
 
     char chunk[256], esc[520];
     uint32_t pos = from;
@@ -547,7 +611,7 @@ static esp_err_t status_handler(httpd_req_t *req)
             else if (c == '"' || c == '\\') { esc[e++] = '\\'; esc[e++] = c; }
             else esc[e++] = c;
         }
-        httpd_resp_send_chunk(req, esc, e);
+        if (se == ESP_OK) se = httpd_resp_send_chunk(req, esc, e);
         pos += n;
     }
 
@@ -573,8 +637,13 @@ static esp_err_t status_handler(httpd_req_t *req)
             ev->src, ev->dst, ev->pid);
     }
     t += snprintf(tail + t, sizeof(tail) - t, "]}}");
-    httpd_resp_send_chunk(req, tail, t);
-    return httpd_resp_send_chunk(req, NULL, 0);
+    if (se == ESP_OK) se = httpd_resp_send_chunk(req, tail, t);
+    if (se == ESP_OK) se = httpd_resp_send_chunk(req, NULL, 0);
+    if (se != ESP_OK)
+        ESP_LOGW(TAG, "status: envio fallido (%s), heap libre %u, minimo %u",
+                 esp_err_to_name(se), (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_minimum_free_heap_size());
+    return se;
 }
 
 void netdiag_init(void)
