@@ -570,24 +570,35 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 }
 
 // POST /api/config → guarda el body como nuevo config.json, recarga en RAM.
-// El body debe ser JSON válido (<= 2 KB). Recarga immediate sin reiniciar.
+// El body debe ser JSON válido (<= CONFIG_BODY_MAX). Recarga inmediata sin reiniciar.
+// El buffer se reserva en el heap solo mientras dura la petición (antes era un
+// static de 2 KB permanente y el límite dejaba poco margen sobre el config real).
+#define CONFIG_BODY_MAX 8192
+
 static esp_err_t config_post_handler(httpd_req_t *req) {
-    // Límite de 2 KB para el body. static es seguro: el servidor httpd tiene un
-    // único hilo, así que los handlers nunca se ejecutan en paralelo.
-    static char body[2048];
-    int total = 0, ret;
-    int remaining = req->content_len > 0 ? (int)req->content_len : (int)sizeof(body) - 1;
-    if (remaining > (int)sizeof(body) - 1) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+    int remaining = (int)req->content_len;
+    if (remaining <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content-Length required");
         return ESP_FAIL;
     }
-    int timeouts = 0;
+    if (remaining > CONFIG_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large (max 8 KB)");
+        return ESP_FAIL;
+    }
+    char *body = malloc((size_t)remaining + 1);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int total = 0, ret, timeouts = 0;
     while (total < remaining) {
         ret = httpd_req_recv(req, body + total, (size_t)(remaining - total));
         if (ret <= 0) {
             // A client that keeps stalling could otherwise retry here forever,
             // tying up an httpd worker indefinitely.
             if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= 5) continue;
+            free(body);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
             return ESP_FAIL;
         }
@@ -599,12 +610,15 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     // Validate JSON before saving
     cJSON *parsed = cJSON_Parse(body);
     if (!parsed) {
+        free(body);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_FAIL;
     }
     cJSON_Delete(parsed);
 
-    if (!save_config(body)) {
+    bool saved = save_config(body);
+    free(body);
+    if (!saved) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
         return ESP_FAIL;
     }
@@ -614,6 +628,7 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     if (new_cfg) {
         digi_init(new_cfg);
         morse_init(new_cfg);
+        config_free_json(new_cfg);   // config_reload() devuelve una copia: liberarla
     }
 
     httpd_resp_set_type(req, "application/json");
