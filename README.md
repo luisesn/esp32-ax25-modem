@@ -175,7 +175,7 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 4. `kiss_init(on_kiss_frame)` registra el callback que transmite por radio las tramas recibidas del host.
 5. `APRS_init()` + `APRS_set_raw_hook(on_ax25_raw_frame)` arranca el demodulador AFSK y registra el callback que:
    - Envía la trama al host KISS TCP (`kiss_send_frame`).
-   - Detecta mensajes dirigidos a nuestro indicativo y transmite un ACK automático (`try_auto_ack`).
+   - Detecta mensajes dirigidos a nuestro indicativo y transmite un ACK automático (`try_auto_ack`). Las retransmisiones del mismo `{NNN}` se vuelven a ACKear, pero el comando remoto sólo se ejecuta una vez (dedup por origen+id, 5 min).
    - Digipeata la trama si procede (`digi_process_frame`) y notifica vía WebSocket con badge DIGI.
    - Inyecta paquetes IP en la pila lwIP si PID=0xCC (`ax25ip_rx_frame`).
    - Notifica a los clientes WebSocket con JSON `{"src":..., "dst":..., "path":..., "info":...}`.
@@ -210,7 +210,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/aprs/beacon`      | Transmite baliza de posición. Body JSON: `{"lat":40.4,"lon":-3.7,"symbol":">","comment":"..."}` |
 | `GET`    | `/api/me`               | Devuelve `{"call":"...","ssid":N}` con el indicativo configurado |
 | `GET`    | `/api/config`           | Devuelve `config.json` completo |
-| `POST`   | `/api/config`           | Guarda nuevo `config.json` y recarga digipeater + morse en RAM |
+| `POST`   | `/api/config`           | Guarda nuevo `config.json` (máx. **8 KB**, JSON válido) y recarga digipeater + morse en RAM |
 | `POST`   | `/api/morse/trigger`    | Dispara baliza morse inmediata (one-shot) |
 | `GET`    | `/api/log?since=N`      | Historial de log (entradas de secuencia > N) |
 | `GET`    | `/api/rx/stats`         | Estadísticas de recepción (tramas OK/error, FIFO overflows, AGC, squelch) |
@@ -488,7 +488,7 @@ Respuesta en caso de éxito: `{"ok":true}`. El ESP32 reinicia 3 s después.
 
 - La partición SPIFFS (`config.json`, imágenes SSTV) **no se toca**; solo cambia la partición de aplicación inactiva.
 - Si el `.bin` no empieza por el magic byte ESP32 (`0xE9`), la subida se rechaza antes de escribir nada.
-- No se admiten subidas concurrentes: una segunda petición mientras hay OTA en curso recibe `503`.
+- No se admiten subidas concurrentes: una segunda petición mientras hay OTA en curso recibe `503`. La exclusión es común a OTA HTTP y a espota (`ota_acquire()`/`ota_release()`): si una está activa, la otra se rechaza.
 - No hay rollback automático configurado (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` no activo); si el nuevo firmware no arranca, hay que reflashear por serie.
 
 ---
@@ -978,8 +978,8 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
     "i2c_addr": 60
   },
   "rx": {
-    "dual_modem_enabled": true,
-    "active_modem": "best",
+    "dual_modem_enabled": false,
+    "active_modem": "v2",
     "squelch_threshold": 0,
     "deemphasis_enabled": false
   },
@@ -1021,14 +1021,14 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
 | `gps` | `baud` | int | Velocidad UART del módulo GPS |
 | `gps` | `use_for_beacon` | bool | Reservado: usar posición GPS en balizas APRS (futuro) |
 | `display` | `i2c_addr` | int | Dirección I2C del SSD1306 en decimal (60 = 0x3C) |
-| `rx` | `dual_modem_enabled` | bool | Activa el segundo demodulador AFSK (V2) |
-| `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo, sin dedup) |
+| `rx` | `dual_modem_enabled` | bool | Activa el segundo demodulador AFSK (V2). **Sin efecto con `AFSK_RX_V1_ENABLED 0`** (valor actual: solo existe el RX v2); el arranque avisa en el log si se configura |
+| `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo; el dedup está en `on_ax25_raw_frame`). **Ignorado con `AFSK_RX_V1_ENABLED 0`** |
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
 | `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre (squelch HFNE cerrado) antes de transmitir. **Sólo efectivo si el squelch HFNE está activo (modo monitor o repetidor)**; si no, el canal se considera siempre libre |
 | `tx` | `lbt_max_wait_ms` | int | Tiempo máximo de espera LBT (ms); si expira, transmite de todas formas con aviso en log |
 | `il2p` | `enabled` | bool | Activa IL2P: RX acepta IL2P en paralelo con AX.25; TX enruta tráfico IP (PID=0xCC) vía IL2P y APRS vía AX.25 normal |
-| `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo |
+| `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo. Si el remitente reintenta el mismo mensaje (mismo `{NNN}`) porque perdió el ACK, el ACK se reenvía pero el comando **no se vuelve a ejecutar** (ventana de 5 min por origen+id, 8 entradas) |
 | `console` | `enabled` | bool | Activa la consola TCP sobre la IP RF (requiere `ip.enabled: true`) |
 | `console` | `port` | int | Puerto TCP de la consola (por defecto 23) |
 

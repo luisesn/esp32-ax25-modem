@@ -538,4 +538,22 @@ Resumen de lo incorporado desde la entrada de 2026-06-05 (según el código actu
 - ⚠️ Verificación RX con señal RF real; HW de repetidor, IL2P y display.
 - ⬜ `LibAPRS-esp32-i2s` como repo anidado sin enlazar (convertir en submódulo; 5 ficheros con cambios sin commit).
 - ⬜ `config.json` con credenciales seguido por git (también en el historial).
-- ⬜ FIFOs no `_locked` en rutas multi-tarea sin auditar; sin tests ni CI.
+- ⬜ FIFOs no `_locked` en el resto de rutas multi-tarea sin auditar (el `fifo_flush` de TX ya es `_locked`); sin tests ni CI.
+
+
+---
+
+## 2026-11-08 — Auditoría completa y correcciones de fiabilidad
+
+Análisis de todo el proyecto (sin incluir seguridad, que se aparca por ahora) y corrección de los seis problemas de fiabilidad más relevantes:
+
+- **Comandos remotos repetidos** (`main.c`): `cmd_already_seen()` descarta la re-ejecución de un comando cuando el remitente reintenta el mismo `{NNN}` por no haber recibido el ACK (ventana 5 min, 8 entradas). El ACK se sigue reenviando siempre.
+- **`POST /api/config`** (`audio_stream.c`): límite subido de 2 KB a 8 KB con buffer en heap solo durante la petición (el `config.json` ya ocupaba ~1,6 KB). Además se libera la copia que devuelve `config_reload()`, que se perdía en cada guardado.
+- **OTA** (`ota.c`, `ota_net.c`): `ota_acquire()`/`ota_release()` — una sola actualización a la vez entre HTTP y espota (ambas escribían en la misma partición).
+- **FIFO** (`LibAPRS-esp32-i2s`): `fifo_len` devuelve la ocupación real (antes el tamaño del buffer; nuevo `fifo_capacity`); `AFSK_transmit` usa `fifo_flush_locked`.
+- **`rx.dual_modem_enabled` / `rx.active_modem`**: ya no engañan; con `AFSK_RX_V1_ENABLED 0` se avisa en el log y los `config.json` locales usan `false` / `"v2"`.
+- **Baliza de posición** (`remote_cmd.c`): cálculo en centésimas de minuto enteras; ya no puede salir `60.00` (p. ej. 39,9999999° daba `3960.00N`).
+
+Verificación: `ninja -C build` compila (≈ 944 KB, 44 % libre); lógica de la posición probada en host. **No probado en hardware.**
+
+Pendiente de la auditoría (no abordado): seguridad (sin autenticación en HTTP/OTA/KISS/consola RF/comandos remotos, `config` expone contraseñas WiFi, CORS `*`, IP de RF inyectada en lwIP con `IP_FORWARD`), `list_scan_and_reply_task`, submódulo de la librería, tests/CI, `FREERTOS_HZ=100` (el `vTaskDelay(1)` cede 10 ms).

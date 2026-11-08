@@ -229,6 +229,14 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **Robustez (informe §3.5)**: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (requiere reflashear bootloader por cable una vez); `ota_validate_task` (main.c) confirma la imagen a los 30 s. OTA HTTP acepta cabecera opcional `X-SHA256`. `save_config` escribe `config.tmp` y lo renombra (recuperación en `config_load_from_file`). Reconexión WiFi con backoff (5 rondas) antes de caer al AP. Reloj: SNTP al obtener IP + hora GPS (`gps_sync_system_time`). `GET /api/sys` da heap y stacks. Dedup compartido en `dedup.[ch]`; códec en `adpcm.c`.
 
+- **Dedup de comandos remotos** (`main.c`, `cmd_already_seen()`): el ACK de un mensaje con `{NNN}` se reenvía siempre, pero `remote_cmd_handle` solo se llama la primera vez por (origen, id) dentro de 5 min (8 entradas). Sin esto, un ACK perdido provocaba que `tx,sstv` se encolara varias veces. Los mensajes sin id no se deduplican.
+
+- **OTA única** (`ota_acquire()`/`ota_release()` en `ota.c`): HTTP y espota comparten la exclusión; tras un OTA correcto no se libera (reinicio pendiente). Cualquier ruta nueva que escriba en la partición OTA debe usarla.
+
+- **`POST /api/config`**: máx. 8 KB, buffer en heap. `config_reload()` devuelve copia: liberar con `config_free_json()`.
+
+- **`FIFO.h`**: `fifo_len()` = bytes almacenados, `fifo_capacity()` = tamaño del buffer. `AFSK_transmit` vacía `txFifo` con `fifo_flush_locked`.
+
 - **`config_load()` devuelve copia**: `aux_config.c` devuelve `cJSON_Duplicate(root, 1)` — el llamador es responsable de liberar el objeto con `config_free_json()`. No usar el puntero después de liberar.
 
 - **Cola TX entre tareas (`s_tx_queue`)**: en modo KISS TNC, `server_task` **no puede** llamar `APRS_send_raw_frame` directamente porque internamente invoca `adc_continuous_stop`, que debe ejecutarse desde la misma tarea FreeRTOS que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). Solución: `QueueHandle_t s_tx_queue` de capacidad 4 × `afsk_tx_frame_t`. `server_task` encola con `afsk_queue_tx_frame()` (no bloqueante); `receive_audio_task` despacha al inicio de cada iteración. **Es obligatorio llamar `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` antes de `APRS_set_raw_hook`.**
@@ -241,7 +249,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **GPIO 26 = PTT = DAC2 (conflicto de recurso)**: GPIO 26 es simultáneamente el pin de PTT y DAC2 del ESP32. `DAC_CHANNEL_MODE_SIMUL` en `switch_to_tx()` puede reconfigurarlo como salida analógica DAC, dejando el GPIO en modo analógico y sacando el PTT del control digital. Mitigación aplicada: llamar `gpio_set_direction(GPIO_PTT_OUT, GPIO_MODE_OUTPUT)` después de `dac_continuous_new_channels()` en `switch_to_tx()` para restaurar el modo digital.
 
-- **Demodulador v1 desactivado** (`AFSK_RX_V1_ENABLED 0` en `AFSK.h` de la librería): sólo RX v2 (`AFSK_modem_v2` se crea siempre; `rx.dual_modem_enabled`/`rx.active_modem` se ignoran). `AFSK_modem` sigue siendo el modem de TX. `rx_stats_v1` queda a 0; `TNC_MODE_APRS` (`AX25.hook`) no recibe mensajes parseados. Poner a 1 para restaurar el doble módem (entonces aplica lo siguiente).
+- **Demodulador v1 desactivado** (`AFSK_RX_V1_ENABLED 0` en `AFSK.h` de la librería; el arranque avisa si `rx.dual_modem_enabled`/`rx.active_modem` están en el config): sólo RX v2 (`AFSK_modem_v2` se crea siempre; `rx.dual_modem_enabled`/`rx.active_modem` se ignoran). `AFSK_modem` sigue siendo el modem de TX. `rx_stats_v1` queda a 0; `TNC_MODE_APRS` (`AX25.hook`) no recibe mensajes parseados. Poner a 1 para restaurar el doble módem (entonces aplica lo siguiente).
 
 - **Doble módem RX entrega cada trama dos veces**: con `rx.active_modem = "best"` (valor por defecto), v1 (`ax25_poll`) y v2 (`aprs_poll_v2`) demodulan el mismo audio y llaman por separado a `s_app_raw_hook` con la misma trama, separados por unos ms. Sin filtro eso significa doble inyección en lwIP (`ax25ip`), doble auto-ACK y doble digipetición — en un ping por RF se ve como `DUP!` y dos ciclos TX. El dedup está **en `on_ax25_raw_frame()`** (`rx_frame_is_duplicate()`, ventana `RX_DUP_WINDOW_MS` = 300 ms, comparación byte a byte), que es el punto donde convergen todos los consumidores. No añadir un segundo filtro en LibAPRS (rompería `rx_stats_v1`/`rx_stats_v2`) ni en `ax25ip.c`/`digipeater.c`.
 
@@ -285,7 +293,8 @@ Resumen rápido (2026-10-08):
 - Build binario: ~928 KB (≈46 % libre de la partición de app) con `idf.py reconfigure && ninja -C build` ✅
 - Verificación RX con señal RF real: pendiente ⚠️
 - Repetidor de voz (deshabilitado por `REPEATER_ENABLED 0`), display, IL2P: verificación HW pendiente ⚠️
-- Librería `LibAPRS-esp32-i2s` como repo anidado sin enlazar (5 ficheros con cambios sin commit) ⬜
+- Librería `LibAPRS-esp32-i2s` como repo anidado sin enlazar (sin cambios pendientes en la librería; falta convertirla en submódulo) ⬜
+- Auditoría 2026-11-08: corregidos dedup de comandos remotos, límite de `POST /api/config` (+fuga), exclusión OTA, `fifo_len`/flush, aviso `rx.dual_modem_*`, baliza de posición. Seguridad (sin autenticación, `config` expone contraseñas) aparcada ⬜
 - `config.json` con credenciales seguido por git ⬜
 - Sin tests ni CI ⬜; FIFOs no `_locked` en rutas multi-tarea sin auditar ⬜
 
