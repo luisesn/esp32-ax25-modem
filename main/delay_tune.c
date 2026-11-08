@@ -35,15 +35,17 @@
 #define TUNE_MIN_MS          50
 #define TUNE_MAX_MS          2000
 #define TUNE_STEP_MS         150
-#define TUNE_PINGS_PER_STEP  5
+#define TUNE_PINGS_PER_STEP  10  // muestras suficientes para distinguir 60 % de 80 %
+// Payload ICMP corto: menos aire por paquete (44 B en vez de 92 B) y menos pérdidas.
+#define TUNE_PING_PAYLOAD    16
 // interval_ms must be well below the smallest D (150 ms) so the inhibit window
 // is always the bottleneck, not esp_ping's own timer.
 #define TUNE_PING_INTERVAL_MS 100
 #define TUNE_PING_TIMEOUT_MS  5000  // per-ping timeout
-// Ceiling for the whole session: pings are spaced by (RTT + D) ≈ 0.5–3 s each.
-// 5 pings × 3 s max + timeout overhead = ~25 s.
-#define TUNE_PING_WAIT_MS    30000
-#define TUNE_PAUSE_S         30
+// Ceiling for the whole step: pings are spaced by (RTT + D) ≈ 0.5–3 s each, or
+// TUNE_PING_TIMEOUT_MS when unanswered: 10 × 5 s = 50 s worst case.
+#define TUNE_PING_WAIT_MS    70000
+#define TUNE_PAUSE_S         20
 #define TUNE_SUCCESS_THRESHOLD 0.80f  // >= 80% = "works"
 
 #define NUM_STEPS  ((TUNE_MAX_MS - TUNE_MIN_MS) / TUNE_STEP_MS + 1)
@@ -107,6 +109,7 @@ static bool ping_step(uint32_t *out_recv, uint32_t *out_avg_rtt_ms)
     cfg.count         = TUNE_PINGS_PER_STEP;
     cfg.interval_ms   = TUNE_PING_INTERVAL_MS;
     cfg.timeout_ms    = TUNE_PING_TIMEOUT_MS;
+    cfg.data_size     = TUNE_PING_PAYLOAD;
     cfg.task_stack_size = 2048;
     cfg.task_prio       = 2;
 
@@ -163,6 +166,7 @@ static void tune_task(void *arg)
     step_t results[NUM_STEPS];
     int nresults = 0;
     int32_t best_ms = -1;
+    bool unreachable = false;
 
     for (uint32_t d = TUNE_MIN_MS; d <= TUNE_MAX_MS && !s_abort; d += TUNE_STEP_MS) {
         afsk_set_post_rx_tx_delay_ms(d);
@@ -179,9 +183,6 @@ static void tune_task(void *arg)
         results[nresults].rtt  = avg_rtt;
         nresults++;
 
-        if (best_ms < 0 && ok)
-            best_ms = (int32_t)d;
-
         snprintf(buf, sizeof(buf),
             "{\"type\":\"tune_step\","
             "\"d\":%lu,\"sent\":%d,\"recv\":%lu,"
@@ -195,7 +196,13 @@ static void tune_task(void *arg)
                  (unsigned long)d, (unsigned long)recv,
                  TUNE_PINGS_PER_STEP, pct, (unsigned long)avg_rtt);
 
-        // 30-second pause between steps (skip after last step)
+        // Primer paso sin ninguna respuesta: casi seguro remoto inaccesible / IP errónea
+        if (nresults == 1 && recv == 0) {
+            unreachable = true;
+            break;
+        }
+
+        // pause between steps (skip after last step)
         if (d + TUNE_STEP_MS <= TUNE_MAX_MS && !s_abort) {
             for (int rem = TUNE_PAUSE_S; rem > 0 && !s_abort; rem--) {
                 if (rem == TUNE_PAUSE_S || rem % 10 == 0) {
@@ -213,6 +220,21 @@ static void tune_task(void *arg)
     // Restore original delay before announcing result
     afsk_set_post_rx_tx_delay_ms(original_delay);
 
+    // Recomendado: menor D que alcanza el umbral y lo mantiene en el paso siguiente
+    // (un ✓ aislado en un enlace con pérdidas es casi siempre suerte).
+    for (int i = 0; i < nresults && best_ms < 0; i++) {
+        bool ok_i = (float)results[i].recv * 100.0f / TUNE_PINGS_PER_STEP
+                    >= TUNE_SUCCESS_THRESHOLD * 100.0f;
+        bool ok_next = (i + 1 >= nresults) ||
+                       ((float)results[i + 1].recv * 100.0f / TUNE_PINGS_PER_STEP
+                        >= TUNE_SUCCESS_THRESHOLD * 100.0f);
+        // el último paso solo vale si el anterior también cumplía
+        if (i + 1 >= nresults && !(i > 0 && (float)results[i - 1].recv * 100.0f /
+                TUNE_PINGS_PER_STEP >= TUNE_SUCCESS_THRESHOLD * 100.0f))
+            ok_next = false;
+        if (ok_i && ok_next) best_ms = (int32_t)results[i].d;
+    }
+
     if (s_abort) {
         audio_stream_ws_send_text("{\"type\":\"tune_aborted\"}");
         ESP_LOGI(TAG, "sweep aborted");
@@ -222,8 +244,9 @@ static void tune_task(void *arg)
         int sp = 0;
         sp += snprintf(done_buf + sp, (int)sizeof(done_buf) - sp,
             "{\"type\":\"tune_done\","
-            "\"best_ms\":%ld,\"orig_ms\":%lu,\"steps\":[",
-            (long)best_ms, (unsigned long)original_delay);
+            "\"best_ms\":%ld,\"orig_ms\":%lu,\"unreachable\":%s,\"steps\":[",
+            (long)best_ms, (unsigned long)original_delay,
+            unreachable ? "true" : "false");
         for (int i = 0; i < nresults && sp < (int)sizeof(done_buf) - 40; i++) {
             float pct = (float)results[i].recv * 100.0f / TUNE_PINGS_PER_STEP;
             sp += snprintf(done_buf + sp, (int)sizeof(done_buf) - sp,
@@ -236,7 +259,9 @@ static void tune_task(void *arg)
         snprintf(done_buf + sp, (int)sizeof(done_buf) - sp, "]}");
         audio_stream_ws_send_text(done_buf);
 
-        if (best_ms >= 0)
+        if (unreachable)
+            ESP_LOGW(TAG, "sweep stopped — no reply from %s in first step", s_remote_ip);
+        else if (best_ms >= 0)
             ESP_LOGI(TAG, "sweep done — recommended: %ld ms  (original: %lu ms)",
                      (long)best_ms, (unsigned long)original_delay);
         else

@@ -1566,7 +1566,7 @@ function tuneOnStep(p){
   const tbody=document.getElementById('tune-tbody');
   const pct=p.pct;
   const color=p.ok?'#80e880':pct>=40?'#e8c040':'#e86060';
-  const bar='█'.repeat(Math.round(pct/20))+'░'.repeat(5-Math.round(pct/20));
+  const bar='█'.repeat(Math.round(pct/10))+'░'.repeat(10-Math.round(pct/10));
   const rttStr=p.rtt?p.rtt+' ms':'—';
   const tr=document.createElement('tr');
   tr.style.borderBottom='1px solid #1a1a1a';
@@ -1593,6 +1593,10 @@ function tuneOnDone(p){
     rec.innerHTML='✓ Recomendado: <b>'+p.best_ms+' ms</b>'
       +' (actual: '+p.orig_ms+' ms) — aplícalo en la pestaña CONFIG editando <code>aprs.post_rx_tx_delay_ms</code>.';
     tuneSetStatus('Ajuste completado.','#80e880');
+  } else if(p.unreachable){
+    rec.style.color='#e88080';rec.style.borderColor='#5a3a3a';
+    rec.innerHTML='✗ Sin respuesta del remoto en el primer paso: comprueba <code>ip.remote.addr</code> y que el nodo esté activo.';
+    tuneSetStatus('Ajuste detenido — remoto sin respuesta.','#e88080');
   } else {
     rec.style.color='#e88080';rec.style.borderColor='#5a3a3a';
     rec.innerHTML='✗ Ningún retardo alcanzó el umbral de éxito. El nodo remoto puede no estar accesible o el canal es muy ruidoso.';
