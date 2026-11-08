@@ -255,6 +255,45 @@ static void audio_level_task(void *arg)
 
 #if TNC_MODE == TNC_MODE_KISS
 
+// Dedup de comandos remotos por (origen, id de mensaje). Si nuestro ACK se
+// pierde, la estación remota reintenta el MISMO mensaje con el mismo {NNN}
+// (APRS101 cap. 14); el ACK debe repetirse siempre, pero el comando no puede
+// volver a ejecutarse (p. ej. tx,sstv encolaría otra transmisión de minutos).
+#define CMD_DEDUP_SLOTS     8
+#define CMD_DEDUP_WINDOW_MS (5 * 60 * 1000)
+
+typedef struct {
+    char      call[7];
+    int       ssid;
+    char      id[6];
+    TickType_t tick;
+    bool      used;
+} cmd_seen_t;
+
+static cmd_seen_t s_cmd_seen[CMD_DEDUP_SLOTS];
+
+// true si (call, ssid, id) ya se ejecutó dentro de la ventana; si no, lo registra.
+static bool cmd_already_seen(const char *call, int ssid, const char *id)
+{
+    TickType_t now = xTaskGetTickCount();
+    int free_slot = -1, oldest = 0;
+    for (int i = 0; i < CMD_DEDUP_SLOTS; i++) {
+        cmd_seen_t *e = &s_cmd_seen[i];
+        if (e->used && (now - e->tick) >= pdMS_TO_TICKS(CMD_DEDUP_WINDOW_MS))
+            e->used = false;
+        if (!e->used) { if (free_slot < 0) free_slot = i; continue; }
+        if (e->ssid == ssid && strcmp(e->call, call) == 0 && strcmp(e->id, id) == 0)
+            return true;   // no se refresca el tick: la ventana cuenta desde la 1ª copia
+        if ((now - e->tick) > (now - s_cmd_seen[oldest].tick)) oldest = i;
+    }
+    int slot = free_slot >= 0 ? free_slot : oldest;
+    cmd_seen_t *e = &s_cmd_seen[slot];
+    strncpy(e->call, call, sizeof(e->call) - 1); e->call[sizeof(e->call) - 1] = '\0';
+    strncpy(e->id, id, sizeof(e->id) - 1);       e->id[sizeof(e->id) - 1] = '\0';
+    e->ssid = ssid; e->tick = now; e->used = true;
+    return false;
+}
+
 // Auto-ACK: si el info field es ":NUESTRO_CALL :texto{NNN}", devuelve
 // ":SRC   :ackNNN" por radio. No ACKea si la trama ya es un ACK.
 static void try_auto_ack(const uint8_t *buf, size_t len)
@@ -370,7 +409,10 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
     ESP_LOGI("ax25rx", "AUTO-ACK %s-%d ack%s", src_base, src_ssid_num, msg_id);
     APRS_queue_ack(src_base, src_ssid_num, msg_id);
 
-    {
+    if (cmd_already_seen(src_base, src_ssid_num, msg_id)) {
+        ESP_LOGI("ax25rx", "retransmisión %s-%d {%s}: ACK reenviado, comando no repetido",
+                 src_base, src_ssid_num, msg_id);
+    } else {
         size_t cmd_len = (size_t)(brace - txt);
         if (cmd_len > 67) cmd_len = 67;
         char cmd_text[68];
