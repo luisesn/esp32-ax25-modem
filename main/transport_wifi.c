@@ -63,6 +63,7 @@ static volatile int s_client_fd = -1;
 typedef struct { char ssid[32]; char pass[64]; int timeout_s; } wifi_net_t;
 static wifi_net_t   s_nets[MAX_WIFI_NETS];
 static int          s_net_count  = 0;
+static bool         s_ap_offer_gateway = false; // ap.offer_gateway: anunciar 192.168.4.1 como router por DHCP
 static bool         s_ap_enabled     = true;   // sin sección "ap" en el JSON: hotspot habilitado
 static bool         s_ap_netif_created = false;   // guard against double esp_netif_create_default_wifi_ap()
 static bool         s_captive_dns_started = false; // guard against a second bind() on port 53
@@ -228,6 +229,15 @@ static bool wifi_start_ap(const char *ssid, const char *password) {
             esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
                                    &offer_dns, sizeof(offer_dns)) != ESP_OK)
             ESP_LOGW(TAG, "No se pudo configurar el DNS ofrecido por el DHCP del AP");
+
+        // Sin opción "router" en la oferta DHCP el cliente no recibe puerta de
+        // enlace por defecto: el móvil sigue sacando el tráfico a Internet por
+        // datos móviles y solo usa esta WiFi para 192.168.4.0/24 (la UI web).
+        uint8_t offer_router = s_ap_offer_gateway ? 0x01 : 0x00;   // OFFER_ROUTER
+        if (esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_ROUTER_SOLICITATION_ADDRESS,
+                                   &offer_router, sizeof(offer_router)) != ESP_OK)
+            ESP_LOGW(TAG, "No se pudo configurar la opción router del DHCP del AP");
+        ESP_LOGI(TAG, "DHCP del AP: %s puerta de enlace", s_ap_offer_gateway ? "ofrece" : "NO ofrece");
     }
 
     wifi_config_t ap_cfg = {};
@@ -309,6 +319,8 @@ static void wifi_load_config(void) {
         cJSON *it;
         it = cJSON_GetObjectItem(ap_j, "enabled");
         if (cJSON_IsBool(it)) s_ap_enabled = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItem(ap_j, "offer_gateway");
+        if (cJSON_IsBool(it)) s_ap_offer_gateway = cJSON_IsTrue(it);
         it = cJSON_GetObjectItem(ap_j, "ssid");
         if (cJSON_IsString(it)) snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", it->valuestring);
         it = cJSON_GetObjectItem(ap_j, "password");
