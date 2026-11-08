@@ -18,7 +18,25 @@
 #define OTA_BUF_SIZE    4096
 #define OTA_SOCK_TIMEOUT_S 60
 
+static portMUX_TYPE s_ota_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ota_in_progress = false;
+static bool s_ota_succeeded   = false;   // tras OTA correcto no se libera (reinicio pendiente)
+
+bool ota_acquire(void)
+{
+    bool got = false;
+    taskENTER_CRITICAL(&s_ota_mux);
+    if (!s_ota_in_progress) { s_ota_in_progress = true; got = true; }
+    taskEXIT_CRITICAL(&s_ota_mux);
+    return got;
+}
+
+void ota_release(void)
+{
+    taskENTER_CRITICAL(&s_ota_mux);
+    s_ota_in_progress = false;
+    taskEXIT_CRITICAL(&s_ota_mux);
+}
 
 static void reboot_task(void *arg)
 {
@@ -27,15 +45,8 @@ static void reboot_task(void *arg)
     esp_restart();
 }
 
-static esp_err_t ota_upload_handler(httpd_req_t *req)
+static esp_err_t ota_upload_impl(httpd_req_t *req)
 {
-    if (s_ota_in_progress) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"OTA already in progress\"}");
-        return ESP_OK;
-    }
-
     int total = (int)req->content_len;
     if (total <= 0) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -80,8 +91,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     bool sha_ok = psa_crypto_init() == PSA_SUCCESS &&
                   psa_hash_setup(&sha, PSA_ALG_SHA_256) == PSA_SUCCESS;
     if (check_sha && !sha_ok) check_sha = false;
-
-    s_ota_in_progress = true;
 
     // Raise socket recv timeout: sector erases stall both cores for ~30-50ms each;
     // with ~240 sectors in a 1 MB image the cumulative delay can exceed 5 s default.
@@ -169,7 +178,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
             if (strcasecmp(got_hex, want_hex) != 0) {
                 ESP_LOGE(TAG, "SHA-256 mismatch: got %s expected %s", got_hex, want_hex);
                 esp_ota_abort(ota_handle);
-                s_ota_in_progress = false;
                 audio_stream_ws_send_text(
                     "{\"type\":\"ota_error\",\"msg\":\"SHA-256 mismatch\"}");
                 httpd_resp_set_status(req, "400 Bad Request");
@@ -186,7 +194,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "esp_ota_end: %s", esp_err_to_name(err));
         audio_stream_ws_send_text(
             "{\"type\":\"ota_error\",\"msg\":\"image validation failed\"}");
-        s_ota_in_progress = false;
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"error\":\"ota_end failed\"}");
@@ -198,7 +205,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
         audio_stream_ws_send_text(
             "{\"type\":\"ota_error\",\"msg\":\"set boot partition failed\"}");
-        s_ota_in_progress = false;
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"error\":\"set_boot failed\"}");
@@ -210,19 +216,32 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
 
+    s_ota_succeeded = true;
     xTaskCreate(reboot_task, "ota_reboot", 1536, NULL, 5, NULL);
     return ESP_OK;
 
 abort_ota:
     if (sha_ok) psa_hash_abort(&sha);
     esp_ota_abort(ota_handle);
-    s_ota_in_progress = false;
     audio_stream_ws_send_text(
         "{\"type\":\"ota_error\",\"msg\":\"upload aborted\"}");
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"error\":\"upload aborted\"}");
     return ESP_OK;
+}
+
+static esp_err_t ota_upload_handler(httpd_req_t *req)
+{
+    if (!ota_acquire()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"OTA already in progress\"}");
+        return ESP_OK;
+    }
+    esp_err_t r = ota_upload_impl(req);
+    if (!s_ota_succeeded) ota_release();
+    return r;
 }
 
 void ota_init(void)

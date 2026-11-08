@@ -11,6 +11,7 @@
 //      On error: Device closes connection without sending OK.
 
 #include "ota_net.h"
+#include "ota.h"
 
 #include <string.h>
 #include <sys/socket.h>
@@ -238,7 +239,13 @@ static void ota_net_task(void *arg)
         // ----------------------------------------------------------------
         // Phase 5: receive firmware, write OTA, verify MD5
         // ----------------------------------------------------------------
-        bool success = do_ota(tcp_conn, filesize, md5);
+        bool success = false;
+        if (ota_acquire()) {
+            success = do_ota(tcp_conn, filesize, md5);
+            if (!success) ota_release();   // si fue bien, el reinicio libera
+        } else {
+            ESP_LOGE(TAG, "otro OTA (HTTP) en curso — rechazado");
+        }
 
         if (success) {
             ESP_LOGI(TAG, "OTA OK — sending OK and rebooting");
