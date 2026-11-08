@@ -1510,8 +1510,7 @@ function netPoll(){
     let h='TX pendientes: <b>'+t.pending+'</b> · enviadas: <b>'+t.sent+'</b> · descartadas: <b>'+t.dropped+
       '</b> · retardo post-RX: '+t.post_rx_ms+' ms';
     if(t.recent&&t.recent.length){
-      h+='<br>'+t.recent.map(e=>'hace '+e.age_s+' s · '+esc(e.src)+'&gt;'+esc(e.dst)+' · '+e.len+' B'+
-        (e.pid===204?' · IP':'')).join('<br>');
+      h+='<br>'+t.recent.map(e=>'hace '+e.age_s+' s · '+(e.dir==='R'?'RX':'TX')+' · '+(e.info?esc(e.info):esc(e.src)+'&gt;'+esc(e.dst))+' · '+e.len+' B').join('<br>');
     }
     f('net-tx').innerHTML=h;
   }).catch(e=>{

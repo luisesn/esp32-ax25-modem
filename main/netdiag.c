@@ -23,6 +23,7 @@
 #include "cJSON.h"
 #include "ping/ping_sock.h"
 #include "lwip/sockets.h"
+#include "lwip/tcp.h"
 #include "lwip/netdb.h"
 #include "lwip/ip_addr.h"
 
@@ -34,7 +35,7 @@
 #define BUF_SZ            4096
 #define HOST_MAX          64
 #define CONNECT_TIMEOUT_S 30
-#define TX_HIST           6
+#define TX_HIST           10
 #define PING_TIMEOUT_MS   30000
 
 typedef enum { ND_IDLE = 0, ND_PING, ND_TCP, ND_UDP } nd_mode_t;
@@ -56,9 +57,10 @@ static int        s_ping_count, s_ping_size;
 static TaskHandle_t s_ping_task;
 
 // ── Historial TX (debug) ────────────────────────────────────────────────────
-typedef struct { int64_t t_us; uint16_t len; int pid; char src[10], dst[10]; } tx_ev_t;
+typedef struct { int64_t t_us; uint16_t len; char dir; int pid; char src[10], dst[10], info[64]; } tx_ev_t;
 static tx_ev_t  s_tx_hist[TX_HIST];
-static uint32_t s_tx_count;
+static uint32_t s_tx_count;                    // eventos (TX+RX)
+static uint32_t s_sent_count;                  // sólo TX
 static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void call_str(const uint8_t *a, char *out)
@@ -76,21 +78,83 @@ static void call_str(const uint8_t *a, char *out)
     out[n] = '\0';
 }
 
-void netdiag_note_tx(const uint8_t *d, size_t len)
+static const char *port_name(unsigned p)
 {
-    if (!d || len < 16) return;
-    tx_ev_t e = { .t_us = esp_timer_get_time(), .len = (uint16_t)len, .pid = -1 };
-    call_str(d, e.dst);
-    call_str(d + 7, e.src);
-    size_t i = 7;                                  // fin del campo de direcciones
-    while (i + 7 <= len && !(d[i + 6] & 1)) i += 7;
-    i += 7;
-    if (i + 1 < len) e.pid = d[i + 1];             // d[i] = control
+    switch (p) {
+    case 22: return "ssh"; case 23: return "telnet"; case 53: return "dns";
+    case 80: return "http"; case 123: return "ntp"; case 443: return "https";
+    case 8001: return "kiss"; default: return NULL;
+    }
+}
+
+// Describe una trama recibida/transmitida: en modo TUN es "00 00 08 00 + IPv4"
+// (sin cabeceras AX.25). Devuelve true si era IP; out = "tcp 54321>23 telnet SYN ACK".
+bool netdiag_describe_frame(const uint8_t *d, size_t len, char *out, size_t on)
+{
+    out[0] = '\0';
+    if (len < 24 || d[0] || d[1] || d[2] != 8 || d[3] || (d[4] >> 4) != 4) return false;
+    const uint8_t *ip = d + 4;
+    size_t pn = len - 4, ihl = (size_t)(ip[0] & 0x0F) * 4;
+    if (ihl < 20 || pn < ihl) return false;
+    uint8_t pr = ip[9];
+    const uint8_t *t = ip + ihl;
+    size_t tn = pn - ihl;
+    if (pr == 1 && tn >= 1) {
+        const char *op = t[0] == 8 ? "echo request" : t[0] == 0 ? "echo reply" :
+                         t[0] == 3 ? "destino inalcanzable" : t[0] == 11 ? "TTL excedido" : NULL;
+        if (op) snprintf(out, on, "icmp %s", op);
+        else snprintf(out, on, "icmp tipo %u", t[0]);
+    } else if ((pr == 6 || pr == 17) && tn >= 4) {
+        unsigned sp = (unsigned)((t[0] << 8) | t[1]), dp = (unsigned)((t[2] << 8) | t[3]);
+        const char *nm = port_name(dp); if (!nm) nm = port_name(sp);
+        int k = snprintf(out, on, "%s %u>%u%s%s", pr == 6 ? "tcp" : "udp", sp, dp, nm ? " " : "", nm ? nm : "");
+        if (pr == 6 && tn >= 20 && k > 0 && (size_t)k < on) {
+            uint8_t fl = t[13];
+            size_t dl = tn > (size_t)((t[12] >> 4) * 4) ? tn - (size_t)((t[12] >> 4) * 4) : 0;
+            snprintf(out + k, on - (size_t)k, "%s%s%s%s%s %uB datos",
+                     (fl & 2) ? " SYN" : "", (fl & 1) ? " FIN" : "", (fl & 4) ? " RST" : "",
+                     (fl & 0x10) ? " ACK" : "", (fl & 8) ? " PSH" : "", (unsigned)dl);
+        }
+    } else {
+        snprintf(out, on, "ip proto %u", pr);
+    }
+    return true;
+}
+
+static bool callsign_ok(const uint8_t *a)
+{
+    for (int i = 0; i < 6; i++) {
+        char c = (char)(a[i] >> 1);
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == ' ') || (a[i] & 1)) return false;
+    }
+    return true;
+}
+
+static void note_ev(char dir, const uint8_t *d, size_t len)
+{
+    if (!d || len < 4) return;
+    tx_ev_t e = { .t_us = esp_timer_get_time(), .len = (uint16_t)len, .dir = dir, .pid = -1 };
+    if (!netdiag_describe_frame(d, len, e.info, sizeof(e.info))) {
+        if (len >= 16 && callsign_ok(d) && callsign_ok(d + 7)) {
+            call_str(d, e.dst);
+            call_str(d + 7, e.src);
+            size_t i = 7;
+            while (i + 7 <= len && !(d[i + 6] & 1)) i += 7;
+            i += 7;
+            if (i + 1 < len) e.pid = d[i + 1];
+        } else {
+            snprintf(e.info, sizeof(e.info), "trama desconocida");
+        }
+    }
     portENTER_CRITICAL(&s_tx_mux);
     s_tx_hist[s_tx_count % TX_HIST] = e;
     s_tx_count++;
+    if (dir == 'T') s_sent_count++;
     portEXIT_CRITICAL(&s_tx_mux);
 }
+
+void netdiag_note_tx(const uint8_t *d, size_t len) { note_ev('T', d, len); }
+void netdiag_note_rx(const uint8_t *d, size_t len) { note_ev('R', d, len); }
 
 // ── Búfer de salida ─────────────────────────────────────────────────────────
 // Sólo ASCII imprimible y '\n': simplifica el escapado JSON y la vista.
@@ -283,6 +347,8 @@ typedef struct { uint8_t st, verb; } tn_t;
 static size_t telnet_filter(int fd, tn_t *t, uint8_t *b, size_t n)
 {
     size_t o = 0;
+    uint8_t rb[96];                               // respuestas agrupadas: un solo send()
+    size_t rn = 0;
     for (size_t i = 0; i < n; i++) {
         uint8_t c = b[i];
         switch (t->st) {
@@ -299,13 +365,14 @@ static size_t telnet_filter(int fd, tn_t *t, uint8_t *b, size_t n)
             uint8_t rsp[3] = { 255, 0, c };
             if (t->verb == 253) rsp[1] = 252;       // DO   → WONT
             else if (t->verb == 251) rsp[1] = 254;  // WILL → DONT
-            if (rsp[1]) send(fd, rsp, 3, 0);
+            if (rsp[1] && rn + 3 <= sizeof(rb)) { memcpy(rb + rn, rsp, 3); rn += 3; }
             t->st = 0;
             break; }
         case 3: if (c == 255) t->st = 4; break;   // dentro de SB
         case 4: t->st = (c == 240) ? 0 : 3; break; // IAC SE termina SB
         }
     }
+    if (rn) send(fd, rb, rn, 0);
     return o;
 }
 
@@ -362,6 +429,10 @@ connected:
     xSemaphoreGive(s_mx);
     buf_printf(tcp ? "Conectado.\n" : "Socket UDP listo (sin conexion real).\n");
 
+    if (tcp) {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
     char rx[256];
     tn_t tn = {0, 0};
     const bool telnet = tcp && s_telnet;
@@ -528,9 +599,13 @@ static esp_err_t send_handler(httpd_req_t *req)
     if (s_fd >= 0 && s_connected) {
         int w = send(s_fd, out, (size_t)n, 0);
         if (w == n) {
-            buf_put_locked("> ", 2);
-            buf_put_locked(out, (size_t)n);
-            if (n == 0 || out[n - 1] != '\n') buf_put_locked("\n", 1);
+            // Eco local sin prefijo.
+            bool nl = n > 0 && out[n - 1] == '\n';
+            size_t vis = (size_t)n;
+            if (nl) vis--;
+            if (vis > 0 && out[vis - 1] == '\r') vis--;
+            buf_put_locked(out, vis);
+            if (nl || n == 0) buf_put_locked("\n", 1);
         } else {
             char m[80];
             int e = w < 0 ? errno : 0;
@@ -617,24 +692,25 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     // Panel de debug TX
     tx_ev_t h[TX_HIST];
-    uint32_t cnt;
+    uint32_t cnt, sent;
     portENTER_CRITICAL(&s_tx_mux);
     memcpy(h, s_tx_hist, sizeof(h));
     cnt = s_tx_count;
+    sent = s_sent_count;
     portEXIT_CRITICAL(&s_tx_mux);
     int64_t now = esp_timer_get_time();
-    char tail[700];
+    char tail[1500];
     int t = snprintf(tail, sizeof(tail),
         "\",\"tx\":{\"pending\":%d,\"dropped\":%lu,\"sent\":%lu,\"post_rx_ms\":%lu,\"recent\":[",
         afsk_tx_queue_pending(), (unsigned long)afsk_tx_dropped_count(),
-        (unsigned long)cnt, (unsigned long)afsk_get_post_rx_tx_delay_ms());
+        (unsigned long)sent, (unsigned long)afsk_get_post_rx_tx_delay_ms());
     uint32_t shown = cnt < TX_HIST ? cnt : TX_HIST;
     for (uint32_t i = 0; i < shown && t < (int)sizeof(tail) - 120; i++) {
         const tx_ev_t *ev = &h[(cnt - 1 - i) % TX_HIST];
         t += snprintf(tail + t, sizeof(tail) - t,
-            "%s{\"age_s\":%lu,\"len\":%u,\"src\":\"%s\",\"dst\":\"%s\",\"pid\":%d}",
-            i ? "," : "", (unsigned long)((now - ev->t_us) / 1000000), ev->len,
-            ev->src, ev->dst, ev->pid);
+            "%s{\"age_s\":%lu,\"dir\":\"%c\",\"len\":%u,\"src\":\"%s\",\"dst\":\"%s\",\"info\":\"%s\",\"pid\":%d}",
+            i ? "," : "", (unsigned long)((now - ev->t_us) / 1000000), ev->dir, ev->len,
+            ev->src, ev->dst, ev->info, ev->pid);
     }
     t += snprintf(tail + t, sizeof(tail) - t, "]}}");
     if (se == ESP_OK) se = httpd_resp_send_chunk(req, tail, t);
