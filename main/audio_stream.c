@@ -644,9 +644,44 @@ static esp_err_t morse_trigger_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// 404 → redirect to / (captive-portal probes from Android/iOS/Windows)
+// Modo del AP frente a los sondeos de conectividad del sistema operativo.
+//   false (por defecto): se responde como si hubiera Internet. Android/iOS/Windows
+//     dan la red por "validada", no muestran "Iniciar sesión en la red" y no la
+//     abandonan al rato por "sin Internet". Contrapartida: el móvil intentará usar
+//     esta WiFi (sin salida) como red por defecto mientras esté conectado.
+//   true (ap.captive_portal): cualquier URL desconocida redirige a "/" (portal
+//     cautivo clásico); Android muestra el aviso de inicio de sesión.
+static bool s_captive_portal = false;
+
+// Rutas de sondeo conocidas → respuesta que cada SO espera para dar la red por buena.
+static esp_err_t probe_reply(httpd_req_t *req) {
+    size_t plen = strcspn(req->uri, "?#");
+    #define URI_IS(lit) (plen == sizeof(lit) - 1 && strncmp(req->uri, lit, plen) == 0)
+    if (URI_IS("/generate_204") || URI_IS("/gen_204")) {          // Android / Chrome
+        httpd_resp_set_status(req, "204 No Content");
+        return httpd_resp_send(req, NULL, 0);
+    }
+    const char *type = "text/plain", *body = NULL;
+    if (URI_IS("/hotspot-detect.html") || URI_IS("/library/test/success.html")) {  // Apple
+        type = "text/html";
+        body = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+    } else if (URI_IS("/connecttest.txt")) {                       // Windows 10/11
+        body = "Microsoft Connect Test";
+    } else if (URI_IS("/ncsi.txt")) {                              // Windows (NCSI)
+        body = "Microsoft NCSI";
+    } else if (URI_IS("/success.txt")) {                           // Firefox
+        body = "success\n";
+    }
+    #undef URI_IS
+    if (!body) return ESP_ERR_NOT_FOUND;
+    httpd_resp_set_type(req, type);
+    return httpd_resp_sendstr(req, body);
+}
+
+// 404: sondeos de conectividad (Android/iOS/Windows/Firefox) o redirección a "/".
 static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err) {
     (void)err;
+    if (!s_captive_portal && probe_reply(req) == ESP_OK) return ESP_OK;
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "/");
     httpd_resp_send(req, NULL, 0);
@@ -1363,6 +1398,17 @@ void audio_stream_init(void) {
 
 
 
+    {
+        cJSON *c = config_get();
+        if (c) {
+            cJSON *ap = cJSON_GetObjectItem(c, "ap");
+            cJSON *it = ap ? cJSON_GetObjectItem(ap, "captive_portal") : NULL;
+            s_captive_portal = cJSON_IsTrue(it);
+            config_free_json(c);
+        }
+        ESP_LOGI(TAG, "AP: sondeos de conectividad %s",
+                 s_captive_portal ? "-> portal cautivo (redirect)" : "-> responden OK (sin aviso de Internet)");
+    }
     httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     // Tarea de encoding + dispatch

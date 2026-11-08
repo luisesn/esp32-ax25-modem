@@ -209,11 +209,25 @@ static bool wifi_start_ap(const char *ssid, const char *password) {
     ESP_LOGI(TAG, "Iniciando AP '%s'...", ssid);
 
     if (!s_ap_netif_created) {
-        if (esp_netif_create_default_wifi_ap() == NULL) {
+        esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+        if (ap_netif == NULL) {
             ESP_LOGE(TAG, "esp_netif_create_default_wifi_ap() falló (sin memoria?)");
             return false;
         }
         s_ap_netif_created = true;
+
+        // Que el DHCP del AP anuncie como DNS al propio ESP32 (192.168.4.1): así
+        // el móvil resuelve connectivitycheck.gstatic.com & co. contra captive_dns_task
+        // y los sondeos llegan a nuestro servidor HTTP. Debe hacerse con el servidor
+        // DHCP aún sin arrancar (arranca solo con el evento AP_START).
+        esp_netif_dns_info_t dns = {};
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        dns.ip.u_addr.ip4.addr = esp_ip4addr_aton("192.168.4.1");
+        uint8_t offer_dns = 0x02;   // OFFER_DNS (lwip/apps/dhcpserver, cabecera interna)
+        if (esp_netif_set_dns_info(ap_netif, ESP_NETIF_DNS_MAIN, &dns) != ESP_OK ||
+            esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
+                                   &offer_dns, sizeof(offer_dns)) != ESP_OK)
+            ESP_LOGW(TAG, "No se pudo configurar el DNS ofrecido por el DHCP del AP");
     }
 
     wifi_config_t ap_cfg = {};

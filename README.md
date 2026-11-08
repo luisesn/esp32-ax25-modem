@@ -1012,6 +1012,7 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
 | `wifi` | — | array | Lista de redes WiFi; se intenta cada una en orden circular |
 | `wifi[n]` | `connect_timeout_s` | int | Tiempo máximo de espera por red (s) |
 | `ap` | `enabled` | bool | Activa modo hotspot si no conecta a ninguna red WiFi |
+| `ap` | `captive_portal` | bool | Por defecto `false`: los sondeos de conectividad de Android/iOS/Windows/Firefox (`/generate_204`, `/hotspot-detect.html`, `/connecttest.txt`…) se responden como si hubiera Internet, sin aviso de «Iniciar sesión» y sin que el móvil abandone la red. Contrapartida: el móvil usará esta WiFi (sin salida) como red por defecto. Con `true` se redirige todo a `/` (portal cautivo clásico) |
 | `ip` | `enabled` | bool | Activa gateway IP sobre radio |
 | `ip` | `mode` | string | `"tun"` (tncattach, verificado) o `"ax25"` (RFC 1226 / kissattach) |
 | `ip.remote` | `addr` | string | IP del nodo remoto en la red RF; usada por la pestaña TUNE para el barrido de retardo |
