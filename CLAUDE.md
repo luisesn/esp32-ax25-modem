@@ -203,7 +203,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **Herencia AVR muerta**: `constants.h` (`m328p`, `REF_3V3`), `cli()/sei()` (nop en `FakeArduino`), macros `DAC_DDR`/`DAC_PORT` solo en comentarios. El `#ifdef TARGET_CPU == m328p` en `device.h` define ports AVR que no se usan.
 
-- **`sdkconfig` vs `sdkconfig.defaults`**: `sdkconfig` está en `.gitignore`; la configuración reproducible vive en `sdkconfig.defaults` (flash 4 MB, `partitions.csv`, WS + callback de handshake, `LWIP_IP_FORWARD=y` necesario para `ax25ip.c`, 16 sockets, WiFi 8/8 buffers, WPA3 e IPv6 desactivados). Si cambias un ajuste con `menuconfig`, trasládalo a `sdkconfig.defaults` (`idf.py save-defconfig` muestra las diferencias, pero sobrescribe el fichero: haz copia). Tras `idf.py fullclean` o borrar `sdkconfig`, ejecuta `idf.py reconfigure`. Optimización `-Og` = valor por defecto de IDF (no es una elección local).
+- **`sdkconfig` vs `sdkconfig.defaults`**: `sdkconfig` está en `.gitignore`; la configuración reproducible vive en `sdkconfig.defaults` (flash 4 MB, `partitions.csv`, WS + callback de handshake, `LWIP_IP_FORWARD=y` necesario para `ax25ip.c`, 16 sockets, WiFi 8/8 buffers, WPA3 e IPv6 desactivados). Si cambias un ajuste con `menuconfig`, trasládalo a `sdkconfig.defaults` (`idf.py save-defconfig` muestra las diferencias, pero sobrescribe el fichero: haz copia). Tras `idf.py fullclean` o borrar `sdkconfig`, ejecuta `idf.py reconfigure`. Optimización global `-Og` (valor por defecto de IDF); los ficheros de DSP caliente (`AFSK.cpp`, `rs_codec.c`, `il2p.c`, `squelch_sf.c`, `adpcm.c`, `CRC-CCIT.c`) se compilan con `-O2` vía `set_source_files_properties` en `main/CMakeLists.txt`. `CONFIG_FREERTOS_HZ=1000` (tick 1 ms): `sdkconfig.defaults` no pisa un `sdkconfig` existente, edítalo también si ya lo tienes.
 
 - **`pbuf_length(p)` no existe en lwIP**: la longitud total de una cadena pbuf es `p->tot_len`. Usar `pbuf_clen(p)` (cuenta fragmentos) o `p->tot_len` (bytes totales).
 
@@ -256,6 +256,14 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 - **Doble módem RX entrega cada trama dos veces**: con `rx.active_modem = "best"` (valor por defecto), v1 (`ax25_poll`) y v2 (`aprs_poll_v2`) demodulan el mismo audio y llaman por separado a `s_app_raw_hook` con la misma trama, separados por unos ms. Sin filtro eso significa doble inyección en lwIP (`ax25ip`), doble auto-ACK y doble digipetición — en un ping por RF se ve como `DUP!` y dos ciclos TX. El dedup está **en `on_ax25_raw_frame()`** (`rx_frame_is_duplicate()`, ventana `RX_DUP_WINDOW_MS` = 300 ms, comparación byte a byte), que es el punto donde convergen todos los consumidores. No añadir un segundo filtro en LibAPRS (rompería `rx_stats_v1`/`rx_stats_v2`) ni en `ax25ip.c`/`digipeater.c`.
 
 - **Polaridad PTT**: El hardware usa PTT **activo alto** (1 = transmitiendo, 0 = reposo). El control de PTT está centralizado en `AFSK.cpp`. **No invertir** las llamadas a `gpio_set_level`.
+
+- **Tick de 1 ms (`FREERTOS_HZ=1000`)**: `vTaskDelay(1)` = 1 ms, no 10 ms. Los sondeos periódicos (`aprs_poll_task`, `gps_task`) usan `pdMS_TO_TICKS(10)` para no multiplicar la CPU; usa siempre `pdMS_TO_TICKS()` en código nuevo. `receive_audio_task` mantiene `vTaskDelay(1)` (necesario para que corra IDLE0).
+
+- **Audio hacia la web = `StreamBuffer`** (`audio_stream_q`, 2048 B, 1 productor/1 consumidor): `audio_sample_hook` acumula 64 muestras y las envía de golpe; `audio_stream_task` solo codifica ADPCM si hay clientes WS `/ws` o WAV (`audio_stream_has_clients()`, flag refrescado cada 500 ms, así que el primer cliente puede tardar hasta 0,5 s en oír audio). El repetidor y el squelch siguen recibiendo cada muestra por separado en el hook. Solo `receive_audio_task` puede llamar al hook (un único productor).
+
+- **Buffer de TX compartido** (`afsk_tx_scratch()`, 2048 B en `AFSK.cpp`): lo usan el TX AFSK, SSTV y morse. Es seguro porque los tres transmiten secuencialmente en `receive_audio_task` y hacen flush antes de ceder. No introducir un TX que mantenga datos parciales en él entre llamadas a otro tipo de TX.
+
+- **FIFOs del módem de 2 KB** (`CONFIG_AFSK_RX_BUFLEN/TX_BUFLEN` en `AFSK.h`, antes 8 KB): las tramas miden ≤600 B y `AFSK_putchar` drena el FIFO TX si se llena. Si se aumentase `CUSTOM_FRAME_SIZE`, revisar. Buffers de OTA (HTTP y espota, 4 KB) en heap solo durante el OTA. Memoria estática DRAM ≈78 KB (43 % de uso); stack de `ota_net` 5 KB. Pilas sin medir en dispositivo: usar `GET /api/sys` antes de recortar más.
 
 ## Al editar este proyecto
 

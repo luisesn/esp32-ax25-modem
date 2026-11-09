@@ -559,3 +559,22 @@ Verificación: `ninja -C build` compila (≈ 944 KB, 44 % libre); lógica de la 
 **AP + Android** (`audio_stream.c`, `transport_wifi.c`): al conectar un móvil al AP saltaba «Iniciar sesión en la red» y Android lo abandonaba por no tener Internet, porque todo sondeo recibía un `302`. Ahora el handler 404 contesta a los sondeos conocidos (`204` en `/generate_204` y `/gen_204`, `Success` en Apple, `Microsoft Connect Test`/`NCSI` en Windows, `success` en Firefox); opción `ap.captive_portal: true` para volver al redirect. Además el DHCP del AP anuncia el propio ESP32 como DNS (192.168.4.1), de modo que los dominios de sondeo llegan a `captive_dns_task`. Sin probar en móvil real. Después, el DHCP del AP dejó de anunciar puerta de enlace (`ap.offer_gateway`, por defecto `false`) para que el móvil mantenga su Internet por datos móviles.
 
 Pendiente de la auditoría (no abordado): seguridad (sin autenticación en HTTP/OTA/KISS/consola RF/comandos remotos, `config` expone contraseñas WiFi, CORS `*`, IP de RF inyectada en lwIP con `IP_FORWARD`), `list_scan_and_reply_task`, submódulo de la librería, tests/CI, `FREERTOS_HZ=100` (el `vTaskDelay(1)` cede 10 ms).
+
+
+## 2026-11-09 — Optimización de CPU y memoria (sin verificar en hardware)
+
+Compila limpio (binario 0xeb230 B, 43 % libre; DRAM estática ≈107 KB → 78,6 KB).
+
+**CPU**
+- Hook de audio por bloques (`StreamBuffer`, 64 muestras) en lugar de un `xQueueSend` por muestra (9600/s); ADPCM solo con clientes WS/WAV.
+- `-O2` en AFSK, rs_codec, il2p, squelch_sf, adpcm y CRC-CCIT.
+- Tick FreeRTOS a 1 ms (`CONFIG_FREERTOS_HZ=1000`); sondeos con `pdMS_TO_TICKS(10)`.
+- IRAM descartado: la demodulación corre en tarea, no en ISR, y la IRAM la consume sobre todo el WiFi.
+
+**Memoria**
+- FIFOs RX/TX del módem 8 KB → 2 KB (−24 KB; librería).
+- Buffers OTA (HTTP y espota) en heap solo durante el OTA (−8 KB).
+- SSTV, morse y TX AFSK comparten `afsk_tx_scratch()` (−4 KB).
+- Pila `ota_net` 8 KB → 5 KB.
+
+**Pendiente de probar en hardware**: audio WS con y sin cliente, morse+SSTV+AFSK seguidos, OTA HTTP y espota, trama IL2P larga (FIFO 2 KB), medir `GET /api/sys`.
