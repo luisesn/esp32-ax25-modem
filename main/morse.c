@@ -39,7 +39,8 @@ static uint32_t s_phase;           /* 32-bit phase acc; upper 8 bits = LUT index
 static uint32_t s_phase_step;      /* added each sample for the chosen tone_hz   */
 static uint32_t s_unit_samples;    /* samples per 1 timing unit (PARIS standard) */
 
-static uint8_t  s_dac_buf[MORSE_DAC_FRAME_SIZE];
+extern uint8_t *afsk_tx_scratch(void);
+#define s_dac_buf (afsk_tx_scratch())   /* buffer compartido de TX (2048 B) */
 static int      s_buf_fill = 0;
 
 static SemaphoreHandle_t s_ready_sem   = NULL;

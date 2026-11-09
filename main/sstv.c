@@ -118,7 +118,7 @@ static uint32_t sclk_us(uint32_t us) {
  * short elements (sync, porch, scan) are packed into the same 2048-byte block.
  * Without this, each call would zero-pad to 2048 bytes and every 7-ms sync
  * pulse would actually take 42 ms, making Robot 36 run at ~72 s. */
-static uint8_t  s_dac_buf[SSTV_BUF_SIZE];
+#define s_dac_buf (afsk_tx_scratch())   /* buffer compartido de TX (2048 B) */
 static uint32_t s_dac_pos = 0;
 
 static inline void dac_out(uint8_t s) {
