@@ -51,3 +51,8 @@ void decode_block(const uint8_t *block, int8_t *samples);
 // Stops the WAV TCP server task and closes its listening socket.
 // Called by repeater_set_enabled(true) to free heap before the recording buffer malloc.
 void audio_stream_stop_wav_server(void);
+
+// Registra la API REST (index, estado, APRS, config, morse, reboot, SPIFFS,
+// repetidor/squelch) y el handler 404 de sondeos de conectividad. api_rest.c.
+#include "esp_http_server.h"
+void api_rest_register(httpd_handle_t server);
