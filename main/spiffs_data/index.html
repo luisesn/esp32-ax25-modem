@@ -916,14 +916,15 @@ if(window.visualViewport){
 }
 applyVV();
 // ── WebSocket (auto-connect + reconexión) ──────────────────────────────────
-let ws=null,wsTimer=null;
+let ws=null,wsTimer=null,wsDelay=1000; // backoff 1→2→4→5 s
 function setStatus(t){document.getElementById('status').textContent=t;}
 function connectWS(){
   if(ws&&ws.readyState<2)return;
   clearTimeout(wsTimer);
-  ws=new WebSocket('ws://'+location.host+'/ws');
+  const sock=new WebSocket('ws://'+location.host+'/ws');
+  ws=sock;
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{setStatus('Conectado');
+  ws.onopen=()=>{if(sock!==ws)return;wsDelay=1000;setStatus('Conectado');
     document.getElementById('btn').disabled=false;
     document.getElementById('rec-btn').disabled=false;
     fetch('/api/log?since='+s_last_log_seq)
@@ -934,6 +935,8 @@ function connectWS(){
       }).catch(()=>{});};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
+      // Pestaña oculta sin reproducir ni grabar: no gastar CPU en decodificar audio
+      if(document.hidden&&!actx&&!isRecording)return;
       if(e.data.byteLength===512){
         const decoded=decodeBlock(e.data);
         // Meter always active, regardless of playback state
@@ -946,15 +949,37 @@ function connectWS(){
     }
     try{const p=JSON.parse(e.data);handleMsg(p);}catch(_){}
   };
+  // onerror y onclose suelen dispararse seguidos: solo el primero actúa
   ws.onclose=ws.onerror=()=>{
+    if(sock!==ws)return;
+    try{sock.close();}catch(_){}
     setStatus('Desconectado — reconectando…');
     document.getElementById('btn').disabled=true;
     document.getElementById('rec-btn').disabled=true;
     if(isRecording) stopRec();  // save what we have if connection drops
     document.getElementById('meter').style.width='0';
-    ws=null;nextAt=0;wsTimer=setTimeout(connectWS,5000);
+    ws=null;nextAt=0;
+    clearTimeout(wsTimer);wsTimer=setTimeout(connectWS,wsDelay);
+    wsDelay=Math.min(wsDelay*2,5000);
   };
 }
+// ── Pestaña oculta: pausa timers periódicos y reconecta al volver ──────────
+function pausePolling(){
+  clearInterval(statsTimer);statsTimer=null;
+  netStopPoll();
+}
+function resumePolling(){
+  // Solo se reanuda lo que corresponde a la pestaña (tab) visible en ese momento
+  const act=document.querySelector('.tab-pane.active');
+  const id=act?act.id:'';
+  if(id==='tab-stats'&&!statsTimer){loadStats();statsTimer=setInterval(loadStats,5000);}
+  if(id==='tab-net')netStart();
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){pausePolling();return;}
+  resumePolling();
+  if(!ws){clearTimeout(wsTimer);wsDelay=1000;connectWS();}
+});
 // ── Play / Stop ────────────────────────────────────────────────────────────
 function toggle(){
   if(actx){actx.close();actx=null;nextAt=0;
