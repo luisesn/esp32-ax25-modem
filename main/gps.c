@@ -209,7 +209,7 @@ static void gps_task(void *arg) {
                 line[pos++] = c;
             }
         }
-        vTaskDelay(1);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
