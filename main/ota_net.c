@@ -283,5 +283,5 @@ static void ota_net_task(void *arg)
 
 void ota_net_init(void)
 {
-    xTaskCreate(ota_net_task, "ota_net", 8192, NULL, 5, NULL);
+    xTaskCreate(ota_net_task, "ota_net", 5120, NULL, 5, NULL);
 }
