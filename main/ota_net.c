@@ -14,6 +14,7 @@
 #include "ota.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -33,10 +34,11 @@
 #define OTA_BUF_SIZE     4096
 #define TCP_ACCEPT_TIMEOUT_S  10
 #define TCP_RECV_TIMEOUT_S    60   // sector erases can stall ~30 ms each
-
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
-static bool do_ota(int tcp_conn, unsigned int filesize, const char *expected_md5)
+static bool do_ota_impl(int tcp_conn, unsigned int filesize, const char *expected_md5,
+                        uint8_t *s_buf)
 {
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) {
@@ -58,7 +60,6 @@ static bool do_ota(int tcp_conn, unsigned int filesize, const char *expected_md5
     md5_context_t md5_ctx;
     esp_rom_md5_init(&md5_ctx);
 
-    static uint8_t s_buf[OTA_BUF_SIZE];
     unsigned int received = 0;
     unsigned int last_ack = 0;
     bool ok = true;
@@ -130,6 +131,21 @@ static bool do_ota(int tcp_conn, unsigned int filesize, const char *expected_md5
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+
+// El buffer de recepción se reserva sólo durante el OTA (4 KB menos de .bss).
+static bool do_ota(int tcp_conn, unsigned int filesize, const char *expected_md5)
+{
+    uint8_t *buf = malloc(OTA_BUF_SIZE);
+    if (!buf) {
+        ESP_LOGE(TAG, "sin memoria para el buffer OTA");
+        return false;
+    }
+    bool r = do_ota_impl(tcp_conn, filesize, expected_md5, buf);
+    free(buf);
+    return r;
 }
 
 // ---------------------------------------------------------------------------

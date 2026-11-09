@@ -1,6 +1,7 @@
 #include "ota.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
@@ -20,6 +21,7 @@
 
 static portMUX_TYPE s_ota_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_ota_in_progress = false;
+static uint8_t *s_ota_buf = NULL;        // buffer de recepción, sólo durante el OTA
 static bool s_ota_succeeded   = false;   // tras OTA correcto no se libera (reinicio pendiente)
 
 bool ota_acquire(void)
@@ -108,7 +110,7 @@ static esp_err_t ota_upload_impl(httpd_req_t *req)
         audio_stream_ws_send_text(msg);
     }
 
-    static uint8_t buf[OTA_BUF_SIZE];
+    uint8_t *buf = s_ota_buf;
     int received = 0;
     bool magic_ok = false;
     int next_report = 4 * 1024;
@@ -239,7 +241,17 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
         httpd_resp_sendstr(req, "{\"error\":\"OTA already in progress\"}");
         return ESP_OK;
     }
+    s_ota_buf = malloc(OTA_BUF_SIZE);
+    if (!s_ota_buf) {
+        ota_release();
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"out of memory\"}");
+        return ESP_OK;
+    }
     esp_err_t r = ota_upload_impl(req);
+    free(s_ota_buf);
+    s_ota_buf = NULL;
     if (!s_ota_succeeded) ota_release();
     return r;
 }
