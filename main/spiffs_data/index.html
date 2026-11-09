@@ -653,6 +653,38 @@ function openChatFromInput(){
   showTab('msg',document.getElementById('tab-btn-msg'));
   setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
 }
+// ── Helper HTTP unificado ──────────────────────────────────────────────────
+// api(path,{method,body,headers,timeout}) → JSON ya parseado (o null si vacío).
+// body: objeto → JSON; string/FormData/Blob → tal cual. Lanza Error con mensaje
+// legible (timeout, red, HTTP n o el campo error/msg del JSON del servidor).
+async function api(path,opts){
+  opts=opts||{};
+  const {timeout=8000,body,headers,...rest}=opts;
+  const ctl=new AbortController();
+  const tm=setTimeout(()=>ctl.abort(),timeout);
+  const init={...rest,signal:ctl.signal};
+  if(body!==undefined){
+    if(typeof body==='string'||body instanceof FormData||body instanceof Blob||body instanceof ArrayBuffer){
+      init.body=body;if(headers)init.headers=headers;
+    }else{
+      init.body=JSON.stringify(body);
+      init.headers={'Content-Type':'application/json',...headers};
+    }
+  }else if(headers)init.headers=headers;
+  try{
+    let r,txt;
+    try{r=await fetch(path,init);txt=await r.text();}
+    catch(e){throw new Error(e&&e.name==='AbortError'?'tiempo de espera agotado':'error de red');}
+    let data=null;
+    if(txt){try{data=JSON.parse(txt);}catch(_){data=null;}}
+    if(!r.ok){
+      const err=new Error((data&&(data.error||data.msg))||'HTTP '+r.status);
+      err.status=r.status;err.data=data;throw err;
+    }
+    if(txt&&data===null)throw new Error('respuesta no válida');
+    return data;
+  }finally{clearTimeout(tm);}
+}
 // Escapa cualquier valor para insertarlo en HTML (texto o atributo entre comillas)
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
@@ -927,12 +959,11 @@ function connectWS(){
   ws.onopen=()=>{if(sock!==ws)return;wsDelay=1000;setStatus('Conectado');
     document.getElementById('btn').disabled=false;
     document.getElementById('rec-btn').disabled=false;
-    fetch('/api/log?since='+s_last_log_seq)
-      .then(r=>r.json())
+    api('/api/log?since='+s_last_log_seq)
       .then(d=>{
         if(d.last_seq)s_last_log_seq=d.last_seq;
         if(d.entries)d.entries.forEach(e=>{try{handleMsg(JSON.parse(e));}catch(_){}});
-      }).catch(()=>{});};
+      }).catch(e=>console.warn('log:',e.message));};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
       // Pestaña oculta sin reproducir ni grabar: no gastar CPU en decodificar audio
@@ -1001,19 +1032,15 @@ function sendAPRS(){
   if(!chatContact)openChat(to,ssid);
   const btn=document.getElementById('send-btn');
   btn.disabled=true;st.style.color='#888';st.textContent='Enviando…';
-  fetch('/api/aprs/send',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({to,ssid,text})
-  }).then(r=>r.json()).then(d=>{
+  api('/api/aprs/send',{method:'POST',body:{to,ssid,text}}).then(d=>{
     if(d.ok){
       st.style.color='#4ac84a';st.textContent='Enviado ✓';
       appendSentLog(to,ssid,text);
       appendSentChatBubble(to,ssid,text,d.msg_id!=null?d.msg_id:null);
       document.getElementById('send-text').value='';
     } else {st.style.color='#c04040';st.textContent='Error del servidor.';}
-  }).catch(()=>{
-    st.style.color='#c04040';st.textContent='Error de red.';
+  }).catch(e=>{
+    st.style.color='#c04040';st.textContent='Error: '+e.message;
   }).finally(()=>{btn.disabled=false;});
 }
 // ── Download log as CSV ────────────────────────────────────────────────────
@@ -1061,7 +1088,7 @@ function fmtAPRSLon(lon){
 // ── Tab switching ──────────────────────────────────────────────────────────
 let statsTimer=null;
 function loadStats(){
-  fetch('/api/rx/stats').then(r=>r.json()).then(d=>{
+  api('/api/rx/stats').then(d=>{
     document.getElementById('s-v1-ok').textContent    = d.v1.frames_ok;
     document.getElementById('s-v1-err').textContent   = d.v1.frames_err;
     document.getElementById('s-v1-flags').textContent = d.v1.hdlc_flags;
@@ -1088,9 +1115,9 @@ function loadStats(){
     sqb.className='bdg '+(d.v2_squelch_open?'bdg-ok':'bdg-off');
     const st=document.getElementById('stats-status');
     st.textContent=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  }).catch(()=>{
+  }).catch(e=>{
     const st=document.getElementById('stats-status');
-    st.style.color='#c04040';st.textContent='Error de red';
+    st.style.color='#c04040';st.textContent='Error: '+e.message;
   });
 }
 function showTab(name,btn){
@@ -1110,11 +1137,11 @@ function loadCfg(){
   const ta=document.getElementById('cfg-editor');
   const st=document.getElementById('cfg-status');
   st.style.color='#888';st.textContent='Cargando…';
-  fetch('/api/config').then(r=>r.json()).then(d=>{
+  api('/api/config').then(d=>{
     ta.value=JSON.stringify(d,null,2);
     st.textContent='';
     cfgLoaded=true;
-  }).catch(()=>{st.style.color='#c04040';st.textContent='Error al cargar config.';});
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error al cargar config: '+e.message;});
 }
 function saveCfg(){
   const ta=document.getElementById('cfg-editor');
@@ -1124,16 +1151,12 @@ function saveCfg(){
   try{ parsed=JSON.parse(ta.value); }
   catch(e){ st.style.color='#c04040';st.textContent='JSON inválido: '+e.message;return; }
   btn.disabled=true;st.style.color='#888';st.textContent='Guardando…';
-  fetch('/api/config',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(parsed)
-  }).then(r=>r.json()).then(d=>{
+  api('/api/config',{method:'POST',body:parsed,timeout:15000}).then(d=>{
     if(d.ok){
       st.style.color='#4ac84a';st.textContent='✓ Guardado y aplicado';
       cfgLoaded=false;  // force reload next time tab is opened
     }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
-  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;}
   ).finally(()=>{btn.disabled=false;});
 }// ── GPS ────────────────────────────────────────────────────────────────────
 function getGPS(){
@@ -1170,28 +1193,24 @@ function sendBeacon(){
   if(s_gps_course!=null&&s_gps_speed_kt!=null){
     beaconBody.course=s_gps_course;beaconBody.speed=s_gps_speed_kt;
   }
-  fetch('/api/aprs/beacon',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(beaconBody)
-  }).then(r=>r.json()).then(d=>{
+  api('/api/aprs/beacon',{method:'POST',body:beaconBody}).then(d=>{
     if(d.ok){
       st.style.color='#4ac84a';st.textContent='Baliza TX ✓';
       const cseSpd=(s_gps_course!=null&&s_gps_speed_kt!=null)
         ?String(s_gps_course).padStart(3,'0')+'/'+String(s_gps_speed_kt).padStart(3,'0'):'';
       appendSentLog('APRS',-1,'='+fmtAPRSLat(lat)+'/'+fmtAPRSLon(lon)+sym+cseSpd+comment);
     }else{st.style.color='#c04040';st.textContent='Error: '+(d.error||'desconocido');}
-  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;}
   ).finally(()=>{btn.disabled=false;});
 }
 function triggerMorse(){
   const btn=document.getElementById('morse-btn');
   const st=document.getElementById('cfg-status');
   btn.disabled=true;st.style.color='#888';st.textContent='Enviando morse…';
-  fetch('/api/morse/trigger',{method:'POST'}).then(r=>r.json()).then(d=>{
+  api('/api/morse/trigger',{method:'POST'}).then(d=>{
     st.style.color=d.ok?'#4ac84a':'#c04040';
     st.textContent=d.ok?'Morse TX encolado ✓':'Error';
-  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';}
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;}
   ).finally(()=>{btn.disabled=false;});
 }
 function rebootDevice(){
@@ -1199,10 +1218,10 @@ function rebootDevice(){
   const btn=document.getElementById('reboot-btn');
   const st=document.getElementById('cfg-status');
   btn.disabled=true;st.style.color='#888';st.textContent='Reiniciando…';
-  fetch('/api/reboot',{method:'POST'}).then(r=>r.json()).then(()=>{
+  api('/api/reboot',{method:'POST'}).then(()=>{
     st.style.color='#c8a04a';st.textContent='Reiniciando — reconectando en 5 s…';
     setTimeout(()=>{btn.disabled=false;st.textContent='';},8000);
-  }).catch(()=>{st.style.color='#c04040';st.textContent='Error de red.';btn.disabled=false;});
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;btn.disabled=false;});
 }
 // ── SSTV ───────────────────────────────────────────────────────────────────
 const sstvModeDims={martin:[320,256],robot:[320,240]};
@@ -1211,7 +1230,7 @@ function sstvSetTxActive(active){
   if(btn)btn.style.display=active?'':'none';
 }
 async function sstvStop(){
-  try{await fetch('/api/sstv/stop',{method:'POST'});}catch(e){}
+  try{await api('/api/sstv/stop',{method:'POST'});}catch(e){console.warn('sstv stop:',e.message);}
   document.getElementById('sstv-tx-status').textContent='Abortando TX…';
 }
 async function sstvSendTest(){
@@ -1220,10 +1239,7 @@ async function sstvSendTest(){
   const txst=document.getElementById('sstv-tx-status');
   st.style.color='#888';st.textContent='Enviando…';
   try{
-    const r=await fetch('/api/sstv/test',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mode})});
-    const d=await r.json();
+    const d=await api('/api/sstv/test',{method:'POST',body:{mode}});
     if(d.status==='queued'){
       st.style.color='#4ac84a';st.textContent='En cola ✓';
       txst.style.color='#888';txst.textContent='TX test pattern ('+mode+')…';
@@ -1231,14 +1247,14 @@ async function sstvSendTest(){
     } else {
       st.style.color='#c04040';st.textContent=d.error||'Error';
     }
-  }catch(e){st.style.color='#c04040';st.textContent='Error de red';}
+  }catch(e){st.style.color='#c04040';st.textContent='Error: '+e.message;}
 }
 async function loadSstvGallery(){
   const el=document.getElementById('sstv-gallery');
   if(!el)return;
   el.innerHTML='<em style="color:#555">Cargando...</em>';
   try{
-    const list=await fetch('/api/sstv/list').then(r=>r.json());
+    const list=await api('/api/sstv/list');
     if(!list.length){el.innerHTML='<em style="color:#555">Galería vacía</em>';return;}
     el.innerHTML='';
     list.forEach(img=>{
@@ -1263,26 +1279,28 @@ async function loadSstvGallery(){
         const st=document.getElementById('sstv-tx-status');
         st.style.color='#888';st.textContent='Encolando '+name+'...';
         try{
-          const r=await fetch('/api/sstv/send',{method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({name,mode})});
-          const d=await r.json();
+          const d=await api('/api/sstv/send',{method:'POST',body:{name,mode}});
           st.style.color=d.status==='queued'?'#4a9a4a':'#c04040';
           st.textContent=d.status==='queued'?'📡 Transmitiendo '+name+' (PTT ON)':
             '✗ '+(d.error||JSON.stringify(d));
           if(d.status==='queued')sstvSetTxActive(true);
-        }catch(e){st.style.color='#c04040';st.textContent='✗ '+e;}
+        }catch(e){st.style.color='#c04040';st.textContent='✗ '+e.message;}
       });
     });
     el.querySelectorAll('.sstv-del-btn').forEach(btn=>{
       btn.addEventListener('click',async()=>{
         if(!confirm('¿Borrar '+btn.dataset.name+'?'))return;
-        await fetch('/api/sstv/image?name='+encodeURIComponent(btn.dataset.name),
+        try{
+          await api('/api/sstv/image?name='+encodeURIComponent(btn.dataset.name),
                     {method:'DELETE'});
+        }catch(e){
+          const st=document.getElementById('sstv-tx-status');
+          st.style.color='#c04040';st.textContent='✗ Borrar: '+e.message;
+        }
         loadSstvGallery();
       });
     });
-  }catch(e){el.innerHTML='<em style="color:#c04040">Error: '+esc(e)+'</em>';}
+  }catch(e){el.innerHTML='<em style="color:#c04040">Error: '+esc(e.message||e)+'</em>';}
 }
 async function sstvUpload(){
   const file=document.getElementById('sstv-file').files[0];
@@ -1303,8 +1321,7 @@ async function sstvUpload(){
     form.append('name',uname+'.jpg');
     form.append('image',blob,uname+'.jpg');
     try{
-      const r=await fetch('/api/sstv/upload',{method:'POST',body:form});
-      const d=await r.json();
+      const d=await api('/api/sstv/upload',{method:'POST',body:form,timeout:60000});
       if(d.status==='ok'){
         st.style.color='#4a9a4a';
         st.textContent='✓ '+d.name+' ('+( d.size/1024).toFixed(1)+' KB)';
@@ -1312,7 +1329,7 @@ async function sstvUpload(){
       }else{
         st.style.color='#c04040';st.textContent='✗ '+JSON.stringify(d);
       }
-    }catch(e){st.style.color='#c04040';st.textContent='✗ '+e;}
+    }catch(e){st.style.color='#c04040';st.textContent='✗ '+e.message;}
   },'image/jpeg',0.92);
 }
 // ── OTA ────────────────────────────────────────────────────────────────────
@@ -1398,10 +1415,9 @@ function repUpdateState(st){
 }
 function repSetEnabled(en){
   const msg=document.getElementById('rep-msg');
-  fetch('/api/repeater/enable',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})})
-    .then(r=>r.json())
+  api('/api/repeater/enable',{method:'POST',body:{enabled:en}})
     .then(d=>{msg.textContent=d.enabled?'Repetidor activado':'Repetidor desactivado';msg.style.color=d.enabled?'#4a9a4a':'#aaa';})
-    .catch(()=>{msg.textContent='Error de red';msg.style.color='#c04040';});
+    .catch(e=>{msg.textContent='Error: '+e.message;msg.style.color='#c04040';});
 }
 function hfneSetActive(active,manual){
   const sw=document.getElementById('hfne-monitor-sw');
@@ -1462,8 +1478,8 @@ function hfneUpdate(v,open,active,manual){
   if(badge){badge.textContent=open?'ABIERTO':'cerrado';badge.style.borderColor=open?'#4a9a4a':'#444';badge.style.color=open?'#4fc84f':'#666';}
 }
 function hfneMonitorToggle(en){
-  fetch('/api/squelch/monitor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:en})})
-    .then(r=>r.json()).then(d=>{hfneSetActive(d.active,d.manual);}).catch(()=>{});
+  api('/api/squelch/monitor',{method:'POST',body:{active:en}})
+    .then(d=>{hfneSetActive(d.active,d.manual);}).catch(e=>console.warn('squelch monitor:',e.message));
 }
 function hfneSetThr(thr){
   const marker=document.getElementById('hfne-thr-marker');
@@ -1474,40 +1490,40 @@ function hfneSetThr(thr){
   if(slider)slider.value=Math.round(thr*100);
 }
 function hfneThreshCommit(v){
-  fetch('/api/squelch/sf_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hfne_threshold:parseFloat(v)})})
-    .then(r=>r.json()).then(d=>{if(d.hfne_thr!=null)hfneSetThr(d.hfne_thr);})
-    .catch(()=>{});
+  api('/api/squelch/sf_config',{method:'POST',body:{hfne_threshold:parseFloat(v)}})
+    .then(d=>{if(d.hfne_thr!=null)hfneSetThr(d.hfne_thr);})
+    .catch(e=>console.warn('squelch thr:',e.message));
 }
 function repRefresh(){
-  fetch('/api/repeater/status').then(r=>r.json()).then(d=>{
+  api('/api/repeater/status').then(d=>{
     repUpdateState(d.state||'idle');
-  }).catch(()=>{});
-  fetch('/api/squelch/status').then(r=>r.json()).then(d=>{
+  }).catch(e=>{
+    console.warn('repeater status:',e.message);
+    const m=document.getElementById('rep-msg');
+    if(m){m.style.color='#c04040';m.textContent='Error: '+e.message;}
+  });
+  api('/api/squelch/status').then(d=>{
     hfneSetActive(d.active,d.manual);
     if(d.hfne!=null)hfneUpdate(d.hfne,d.open,d.active,d.manual);
     if(d.thr!=null)hfneSetThr(d.thr);
-  }).catch(()=>{});
+  }).catch(e=>console.warn('squelch status:',e.message));
 }
 document.querySelectorAll('.tab-btn').forEach(btn=>{
   const orig=btn.onclick;
   btn.onclick=function(e){if(orig)orig.call(this,e);if(this.textContent==='REPEATER')repRefresh();};
 });
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
-window.addEventListener('load',()=>{connectWS();fetch('/api/me').then(r=>r.json()).then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(()=>{});repRefresh();});
+window.addEventListener('load',()=>{connectWS();api('/api/me').then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;}).catch(e=>console.warn('me:',e.message));repRefresh();});
 // ── Diagnóstico de red ───────────────────────────────────────────────────
 let netGen=-1,netSince=0,netTimer=null,netFormInit=false,netBusy=false;
 function netPost(path,body){
-  return fetch('/api/netdiag/'+path,{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body||{})}).then(r=>r.json());
+  return api('/api/netdiag/'+path,{method:'POST',body:body||{}});
 }
 let netPolling=false,netPollAgain=false;
 function netPoll(){
   if(netPolling){netPollAgain=true;return;}   // evita respuestas solapadas/desordenadas
   netPolling=true;
-  fetch('/api/netdiag?gen='+netGen+'&since='+netSince).then(r=>{
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    return r.json();
-  }).then(d=>{
+  api('/api/netdiag?gen='+netGen+'&since='+netSince).then(d=>{
     const out=document.getElementById('net-out');
     if(d.gen!==netGen){out.textContent='';}          // nueva operación
     else if(d.from<netSince)return;                  // respuesta vieja: ignorar
@@ -1554,11 +1570,12 @@ function netPoll(){
 }
 function netStart(){if(!netTimer){netPoll();netTimer=setInterval(netPoll,1000);}}
 function netStopPoll(){clearInterval(netTimer);netTimer=null;}
+function netFail(e){const st=document.getElementById('net-status');st.style.color='#e88080';st.textContent='Error: '+(e&&e.message?e.message:e);}
 function netErr(j){if(j&&j.error){const st=document.getElementById('net-status');st.style.color='#e88080';st.textContent=j.error;}}
 function netPing(){
   const host=document.getElementById('net-host').value.trim();
   if(!host)return;
-  netPost('ping',{host,count:1}).then(j=>{netErr(j);netPoll();});
+  netPost('ping',{host,count:1}).then(j=>{netErr(j);netPoll();}).catch(netFail);
 }
 function netConnect(){
   const host=document.getElementById('net-host').value.trim();
@@ -1567,14 +1584,14 @@ function netConnect(){
   if(!pe.value&&proto==='telnet')pe.value=23;
   const port=parseInt(pe.value,10);
   if(!host||!port)return;
-  netPost('connect',{host,port,proto}).then(j=>{netErr(j);netPoll();});
+  netPost('connect',{host,port,proto}).then(j=>{netErr(j);netPoll();}).catch(netFail);
 }
-function netStop(){netPost('stop').then(()=>setTimeout(netPoll,300));}
+function netStop(){netPost('stop').then(()=>setTimeout(netPoll,300)).catch(netFail);}
 function netSend(){
   const el=document.getElementById('net-send');
   const data=el.value;
   if(el.disabled)return;
-  netPost('send',{data,eol:document.getElementById('net-eol').value}).then(j=>{netErr(j);if(!j.error)el.value='';netPoll();});
+  netPost('send',{data,eol:document.getElementById('net-eol').value}).then(j=>{netErr(j);if(!j.error)el.value='';netPoll();}).catch(netFail);
 }
 // ── Delay tuner ───────────────────────────────────────────────────────────
 function tuneSetRunning(running){
@@ -1639,13 +1656,16 @@ function tuneOnAborted(){
 }
 async function tuneStart(){
   tuneSetStatus('Iniciando…','#c8a04a');
-  const r=await fetch('/api/tune/start',{method:'POST'});
-  const j=await r.json();
-  if(!j.ok)tuneSetStatus('Error: '+(j.error||'desconocido'),'#e88080');
+  try{
+    const j=await api('/api/tune/start',{method:'POST'});
+    if(!j.ok)tuneSetStatus('Error: '+(j.error||'desconocido'),'#e88080');
+  }catch(e){tuneSetStatus('Error: '+e.message,'#e88080');}
 }
 async function tuneStop(){
-  await fetch('/api/tune/stop',{method:'POST'});
-  tuneSetStatus('Deteniendo…','#888');
+  try{
+    await api('/api/tune/stop',{method:'POST'});
+    tuneSetStatus('Deteniendo…','#888');
+  }catch(e){tuneSetStatus('Error: '+e.message,'#e88080');}
 }
 </script>
 </body>
