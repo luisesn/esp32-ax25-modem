@@ -620,6 +620,7 @@ function openChat(call,ssid){
   const s=parseInt(ssid,10);
   if(!c)return;
   chatContact={call:c,ssid:isNaN(s)?0:s};
+  lsSet('contact',JSON.stringify(chatContact));
   chatPendingAcks.clear();
   // Sync header inputs
   const toEl=document.getElementById('send-to');
@@ -653,6 +654,10 @@ function openChatFromInput(){
   showTab('msg',document.getElementById('tab-btn-msg'));
   setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
 }
+// ── Persistencia ligera en localStorage (siempre tolerante a fallos) ───────
+function lsGet(k){try{return localStorage.getItem('aprs.'+k);}catch(_){return null;}}
+function lsSet(k,v){try{localStorage.setItem('aprs.'+k,String(v));}catch(_){}}
+function lsDel(k){try{localStorage.removeItem('aprs.'+k);}catch(_){}}
 // ── Helper HTTP unificado ──────────────────────────────────────────────────
 // api(path,{method,body,headers,timeout}) → JSON ya parseado (o null si vacío).
 // body: objeto → JSON; string/FormData/Blob → tal cual. Lanza Error con mensaje
@@ -1125,6 +1130,7 @@ function showTab(name,btn){
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   btn.classList.add('active');
   document.getElementById('tab-'+name).classList.add('active');
+  lsSet('tab',name);
   if(name==='cfg') loadCfg();
   clearInterval(statsTimer);statsTimer=null;
   if(name==='stats'){loadStats();statsTimer=setInterval(loadStats,5000);}
@@ -1667,6 +1673,36 @@ async function tuneStop(){
     tuneSetStatus('Deteniendo…','#888');
   }catch(e){tuneSetStatus('Error: '+e.message,'#e88080');}
 }
+// ── Restaurar estado guardado (contacto, destino, pestaña, formularios) ────
+(function restoreUI(){
+  const $=id=>document.getElementById(id);
+  // Campos de formulario: [id, clave]; se guardan al cambiar y se restauran si el valor existe
+  const fields=[['send-to','dest'],['send-ssid','ssid'],['pos-lat','lat'],['pos-lon','lon'],
+    ['pos-sym','sym'],['pos-comment','comment'],['sstv-test-mode','sstvtest'],
+    ['sstv-upload-mode','sstvup']];
+  fields.forEach(([id,k])=>{
+    const el=$(id);if(!el)return;
+    const v=lsGet(k);
+    if(v!==null){
+      el.value=v;
+      if(el.tagName==='SELECT'&&el.value!==v)el.selectedIndex=0; // opción ya no existe
+    }
+    const save=()=>lsSet(k,el.value);
+    el.addEventListener('change',save);el.addEventListener('input',save);
+  });
+  // Contacto de chat (reconstruye el chat con lo que haya en logData; el log del
+  // servidor se reproduce al conectar el WS y añade burbujas del contacto activo)
+  try{
+    const c=JSON.parse(lsGet('contact')||'null');
+    if(c&&typeof c.call==='string'&&c.call)openChat(c.call,c.ssid);
+  }catch(_){}
+  // Pestaña activa
+  const t=lsGet('tab');
+  if(t&&t!=='log'){
+    const btn=[...document.querySelectorAll('.tab-btn')].find(b=>(b.getAttribute('onclick')||'').indexOf("'"+t+"'")>=0);
+    if(btn&&$('tab-'+t)){showTab(t,btn);if(document.hidden)pausePolling();}
+  }
+})();
 </script>
 </body>
 </html>
