@@ -58,6 +58,16 @@ idf_component_register(
 # 600 cubre el MTU típico de tncattach (512 B payload + 16 B cabecera AX.25 + 2 B CRC).
 target_compile_definitions(__idf_main PRIVATE CUSTOM_FRAME_SIZE=600)
 
+# Ficheros de DSP calientes: -O2 en lugar de -Og (el valor por defecto de IDF).
+set_source_files_properties(
+    "LibAPRS-esp32-i2s/src/AFSK.cpp"
+    "rs_codec.c"
+    "il2p.c"
+    "squelch_sf.c"
+    "adpcm.c"
+    "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
+    PROPERTIES COMPILE_OPTIONS "-O2")
+
 spiffs_create_partition_image(
     spiffs
     spiffs_data
