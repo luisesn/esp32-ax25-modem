@@ -2,14 +2,19 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#111111">
 <title>ESP32 APRS Monitor</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
+:root{--pad:1rem;--pt:max(var(--pad),env(safe-area-inset-top,0px));--pb:max(var(--pad),env(safe-area-inset-bottom,0px));
+  --pl:max(var(--pad),env(safe-area-inset-left,0px));--pr:max(var(--pad),env(safe-area-inset-right,0px))}
 html,body{height:100%}
-body{background:#111;color:#e0e0e0;font-family:monospace;min-height:100vh;padding:1rem}
+body{background:#111;color:#e0e0e0;font-family:monospace;min-height:100vh;
+  padding:var(--pt) var(--pr) var(--pb) var(--pl)}
 /* --vvh is updated by JS from window.visualViewport.height (keyboard-aware on mobile) */
-.app{height:calc(var(--vvh,100dvh) - 2rem);display:grid;grid-template-rows:auto 1fr;gap:1rem;
+.app{height:calc(var(--vvh,100dvh) - var(--pt) - var(--pb));display:grid;grid-template-rows:auto 1fr;gap:1rem;
   max-width:960px;margin:0 auto}
 .panel{background:#0d0d0d;border:1px solid #2a2a2a;border-radius:4px;overflow:hidden}
 #top-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -121,19 +126,34 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           border-radius:3px;cursor:pointer;transition:background .2s;white-space:nowrap}
 #send-btn:hover{background:#5a4000}
 #send-btn:disabled{opacity:.4;cursor:default}
-#send-status{font-size:.65rem;min-height:1rem;color:#888;padding:0 .1rem}
 @media (max-width:700px){
-  body{padding:.4rem}
-  .app{height:calc(var(--vvh,100dvh) - .8rem);grid-template-rows:auto 1fr;gap:.5rem}
+  :root{--pad:.4rem}
+  .app{grid-template-rows:auto 1fr;gap:.5rem}
   #top-panel{padding:.6rem .85rem;gap:.5rem}
   h1{font-size:1rem}
   #info{display:none}
   #meter-wrap{width:100%;max-width:none}
   #rx-signal{width:100%;max-width:none}
-  .tab-btn{min-width:2.75rem;padding:.5rem .35rem;font-size:.6rem}
+  .tab-btn{min-width:2.75rem;padding:.5rem .35rem}
   input,select,textarea{font-size:16px !important}
   .bubble{max-width:88%}
   #chat-hdr input{width:5rem}
+  /* fuentes mínimas legibles en móvil (los estados llevan font-size inline) */
+  .pkt,.sstv-row,.stats-grid{font-size:.75rem}
+  .bubble{font-size:.8rem}
+  .bubble-ts,.bdg,.digi-badge,.third-badge,.ack-badge,.me-badge,.pos-badge{font-size:.75rem}
+  #send-status,#pos-status,#cfg-status,#stats-status,#tune-status,#net-status,#rep-msg,
+  #ota-status,#spiffs-status,#sstv-tx-status,#sstv-test-status,#sstv-upload-status,
+  #rx-hint,#rx-peak-num,#chat-hdr label,#log-hdr{font-size:.75rem !important}
+  button,.tab-btn{font-size:.75rem !important}
+}
+/* Pantallas táctiles: zonas de pulsación cómodas */
+@media (pointer:coarse){
+  button,.tab-btn,select,
+  input:not([type=checkbox]):not([type=range]):not([type=file]){min-height:44px}
+  .tab-btn{padding-left:.75rem;padding-right:.75rem}
+  button{padding-left:.8rem;padding-right:.8rem}
+  .pkt .src{display:inline-block;padding:.25rem 0}
 }
 #rec-btn{padding:.35rem .7rem;font-size:.75rem;font-family:monospace;
   background:#1a0000;color:#c04040;border:1px solid #c04040;
@@ -215,7 +235,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
     </div>
     <div id="meter-wrap"><div id="meter"></div></div>
     <div id="rx-signal" title="Nivel señal RX. Óptimo ADC: 8–115 / 127. Punto verde = portadora detectada (squelch HFNE).">
-      <span id="rx-sq-dot" title="Squelch cerrado">&#x25CF;</span>
+      <span id="rx-sq-dot" title="Squelch cerrado" role="img" aria-label="Estado del squelch">&#x25CF;</span>
       <div id="rx-bar-outer">
         <div id="rx-bar"></div>
         <div class="rx-thr-mark" style="left:6.3%"></div>
@@ -244,16 +264,16 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('net',this)">RED</button>
     </div>
     <div id="tab-log" class="tab-pane active">
-      <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV">&#x2B07; CSV</button></div>
+      <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV" aria-label="Descargar log como CSV">&#x2B07; CSV</button></div>
       <div id="log"></div>
     </div>
     <div id="tab-msg" class="tab-pane">
       <div id="chat-hdr">
         <label>A:</label>
-        <input id="send-to" type="text" maxlength="6" placeholder="NO0CAL" spellcheck="false" autocomplete="off"
+        <input id="send-to" aria-label="Indicativo destino" type="text" maxlength="6" placeholder="NO0CAL" spellcheck="false" autocomplete="off"
           onkeydown="if(event.key==='Enter')openChatFromInput()">
         <label>-</label>
-        <select id="send-ssid">
+        <select id="send-ssid" aria-label="SSID destino">
           <option value="-1">—</option>
           <option value="0" selected>0</option>
           <option value="1">1</option><option value="2">2</option>
@@ -271,11 +291,11 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <div id="chat-placeholder">Introduce un indicativo arriba<br>o haz clic en un callsign del LOG</div>
       </div>
       <div id="chat-input-bar">
-        <input id="send-text" type="text" maxlength="67" placeholder="Mensaje…" spellcheck="false"
+        <input id="send-text" aria-label="Mensaje" type="text" maxlength="67" placeholder="Mensaje…" spellcheck="false"
           onkeydown="if(event.key==='Enter')sendAPRS()"
           onfocus="setTimeout(applyVV,300)"
           onblur="setTimeout(applyVV,100)">
-        <button id="send-btn" onclick="sendAPRS()">&#x2191; Enviar</button>
+        <button id="send-btn" onclick="sendAPRS()" aria-label="Enviar mensaje">&#x2191; Enviar</button>
       </div>
       <div id="send-status"></div>
     </div>
@@ -283,13 +303,13 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div class="send-row">
         <button id="gps-btn" onclick="getGPS()">&#x1F4CD; GPS</button>
         <label style="min-width:2rem">Lat</label>
-        <input id="pos-lat" type="number" step="any" min="-90" max="90" placeholder="40.41680" style="flex:1;min-width:3.5rem">
+        <input id="pos-lat" aria-label="Latitud" type="number" step="any" min="-90" max="90" placeholder="40.41680" style="flex:1;min-width:3.5rem">
         <label style="min-width:2rem">Lon</label>
-        <input id="pos-lon" type="number" step="any" min="-180" max="180" placeholder="-3.70380" style="flex:1;min-width:3.5rem">
+        <input id="pos-lon" aria-label="Longitud" type="number" step="any" min="-180" max="180" placeholder="-3.70380" style="flex:1;min-width:3.5rem">
       </div>
       <div class="send-row">
         <label>Símbolo</label>
-        <select id="pos-sym">
+        <select id="pos-sym" aria-label="Símbolo APRS">
           <option value="&gt;">&gt; Coche</option>
           <option value="-">- Casa</option>
           <option value="k">k SUV/4x4</option>
@@ -300,7 +320,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           <option value="n">n MESH</option>
         </select>
         <label style="min-width:3.5rem">Comentario</label>
-        <input id="pos-comment" type="text" maxlength="43" placeholder="ESP32-APRS" style="flex:1">
+        <input id="pos-comment" aria-label="Comentario" type="text" maxlength="43" placeholder="ESP32-APRS" style="flex:1">
       </div>
       <div class="send-row">
         <button id="pos-btn" onclick="sendBeacon()">&#x1F4E1; Transmitir baliza</button>
@@ -308,10 +328,10 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       </div>
     </div>
     <div id="tab-cfg" class="tab-pane" style="justify-content:flex-start">
-      <textarea id="cfg-editor" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+      <textarea id="cfg-editor" aria-label="Editor de configuración JSON" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
       <div class="send-row" style="flex-shrink:0">
         <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
-        <button id="morse-btn" onclick="triggerMorse()" title="Enviar baliza morse ahora">&#x2D9; Morse</button>
+        <button id="morse-btn" onclick="triggerMorse()" title="Enviar baliza morse ahora" aria-label="Enviar baliza morse ahora">&#x2D9; Morse</button>
         <button id="reboot-btn" onclick="rebootDevice()" title="Reiniciar el ESP32" style="background:#2a0a0a;color:#c04040;border:1px solid #c04040">&#x21BA; Reiniciar</button>
         <span id="cfg-status"></span>
       </div>
@@ -450,7 +470,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           <div style="display:flex;align-items:center;gap:.4rem">
             <span id="hfne-active-lbl" style="font-size:.6rem;color:#555">inactivo</span>
             <label style="position:relative;display:inline-block;width:32px;height:16px;cursor:pointer">
-              <input type="checkbox" id="hfne-monitor-sw" style="opacity:0;width:0;height:0"
+              <input type="checkbox" id="hfne-monitor-sw" aria-label="Activar monitor de squelch HFNE" style="opacity:0;width:0;height:0"
                 onchange="hfneMonitorToggle(this.checked)">
               <span id="hfne-sw-track" style="position:absolute;inset:0;background:#333;border-radius:8px;transition:background .2s">
                 <span id="hfne-sw-thumb" style="position:absolute;top:2px;left:2px;width:12px;height:12px;background:#666;border-radius:50%;transition:left .2s"></span>
@@ -470,7 +490,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           </div>
           <div style="display:flex;align-items:center;gap:.5rem">
             <span style="font-size:.65rem;color:#aaa;width:4rem">thr:</span>
-            <input type="range" id="hfne-thr-slider" min="5" max="95" value="10" step="5" style="width:120px"
+            <input type="range" id="hfne-thr-slider" aria-label="Umbral HFNE" min="5" max="95" value="10" step="5" style="width:120px"
               oninput="document.getElementById('hfne-thr-disp').textContent=(this.value/100).toFixed(2)"
               onchange="hfneThreshCommit(this.value/100)">
             <span id="hfne-thr-disp" style="font-size:.65rem;font-family:monospace;color:#ccc;width:3rem">0.10</span>
@@ -502,9 +522,9 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
     <div id="tab-net" class="tab-pane" style="justify-content:flex-start;gap:.6rem">
       <div style="font-size:.65rem;color:#888">Diagnóstico de red: ping y miniconsola TCP/UDP. Una sola operación a la vez; la salida se conserva en el módem aunque recargues o abras otro cliente.</div>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
-        <input id="net-host" placeholder="IP o host" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:8rem">
-        <input id="net-port" type="number" min="1" max="65535" placeholder="puerto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;width:5rem">
-        <select id="net-proto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="tcp">TCP</option><option value="telnet">TELNET</option><option value="udp">UDP</option></select>
+        <input id="net-host" aria-label="IP o host" placeholder="IP o host" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:8rem">
+        <input id="net-port" aria-label="Puerto" type="number" min="1" max="65535" placeholder="puerto" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;width:5rem">
+        <select id="net-proto" aria-label="Protocolo" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="tcp">TCP</option><option value="telnet">TELNET</option><option value="udp">UDP</option></select>
       </div>
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
         <button id="net-ping-btn" onclick="netPing()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a">Ping</button>
@@ -514,8 +534,8 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       </div>
       <pre id="net-out" style="flex:1;min-height:8rem;max-height:45vh;overflow:auto;margin:0;padding:.4rem;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:4px;font-size:.65rem;color:#bdbdbd;white-space:pre-wrap;word-break:break-all"></pre>
       <div style="display:flex;gap:.4rem;align-items:center">
-        <input id="net-send" disabled placeholder="texto a enviar" onkeydown="if(event.key==='Enter')netSend()" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1">
-        <select id="net-eol" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="crlf">CRLF</option><option value="lf">LF</option><option value="cr">CR</option><option value="none">sin fin</option></select>
+        <input id="net-send" aria-label="Texto a enviar" disabled placeholder="texto a enviar" onkeydown="if(event.key==='Enter')netSend()" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1">
+        <select id="net-eol" aria-label="Fin de línea" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;"><option value="crlf">CRLF</option><option value="lf">LF</option><option value="cr">CR</option><option value="none">sin fin</option></select>
         <button id="net-send-btn" onclick="netSend()" disabled style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;border-radius:3px;cursor:pointer;background:#1a2230;color:#80b0e8;border:1px solid #2a4060">Enviar</button>
       </div>
       <div style="font-size:.6rem;color:#666;font-family:monospace">Debug TX (RF)</div>
@@ -1274,8 +1294,8 @@ async function loadSstvGallery(){
         `<option value="robot_36">R36 (36s)</option>`+
         `<option value="robot_72">R72 (72s)</option>`+
         `</select>`+
-        `<button class="sstv-tx-btn" data-name="${esc(img.name)}">TX</button>`+
-        `<button class="sstv-del-btn" data-name="${esc(img.name)}">✕</button>`;
+        `<button class="sstv-tx-btn" data-name="${esc(img.name)}" aria-label="Transmitir ${esc(img.name)}">TX</button>`+
+        `<button class="sstv-del-btn" data-name="${esc(img.name)}" aria-label="Borrar ${esc(img.name)}" title="Borrar">✕</button>`;
       el.appendChild(row);
     });
     el.querySelectorAll('.sstv-tx-btn').forEach(btn=>{
