@@ -599,7 +599,7 @@ function chatAddBubble(out,text,tsStr,msgId){
   d.className='bubble '+(out?'bubble-out':'bubble-in');
   const ts=tsStr||new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const ackSpan=out?'<span class="bubble-ack" data-ack>✓</span>':'';
-  d.innerHTML=esc(text)+'<div class="bubble-ts"><span>'+ts+'</span>'+ackSpan+'</div>';
+  d.innerHTML=esc(text)+'<div class="bubble-ts"><span>'+esc(ts)+'</span>'+ackSpan+'</div>';
   if(out&&msgId!=null){
     d.dataset.msgid=msgId;
     chatPendingAcks.set(msgId,d);
@@ -653,8 +653,9 @@ function openChatFromInput(){
   showTab('msg',document.getElementById('tab-btn-msg'));
   setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
 }
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
-  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+// Escapa cualquier valor para insertarlo en HTML (texto o atributo entre comillas)
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fillDest(src){
   const m=src.match(/^([A-Z0-9]+)(?:-(\d+))?$/i);
   if(!m)return;
@@ -664,6 +665,11 @@ function fillDest(src){
   showTab('msg',document.getElementById('tab-btn-msg'));
   setTimeout(()=>{const t=document.getElementById('send-text');if(t)t.focus();},50);
 }
+// Delegación: clic en un callsign del LOG abre el chat (sin handlers inline con datos)
+document.getElementById('log').addEventListener('click',e=>{
+  const el=e.target.closest&&e.target.closest('.src[data-call]');
+  if(el)fillDest(el.dataset.call);
+});
 function isMessageToMe(info){
   if(!myCall||!info) return false;
   const pad9=s=>(s+'         ').slice(0,9).toUpperCase();
@@ -740,9 +746,9 @@ function appendLog(src,dst,path,info,isDigi){
   const mapLink=pos
     ?` <a class="map-link" href="https://maps.google.com/?q=${pos.lat},${pos.lon}" target="_blank" rel="noopener" title="Ver en Google Maps (${pos.lat},${pos.lon})">&#x1F5FA;&#xFE0F;</a>`
     :'';
-  d.innerHTML=`<span class="ts">${ts}</span>${badge}`+
+  d.innerHTML=`<span class="ts">${esc(ts)}</span>${badge}`+
     (tp?'<span class="third-badge">3RD</span>':'')+
-    `<span class="src" onclick="fillDest('${esc(tp?tp.src:src)}')" title="Copiar al destino">${esc(tp?tp.src:src)}</span>`+
+    `<span class="src" data-call="${esc(tp?tp.src:src)}" title="Copiar al destino">${esc(tp?tp.src:src)}</span>`+
     `<span class="sep"> &gt; </span>`+
     `<span class="dst">${esc(tp?tp.dst:dst)}</span>`+
     (tp?`<span class="sep"> vía </span><span class="path">${esc(src)}</span>`
@@ -771,7 +777,7 @@ function appendSentLog(to,ssid,text){
   const d=document.createElement('div');d.className='pkt pkt-sent';
   const ts=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const dest=(ssid>=0&&ssid<=15)?`${to}-${ssid}`:to;
-  d.innerHTML=`<span class="ts">${ts}</span>`+
+  d.innerHTML=`<span class="ts">${esc(ts)}</span>`+
     `<span class="tx-lbl">TX</span>`+
     `<span class="tx-arr"> → </span>`+
     `<span class="dst">${esc(dest)}</span>`+
@@ -1213,7 +1219,7 @@ async function loadSstvGallery(){
     list.forEach(img=>{
       const row=document.createElement('div');row.className='sstv-row';
       row.innerHTML=`<span class="sstv-name">${esc(img.name)}</span>`+
-        `<span class="sstv-size">${(img.size/1024).toFixed(1)}KB</span>`+
+        `<span class="sstv-size">${esc((img.size/1024).toFixed(1))}KB</span>`+
         `<select class="sstv-mode-sel" data-name="${esc(img.name)}">`+
         `<option value="martin_m1">M1 (114s)</option>`+
         `<option value="martin_m2">M2 (58s)</option>`+
@@ -1228,7 +1234,7 @@ async function loadSstvGallery(){
     el.querySelectorAll('.sstv-tx-btn').forEach(btn=>{
       btn.addEventListener('click',async()=>{
         const name=btn.dataset.name;
-        const mode=el.querySelector(`.sstv-mode-sel[data-name="${name}"]`).value;
+        const mode=[...el.querySelectorAll('.sstv-mode-sel')].find(x=>x.dataset.name===name).value;
         const st=document.getElementById('sstv-tx-status');
         st.style.color='#888';st.textContent='Encolando '+name+'...';
         try{
@@ -1251,7 +1257,7 @@ async function loadSstvGallery(){
         loadSstvGallery();
       });
     });
-  }catch(e){el.innerHTML='<em style="color:#c04040">Error: '+e+'</em>';}
+  }catch(e){el.innerHTML='<em style="color:#c04040">Error: '+esc(e)+'</em>';}
 }
 async function sstvUpload(){
   const file=document.getElementById('sstv-file').files[0];
@@ -1507,10 +1513,10 @@ function netPoll(){
       d.mode==='ping'?'Ping a '+d.host+'…':
       ((d.telnet?'TELNET':d.mode.toUpperCase())+' '+d.host+':'+d.port+(d.connected?' — conectado':' — conectando…')+' · RX '+d.rx_pkts+' pkt / '+d.rx_bytes+' B');
     const t=d.tx;
-    let h='TX pendientes: <b>'+t.pending+'</b> · enviadas: <b>'+t.sent+'</b> · descartadas: <b>'+t.dropped+
-      '</b> · retardo post-RX: '+t.post_rx_ms+' ms';
+    let h='TX pendientes: <b>'+esc(t.pending)+'</b> · enviadas: <b>'+esc(t.sent)+'</b> · descartadas: <b>'+esc(t.dropped)+
+      '</b> · retardo post-RX: '+esc(t.post_rx_ms)+' ms';
     if(t.recent&&t.recent.length){
-      h+='<br>'+t.recent.map(e=>'hace '+e.age_s+' s · '+(e.dir==='R'?'RX':'TX')+' · '+(e.info?esc(e.info):esc(e.src)+'&gt;'+esc(e.dst))+' · '+e.len+' B').join('<br>');
+      h+='<br>'+t.recent.map(e=>'hace '+esc(e.age_s)+' s · '+(e.dir==='R'?'RX':'TX')+' · '+(e.info?esc(e.info):esc(e.src)+'&gt;'+esc(e.dst))+' · '+esc(e.len)+' B').join('<br>');
     }
     f('net-tx').innerHTML=h;
   }).catch(e=>{
@@ -1570,10 +1576,10 @@ function tuneOnStep(p){
   const tr=document.createElement('tr');
   tr.style.borderBottom='1px solid #1a1a1a';
   tr.innerHTML=
-    '<td style="padding:.2rem .4rem;color:#ccc">'+p.d+'</td>'+
-    '<td style="text-align:center;padding:.2rem .4rem;color:#888">'+p.recv+'/'+p.sent+'</td>'+
-    '<td style="text-align:center;padding:.2rem .4rem;color:'+color+';font-family:monospace">'+bar+' '+pct+'%</td>'+
-    '<td style="text-align:right;padding:.2rem .4rem;color:#888">'+rttStr+'</td>'+
+    '<td style="padding:.2rem .4rem;color:#ccc">'+esc(p.d)+'</td>'+
+    '<td style="text-align:center;padding:.2rem .4rem;color:#888">'+esc(p.recv)+'/'+esc(p.sent)+'</td>'+
+    '<td style="text-align:center;padding:.2rem .4rem;color:'+color+';font-family:monospace">'+bar+' '+esc(pct)+'%</td>'+
+    '<td style="text-align:right;padding:.2rem .4rem;color:#888">'+esc(rttStr)+'</td>'+
     '<td style="text-align:center;padding:.2rem .4rem">'+
       (p.ok?'<span style="color:#80e880">✓</span>':'<span style="color:#666">✗</span>')+
     '</td>';
@@ -1589,8 +1595,8 @@ function tuneOnDone(p){
   rec.style.display='block';
   if(p.best_ms!==null&&p.best_ms>0){
     rec.style.color='#80e880';rec.style.borderColor='#3a5a3a';
-    rec.innerHTML='✓ Recomendado: <b>'+p.best_ms+' ms</b>'
-      +' (actual: '+p.orig_ms+' ms) — aplícalo en la pestaña CONFIG editando <code>aprs.post_rx_tx_delay_ms</code>.';
+    rec.innerHTML='✓ Recomendado: <b>'+esc(p.best_ms)+' ms</b>'
+      +' (actual: '+esc(p.orig_ms)+' ms) — aplícalo en la pestaña CONFIG editando <code>aprs.post_rx_tx_delay_ms</code>.';
     tuneSetStatus('Ajuste completado.','#80e880');
   } else if(p.unreachable){
     rec.style.color='#e88080';rec.style.borderColor='#5a3a3a';
