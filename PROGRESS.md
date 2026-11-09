@@ -578,3 +578,8 @@ Compila limpio (binario 0xeb230 B, 43 % libre; DRAM estática ≈107 KB → 78,6
 - Pila `ota_net` 8 KB → 5 KB.
 
 **Pendiente de probar en hardware**: audio WS con y sin cliente, morse+SSTV+AFSK seguidos, OTA HTTP y espota, trama IL2P larga (FIFO 2 KB), medir `GET /api/sys`.
+
+### Refactor HTTP y UI comprimida (2026-11-09)
+- `audio_stream.c` (1451 líneas) dividido: la API REST y los sondeos de conectividad pasan a `api_rest.c` (`api_rest_register()`); mismas 17 rutas.
+- `index.html` (88,7 KB) se flashea como `index.html.gz` (22,7 KB, −74 %); el handler `/` prefiere un `index.html` suelto y si no sirve el `.gz`. Buffer de lectura 512 → 1024 B. Sin verificar en dispositivo.
+- Análisis del frontend (sin aplicar): pausar timers y descarte de audio con pestaña oculta, helper `api()` con `r.ok`/timeout, persistencia en localStorage, CSS táctil (≥44 px, inputs 16 px), `esc()` no escapa `'` (XSS vía `fillDest`).

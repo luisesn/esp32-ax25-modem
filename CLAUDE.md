@@ -31,7 +31,8 @@ esp32-aprs-modem/
 │   ├── kiss.{h,c}              # Framing KISS encode/decode
 │   ├── transport.{h,c}         # Interfaz abstracta { init, write }
 │   ├── transport_wifi.{h,c}    # WiFi STA (varias redes) + fallback AP + reconexión + servidor TCP KISS
-│   ├── audio_stream.{h,c}      # HTTP :80, WebSocket /ws, IMA ADPCM, WAV TCP :8080, ~30 endpoints REST
+│   ├── audio_stream.{h,c}      # HTTP :80 (servidor), WebSocket /ws, IMA ADPCM, WAV TCP :8080, /api/log, /api/rx/stats
+│   ├── api_rest.c              # API REST (index, me, sys, aprs, config, morse, reboot, spiffs, repeater/squelch) + sondeos 404; `api_rest_register()`
 │   ├── ax25ip.{h,c}            # Gateway IP RFC 1226 / modo TUN (tncattach), PID=0xCC
 │   ├── aux_config.{h,c}        # Config JSON en /spiffs/config.json (config_get devuelve copia)
 │   ├── aux_file_management.{h,c} # Montaje SPIFFS
@@ -51,7 +52,7 @@ esp32-aprs-modem/
 │   ├── spiffs_data/
 │   │   ├── config.json         # Config activa flasheada en SPIFFS (¡contiene credenciales!)
 │   │   ├── config.json.normal  # Copia de referencia local (en .gitignore)
-│   │   ├── index.html          # UI web completa (~80 KB, ~1500 líneas, un solo fichero)
+│   │   ├── index.html          # UI web completa (~89 KB, ~1600 líneas, un solo fichero); el build la flashea como index.html.gz (~23 KB) vía build/spiffs_staging
 │   │   └── sstv/               # Imágenes JPEG de usuario (en .gitignore)
 │   └── LibAPRS-esp32-i2s/      # ← REPO GIT ANIDADO (luisesn/LibAPRS-esp32-i2s), no submódulo
 │       └── src/
@@ -264,6 +265,8 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 - **Buffer de TX compartido** (`afsk_tx_scratch()`, 2048 B en `AFSK.cpp`): lo usan el TX AFSK, SSTV y morse. Es seguro porque los tres transmiten secuencialmente en `receive_audio_task` y hacen flush antes de ceder. No introducir un TX que mantenga datos parciales en él entre llamadas a otro tipo de TX.
 
 - **FIFOs del módem de 2 KB** (`CONFIG_AFSK_RX_BUFLEN/TX_BUFLEN` en `AFSK.h`, antes 8 KB): las tramas miden ≤600 B y `AFSK_putchar` drena el FIFO TX si se llena. Si se aumentase `CUSTOM_FRAME_SIZE`, revisar. Buffers de OTA (HTTP y espota, 4 KB) en heap solo durante el OTA. Memoria estática DRAM ≈78 KB (43 % de uso); stack de `ota_net` 5 KB. Pilas sin medir en dispositivo: usar `GET /api/sys` antes de recortar más.
+
+- **`index.html` se flashea comprimido**: `main/CMakeLists.txt` copia `spiffs_data/` a `build/spiffs_staging/`, gzipea `index.html` → `index.html.gz` y genera la imagen SPIFFS desde ahí (se regenera al tocar cualquier fichero de `spiffs_data`). El handler de `/` ([api_rest.c](main/api_rest.c)) prefiere un `/spiffs/index.html` suelto (subido con `/api/spiffs/upload`, útil para iterar la UI sin reflashear) y si no existe sirve el `.gz` con `Content-Encoding: gzip`. Si subes un `index.html` y luego quieres volver al flasheado, bórralo de SPIFFS.
 
 ## Al editar este proyecto
 

@@ -69,8 +69,34 @@ set_source_files_properties(
     "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
     PROPERTIES COMPILE_OPTIONS "-O2")
 
+# Imagen SPIFFS: se prepara un directorio intermedio con index.html comprimido
+# (index.html.gz, ~75 % menos: más rápido por WiFi y ahorra partición). El handler
+# de "/" prefiere un index.html suelto (subido por /api/spiffs/upload) y si no
+# existe sirve el .gz con Content-Encoding: gzip. Se regenera al cambiar spiffs_data.
+set(SPIFFS_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/spiffs_data")
+set(SPIFFS_STAGE_DIR "${CMAKE_BINARY_DIR}/spiffs_staging")
+file(GLOB_RECURSE _spiffs_files CONFIGURE_DEPENDS "${SPIFFS_SRC_DIR}/*")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_spiffs_files})
+file(REMOVE_RECURSE "${SPIFFS_STAGE_DIR}")
+file(COPY "${SPIFFS_SRC_DIR}/" DESTINATION "${SPIFFS_STAGE_DIR}")
+if(EXISTS "${SPIFFS_STAGE_DIR}/index.html")
+    if(NOT DEFINED python)
+        set(python python3)
+    endif()
+    execute_process(
+        COMMAND ${python} -c "import gzip,sys; d=open(sys.argv[1],'rb').read(); open(sys.argv[2],'wb').write(gzip.compress(d,9,mtime=0))"
+                "${SPIFFS_STAGE_DIR}/index.html" "${SPIFFS_STAGE_DIR}/index.html.gz"
+        RESULT_VARIABLE _gz_rc)
+    if(_gz_rc EQUAL 0)
+        file(REMOVE "${SPIFFS_STAGE_DIR}/index.html")
+    else()
+        message(WARNING "gzip de index.html falló: se flashea sin comprimir")
+        file(REMOVE "${SPIFFS_STAGE_DIR}/index.html.gz")
+    endif()
+endif()
+
 spiffs_create_partition_image(
     spiffs
-    spiffs_data
+    "${SPIFFS_STAGE_DIR}"
     FLASH_IN_PROJECT
 )

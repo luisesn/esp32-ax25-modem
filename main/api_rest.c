@@ -31,21 +31,28 @@
 
 // ─── HTTP handlers ────────────────────────────────────────────────────────────
 
-// GET / → sirve /index.html desde SPIFFS
+// GET / → sirve /spiffs/index.html (si se subió suelto) o index.html.gz (imagen
+// flasheada, comprimida en el build) con Content-Encoding: gzip.
 static esp_err_t index_handler(httpd_req_t *req) {
+    bool gz = false;
     FILE *f = fopen("/spiffs/index.html", "r");
+    if (!f) {
+        f = fopen("/spiffs/index.html.gz", "r");
+        gz = (f != NULL);
+    }
     if (!f) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "index.html not found");
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "text/html");
-    char buf[512];
+    if (gz) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    char buf[1024];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        // Abortar en cuanto el cliente deja de drenar: index.html son ~157
-        // chunks y con send_wait_timeout=1 cada chunk fallido bloquea la tarea
-        // httpd 1 s ("httpd_sock_err: error in send : 11" una vez por segundo),
-        // dejando el servidor entero — WS incluido — sin atender.
+        // Abortar en cuanto el cliente deja de drenar: con send_wait_timeout=1
+        // cada chunk fallido bloquea la tarea httpd 1 s ("httpd_sock_err: error
+        // in send : 11" una vez por segundo), dejando el servidor entero — WS
+        // incluido — sin atender.
         if (httpd_resp_send_chunk(req, buf, (ssize_t)n) != ESP_OK) {
             fclose(f);
             return ESP_FAIL;   // httpd cierra el socket; no enviar el chunk final
