@@ -611,8 +611,19 @@ static void processPacket(void *arg) {
 // Hook instalado en receive_audio_task: cada muestra decimada (9600 Hz, int8)
 // se encola de forma no bloqueante hacia audio_stream_task.
 static void audio_sample_hook(int8_t sample) {
-    if (audio_stream_q)
-        xQueueSendToBack(audio_stream_q, &sample, 0);
+    // Acumula en bloques de 64 muestras y envía al StreamBuffer (solo receive_audio_task
+    // llama aquí: un único productor). Sin clientes no se encola nada.
+    static int8_t blk[64];
+    static int blk_n = 0;
+    if (audio_stream_q && audio_stream_has_clients()) {
+        blk[blk_n++] = sample;
+        if (blk_n >= (int)sizeof(blk)) {
+            xStreamBufferSend(audio_stream_q, blk, sizeof(blk), 0);
+            blk_n = 0;
+        }
+    } else {
+        blk_n = 0;
+    }
     repeater_audio_hook(sample);
     squelch_sf_push_sample(sample);
 }

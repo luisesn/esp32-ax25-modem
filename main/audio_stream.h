@@ -1,7 +1,9 @@
 #pragma once
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
+#include <stdbool.h>
 #include "freertos/queue.h"
+#include "freertos/stream_buffer.h"
 
 // Puerto del servidor HTTP (index.html + WebSocket /ws).
 #define AUDIO_HTTP_PORT   80
@@ -17,7 +19,10 @@
 // Cola de muestras de audio: receive_audio_task enqueue, audio_stream_task dequeue.
 // Dimensionada para ~2 bloques de margen (2034 muestras ≈ 212 ms).
 #define AUDIO_QUEUE_LEN      2048
-extern QueueHandle_t audio_stream_q;
+extern StreamBufferHandle_t audio_stream_q;  // bloques de int8_t (StreamBuffer, 1 productor/1 consumidor)
+
+// true si hay algún cliente WS /ws o WAV :8080 (el productor no debe encolar si es false).
+bool audio_stream_has_clients(void);
 
 // Inicia el servidor HTTP (port AUDIO_HTTP_PORT) y la tarea de streaming.
 // Debe llamarse después de que WiFi esté conectado.

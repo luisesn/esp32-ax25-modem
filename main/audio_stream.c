@@ -31,7 +31,10 @@
 // clients past the cutoff from the WS broadcast loops (audio + JSON events).
 #define AUDIO_STREAM_MAX_CLIENT_FDS 3
 
-QueueHandle_t audio_stream_q = NULL;
+StreamBufferHandle_t audio_stream_q = NULL;
+static volatile bool s_has_clients = false;  // actualizado por audio_stream_task
+
+bool audio_stream_has_clients(void) { return s_has_clients; }
 
 // ─── RAM log buffer (last s_log_max entries of persistent WS messages) ────────
 //
@@ -266,61 +269,88 @@ static bool ws_try_send(int fd, httpd_ws_frame_t *pkt) {
 // En ESP-IDF 6.1 el handler WebSocket NO se llama al conectar el cliente,
 // solo cuando el cliente envía frames. Para streaming unidireccional (server→client)
 // usamos httpd_get_client_list + httpd_ws_get_fd_info para encontrar clientes WS.
+// Cuenta clientes WebSocket (binario/texto) conectados a /ws.
+static int count_ws_clients(void) {
+    if (s_httpd == NULL) return 0;
+    int fds[AUDIO_STREAM_MAX_CLIENT_FDS];
+    size_t n = sizeof(fds) / sizeof(fds[0]);
+    int c = 0;
+    if (httpd_get_client_list(s_httpd, &n, fds) != ESP_OK) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (httpd_ws_get_fd_info(s_httpd, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) c++;
+    return c;
+}
+
 static void audio_stream_task(void *arg) {
     adpcm_state_t state = { .predictor = 0, .step_index = 0 };
     int sample_count = 0;
     int client_fds[AUDIO_STREAM_MAX_CLIENT_FDS];
+    int8_t rxbuf[128];
+    TickType_t last_chk = 0;
 
     for (;;) {
-        int8_t sample;
-        if (xQueueReceive(audio_stream_q, &sample, pdMS_TO_TICKS(150)) != pdTRUE) {
+        // Refresco periódico (500 ms) del flag de clientes: WS o WAV.
+        TickType_t now = xTaskGetTickCount();
+        if (now - last_chk >= pdMS_TO_TICKS(500)) {
+            last_chk = now;
+            bool has = count_ws_clients() > 0 || s_wav_client_fd >= 0 || s_wav_q != NULL;
+            if (has != s_has_clients) {
+                s_has_clients = has;
+                if (!has) { sample_count = 0; }
+            }
+        }
+        size_t got = xStreamBufferReceive(audio_stream_q, rxbuf, sizeof(rxbuf), pdMS_TO_TICKS(150));
+        if (got == 0) {
             if (sample_count) s_a_starve++;   // bloque a medias descartado
             sample_count = 0;
             continue;
         }
-        s_sample_buf[sample_count++] = sample;
-        s_a_samples++;
+        if (!s_has_clients) { sample_count = 0; continue; }  // sin clientes: no codificar
+        for (size_t k = 0; k < got; k++) {
+            s_sample_buf[sample_count++] = rxbuf[k];
+            s_a_samples++;
+            if (sample_count < ADPCM_SAMPLES_BLOCK) continue;
+            sample_count = 0;
 
-        if (sample_count < ADPCM_SAMPLES_BLOCK) continue;
-        sample_count = 0;
+            encode_block(&state, s_sample_buf, s_adpcm_block);
+            s_a_blocks++;
 
-        encode_block(&state, s_sample_buf, s_adpcm_block);
-        s_a_blocks++;
+            // Enviar a todos los clientes WebSocket activos.
+            if (s_httpd != NULL) {
+                size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
+                uint32_t wsc = 0;
+                if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
+                    for (int i = 0; i < (int)n; i++) {
+                        int fd = client_fds[i];
+                        if (httpd_ws_get_fd_info(s_httpd, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
+                            continue;
+                        wsc++;
 
-        // Enviar a todos los clientes WebSocket activos.
-        if (s_httpd != NULL) {
-            size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
-            uint32_t wsc = 0;
-            if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
-                for (int i = 0; i < (int)n; i++) {
-                    int fd = client_fds[i];
-                    if (httpd_ws_get_fd_info(s_httpd, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
-                        continue;
-                    wsc++;
-
-                    httpd_ws_frame_t pkt = {
-                        .final      = true,
-                        .fragmented = false,
-                        .type       = HTTPD_WS_TYPE_BINARY,
-                        .payload    = s_adpcm_block,
-                        .len        = ADPCM_BLOCK_BYTES,
-                    };
-                    // descarta el bloque si el cliente no drena
-                    if (ws_try_send(fd, &pkt)) s_a_sent++;
-                    else                       s_a_drop++;
+                        httpd_ws_frame_t pkt = {
+                            .final      = true,
+                            .fragmented = false,
+                            .type       = HTTPD_WS_TYPE_BINARY,
+                            .payload    = s_adpcm_block,
+                            .len        = ADPCM_BLOCK_BYTES,
+                        };
+                        // descarta el bloque si el cliente no drena
+                        if (ws_try_send(fd, &pkt)) s_a_sent++;
+                        else                       s_a_drop++;
+                    }
                 }
+                s_a_wsc = wsc;
             }
-            s_a_wsc = wsc;
-        }
 
-        // Encolar para el cliente WAV TCP si está activo (lossy).
-        // s_wav_q_mutex serializes against wav_server_task/audio_stream_stop_wav_server
-        // deleting the queue; timeout 0 keeps this from ever blocking the audio
-        // pipeline — worst case this block is dropped, which the WAV stream
-        // already tolerates.
-        if (xSemaphoreTake(s_wav_q_mutex, 0) == pdTRUE) {
-            if (s_wav_q) xQueueSendToBack(s_wav_q, s_adpcm_block, 0);
-            xSemaphoreGive(s_wav_q_mutex);
+            // Encolar para el cliente WAV TCP si está activo (lossy).
+            // s_wav_q_mutex serializes against wav_server_task/audio_stream_stop_wav_server
+            // deleting the queue; timeout 0 keeps this from ever blocking the audio
+            // pipeline — worst case this block is dropped, which the WAV stream
+            // already tolerates.
+            if (xSemaphoreTake(s_wav_q_mutex, 0) == pdTRUE) {
+                if (s_wav_q) xQueueSendToBack(s_wav_q, s_adpcm_block, 0);
+                xSemaphoreGive(s_wav_q_mutex);
+            }
+
         }
     }
 }
@@ -914,7 +944,7 @@ static esp_err_t rx_stats_handler(httpd_req_t *req)
         (unsigned long)s_a_sent,    (unsigned long)s_a_drop,
         (unsigned long)s_a_starve,  (unsigned long)s_a_wsc,
         (unsigned long)s_a_hs,
-        (unsigned)(audio_stream_q ? uxQueueMessagesWaiting(audio_stream_q) : 0),
+        (unsigned)(audio_stream_q ? xStreamBufferBytesAvailable(audio_stream_q) : 0),
         (unsigned)esp_get_free_heap_size());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -1261,7 +1291,7 @@ void audio_stream_init(void) {
         ESP_LOGI(TAG, "log: max_stored=%d (ephemeral events not persisted)", s_log_max);
     }
 
-    audio_stream_q = xQueueCreate(AUDIO_QUEUE_LEN, sizeof(int8_t));
+    audio_stream_q = xStreamBufferCreate(AUDIO_QUEUE_LEN, 1);
 
     // Antes de httpd_start(): en cuanto el servidor acepta clientes puede haber
     // envíos WS concurrentes.
