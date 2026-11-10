@@ -261,6 +261,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn" onclick="showTab('spiffs',this)">SPIFFS</button>
       <button class="tab-btn" onclick="showTab('rep',this)">REPEATER</button>
       <button class="tab-btn" onclick="showTab('tune',this)">TUNE</button>
+      <button class="tab-btn" onclick="showTab('survey',this)">SURVEY</button>
       <button class="tab-btn" onclick="showTab('net',this)">RED</button>
     </div>
     <div id="tab-log" class="tab-pane active">
@@ -452,6 +453,12 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <div id="spiffs-pct" style="font-size:.6rem;color:#666;text-align:right">0%</div>
       </div>
       <div id="spiffs-status" style="font-size:.65rem;min-height:1rem"></div>
+      <div style="display:flex;align-items:center;gap:.6rem;border-top:1px solid #222;padding-top:.5rem">
+        <b style="font-size:.65rem;color:#c8a04a">Ficheros</b>
+        <span id="spiffs-usage" style="font-size:.6rem;color:#666"></span>
+        <button onclick="spiffsList()" style="padding:.2rem .6rem;font-size:.6rem;font-family:monospace;background:#111;color:#aaa;border:1px solid #333;border-radius:3px;cursor:pointer">&#x21BB; Actualizar</button>
+      </div>
+      <div id="spiffs-list" style="font-size:.65rem;font-family:monospace;overflow:auto"></div>
     </div>
     <div id="tab-rep" class="tab-pane" style="justify-content:flex-start;gap:.8rem">
       <div style="font-size:.65rem;color:#888">Repetidor de voz semi-duplex. Graba audio al abrir el squelch y lo retransmite tras el silencio.</div>
@@ -518,6 +525,26 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         </thead>
         <tbody id="tune-tbody"></tbody>
       </table>
+    </div>
+    <div id="tab-survey" class="tab-pane" style="justify-content:flex-start;gap:.7rem">
+      <div style="font-size:.65rem;color:#888">Medición del audio de RX para calibrar el indicador de nivel y la detección de canal ocupado. Solo consume recursos mientras está iniciado. Deja esta pestaña abierta durante la captura: las filas (una cada ~107&nbsp;ms) se guardan en el navegador y se descargan como CSV. Anota la condición (volumen de la radio, squelch, qué transmite la otra radio) antes de descargar.</div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <button id="sv-start-btn" onclick="surveyStart()" style="padding:.3rem .9rem;font-size:.65rem;font-family:monospace;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a;border-radius:3px;cursor:pointer">&#x25B6; Iniciar</button>
+        <button id="sv-stop-btn" onclick="surveyStop()" disabled style="padding:.3rem .9rem;font-size:.65rem;font-family:monospace;background:#2a1a1a;color:#e88080;border:1px solid #5a2a2a;border-radius:3px;cursor:pointer">&#x25A0; Detener</button>
+        <span id="sv-status" style="font-size:.65rem;color:#888;flex:1"></span>
+      </div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;font-size:.65rem;color:#888">
+        <span>Marca manual:</span>
+        <button id="sv-mk-0" onclick="surveyMark(0)" style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer">Sin marca</button>
+        <button id="sv-mk-1" onclick="surveyMark(1)" style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer">Canal libre</button>
+        <button id="sv-mk-2" onclick="surveyMark(2)" style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer">Canal ocupado</button>
+      </div>
+      <pre id="sv-live" style="margin:0;padding:.4rem .6rem;border:1px solid #2a2a2a;border-radius:4px;background:#0d0d0d;font-size:.65rem;color:#9ad;white-space:pre-wrap">Sin datos</pre>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <input id="sv-cond" aria-label="Condición de la captura" placeholder="Condición (p. ej. vol 5, squelch off, otra radio TX)" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:12rem">
+        <button onclick="surveyDownloadCsv()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a1a2a;color:#9ab8ff;border:1px solid #2a2a5a;border-radius:3px;cursor:pointer">&#x2B07; CSV</button>
+        <button onclick="surveyDownloadHist()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a1a2a;color:#9ab8ff;border:1px solid #2a2a5a;border-radius:3px;cursor:pointer">&#x2B07; Histogramas JSON</button>
+      </div>
     </div>
     <div id="tab-net" class="tab-pane" style="justify-content:flex-start;gap:.6rem">
       <div style="font-size:.65rem;color:#888">Diagnóstico de red: ping y miniconsola TCP/UDP. Una sola operación a la vez; la salida se conserva en el módem aunque recargues o abras otro cliente.</div>
@@ -939,6 +966,8 @@ function handleMsg(p){
     repUpdateState(p.state||'idle');
   } else if(p.type==='audio_level'){
     rxLevelUpdate(p.peak,p.status);
+  } else if(p.type==='survey'){
+    surveyOnRow(p);
   } else if(p.type==='squelch_sf'){
     hfneUpdate(p.hfne,p.open,p.active,p.manual);
   } else if(p.type==='tune_start'){
@@ -1156,6 +1185,8 @@ function showTab(name,btn){
   if(name==='stats'){loadStats();statsTimer=setInterval(loadStats,5000);}
   if(name==='sstv') loadSstvGallery();
   if(name==='net') netStart(); else netStopPoll();
+  if(name==='survey') surveyRefresh();
+  if(name==='spiffs') spiffsList();
 }// ── Config editor ───────────────────────────────────────────────────
 let cfgLoaded=false;
 function loadCfg(){
@@ -1422,6 +1453,7 @@ function spiffsUpload(){
       try{const r=JSON.parse(xhr.responseText);sz=r.size||sz;}catch(e){}
       st.textContent='✓ '+name+' guardado ('+sz+' bytes)';st.style.color='#4a9a4a';
       bar.style.width='100%';pct.textContent='100%';
+      spiffsList();
     } else {
       let msg='Error HTTP '+xhr.status;
       try{const r=JSON.parse(xhr.responseText);if(r.error)msg=r.error;}catch(e){}
@@ -1430,6 +1462,33 @@ function spiffsUpload(){
   };
   xhr.onerror=()=>{btn.disabled=false;st.textContent='✗ Error de red';st.style.color='#c04040';};
   xhr.send(file);
+}
+// ── Explorador SPIFFS ─────────────────────────────────────────────────────────
+function spiffsMsg(t,ok){const st=document.getElementById('spiffs-status');st.textContent=t;st.style.color=ok?'#4a9a4a':'#c04040';}
+async function spiffsList(){
+  const el=document.getElementById('spiffs-list');
+  try{
+    const d=await api('/api/spiffs/list');
+    const files=(d.files||[]).slice().sort((a,b)=>a.name.localeCompare(b.name));
+    document.getElementById('spiffs-usage').textContent=
+      Math.round(d.used/1024)+' / '+Math.round(d.total/1024)+' KB usados · '+files.length+' ficheros';
+    el.innerHTML=files.length?'<table style="border-collapse:collapse;width:100%">'+files.map(f=>{
+      const q=encodeURIComponent(f.name);
+      return '<tr style="border-bottom:1px solid #1c1c1c"><td style="padding:.2rem .4rem;color:#ccc;word-break:break-all">'+esc(f.name)+'</td>'+
+        '<td style="padding:.2rem .4rem;color:#888;text-align:right;white-space:nowrap">'+(f.size<1024?f.size+' B':(f.size/1024).toFixed(1)+' KB')+'</td>'+
+        '<td style="padding:.2rem .4rem;white-space:nowrap;text-align:right">'+
+        '<a href="/api/spiffs/get?name='+q+'" download style="color:#a0c8e8;margin-right:.6rem">descargar</a>'+
+        '<a href="#" data-name="'+esc(f.name)+'" onclick="spiffsDelete(this.dataset.name);return false" style="color:#c04040">borrar</a></td></tr>';
+    }).join('')+'</table>':'<span style="color:#666">Sin ficheros</span>';
+  }catch(e){el.textContent='✗ '+e.message;}
+}
+async function spiffsDelete(name){
+  if(!confirm('¿Borrar '+name+' de SPIFFS?'+(name==='config.json'?'\n\nEs la configuración del dispositivo.':'')))return;
+  try{
+    await api('/api/spiffs/delete?name='+encodeURIComponent(name),{method:'POST'});
+    spiffsMsg('✓ '+name+' borrado',true);
+  }catch(e){spiffsMsg('✗ '+e.message,false);}
+  spiffsList();
 }
 // ── Repeater ──────────────────────────────────────────────────────────────────
 const REP_STATE_COLOR={idle:'#888',recording:'#e8c040',tail:'#e8a040',pending:'#a0c8e8',tx:'#80e880'};
@@ -1635,6 +1694,72 @@ function tuneOnStart(p){
   tuneSetRunning(true);
   tuneSetStatus('Probando '+p.from_ms+'..'+p.to_ms+' ms (paso '+p.step_ms+' ms, '+p.count+' pings, umbral '+p.thr_pct+'%)','#c8a04a');
 }
+// ── SURVEY (calibración de nivel / canal ocupado) ───────────────────
+const SV_HDR='t_ms,pk,rms,dc,clip,d12_db,d22_db,dm_db,hf_db,agc,fr,fl,fe,frame_len,mark,dropped';
+const SV_MAX=40000;
+let svLines=[],svActive=false,svMark=0,svT0=null;
+function svUi(){
+  document.getElementById('sv-start-btn').disabled=svActive;
+  document.getElementById('sv-stop-btn').disabled=!svActive;
+  [0,1,2].forEach(i=>{
+    const b=document.getElementById('sv-mk-'+i);
+    if(b)b.style.borderColor=(i===svMark)?'#7ecfff':'#444';
+  });
+  const full=svLines.length>=SV_MAX?' (límite alcanzado, descarga y reinicia)':'';
+  document.getElementById('sv-status').textContent=(svActive?'● capturando':'detenido')+' — '+svLines.length+' filas'+full;
+}
+function surveyOnRow(p){
+  if(svLines.length<SV_MAX){
+    svLines.push([p.t,p.pk,p.rms,p.dc,p.clip,p.d12,p.d22,p.dm,p.hf,p.agc,p.fr,p.fl,p.fe,p.fb,p.mk,p.dr].join(','));
+  }
+  if(svT0===null)svT0=p.t;
+  if(svLines.length%3===1){
+    const el=document.getElementById('sv-live');
+    if(el)el.textContent='pico '+p.pk+'  rms '+p.rms+'  dc '+p.dc+'  sat '+p.clip+'  agc '+p.agc+
+      '\n1200 Hz '+p.d12+' dB   2200 Hz '+p.d22+' dB   media '+p.dm+' dB   alta(HFNE) '+p.hf+' dB'+
+      '\ntramas ok '+p.fr+'  flags '+p.fl+'  crc err '+p.fe+'  marca '+p.mk+'  descartadas '+p.dr;
+  }
+  if(svLines.length%10===1)svUi();
+}
+async function surveyRefresh(){
+  try{const d=await api('/api/survey');svActive=!!d.active;svMark=d.mark|0;}catch(e){}
+  svUi();
+}
+async function surveyStart(){
+  try{
+    const d=await api('/api/survey/start',{method:'POST'});
+    svLines=[];svT0=null;svActive=!!d.active;svMark=0;
+  }catch(e){document.getElementById('sv-status').textContent='Error: '+e.message;return;}
+  svUi();
+}
+async function surveyStop(){
+  try{const d=await api('/api/survey/stop',{method:'POST'});svActive=!!d.active;}
+  catch(e){document.getElementById('sv-status').textContent='Error: '+e.message;}
+  svUi();
+}
+async function surveyMark(n){
+  try{const d=await api('/api/survey/mark',{method:'POST',body:{mark:n}});svMark=d.mark|0;}catch(e){}
+  svUi();
+}
+function svDownload(name,text,type){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type}));
+  a.download=name;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+function svStamp(){return new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);}
+function surveyDownloadCsv(){
+  const cond=(document.getElementById('sv-cond').value||'').replace(/[\r\n]+/g,' ');
+  svDownload('survey_'+svStamp()+'.csv','# condicion: '+cond+'\n# fecha: '+new Date().toISOString()+'\n'+SV_HDR+'\n'+svLines.join('\n')+'\n','text/csv');
+}
+async function surveyDownloadHist(){
+  try{
+    const d=await api('/api/survey');
+    d.condicion=document.getElementById('sv-cond').value||'';
+    svDownload('survey_hist_'+svStamp()+'.json',JSON.stringify(d),'application/json');
+  }catch(e){document.getElementById('sv-status').textContent='Error: '+e.message;}
+}
+
 function tuneOnStep(p){
   const tbody=document.getElementById('tune-tbody');
   const pct=p.pct;

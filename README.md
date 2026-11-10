@@ -52,6 +52,7 @@ Este repositorio adapta [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-e
 - **MCU**: ESP32 (clásico, Xtensa LX6 dual-core).
 - **Salida de audio (TX)**: DAC1 en GPIO 25 (`dac_continuous`, muestras 8-bit directas). Sin filtro externo necesario para la mayoría de transceptores.
 - **Entrada de audio (RX)**: GPIO 35 / ADC1_CH7 (`adc_continuous` DMA a 48 kHz, atenuación 12 dB → rango 0–3,1 V). Entrada AC-acoplada desde la salida de altavoz del transceptor.
+- **Radio**: Quansheng **UV-K5** ("UV-5K") conectado a través de la placa ESPRI. El audio de RX entra al ADC desde la **salida de altavoz** del UV-K5 (por tanto el nivel depende del volumen de la radio) y el TX sale por el DAC hacia la entrada de micro. Configuración de uso real: **squelch de la radio desactivado**, de modo que sin portadora el ADC recibe ruido de FM continuo y, al llegar una portadora, ese ruido cae y aparece la señal (es lo que aprovecha el squelch HFNE y lo que debe tener en cuenta cualquier detector de canal ocupado o de nivel). Pruebas de RX en 144.800 MHz con una segunda radio que envía mensajes.
 - **PTT**: GPIO 26, activo en nivel alto (1 = transmitir, 0 = reposo). Restricción de hardware (también es DAC2). Definido en `config.h`.
 - **GPS**: UART2 a 9600 baud. RX = GPIO 4, TX = GPIO 16 (opcional, para configurar el módulo GPS); ambos GPIOs libres, no son pines SD.
 - **Display LCD**: SSD1306 128×64 OLED por I2C. SDA = GPIO 13, SCL = GPIO 19.
@@ -228,8 +229,23 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/squelch/monitor`  | Activa/desactiva modo monitor (squelch sin repetidor). Body JSON: `{"active":true}` |
 | `POST`   | `/api/squelch/sf_config`| Ajusta umbral HFNE en runtime. Body JSON: `{"hfne_threshold":0.25}` |
 | `POST`   | `/api/spiffs/upload?name=<fichero>` | Sube un fichero a SPIFFS. Body: binario raw. Escribe en `/spiffs/<fichero>`. Responde `{"ok":true,"name":"...","size":N}`. Útil para actualizar `index.html` sin reflashear todo el firmware |
+| `GET`    | `/api/spiffs/list` | Lista los ficheros de SPIFFS: `{"total":N,"used":N,"files":[{"name":..,"size":..}]}` |
+| `POST`   | `/api/spiffs/delete?name=<fichero>` | Borra un fichero de SPIFFS (admite `sstv/foto.jpg`; sin `..`) |
+| `GET`    | `/api/spiffs/get?name=<fichero>` | Descarga un fichero de SPIFFS |
 | `POST`   | `/api/tune/start`       | Inicia el barrido de ajuste de retardo TX. Requiere `ip.enabled` y `ip.remote.addr`. Responde `{"ok":true}` o error `409` si ya hay un barrido en curso |
 | `POST`   | `/api/tune/stop`        | Aborta el barrido en curso. Responde `{"ok":true}` |
+| `GET`    | `/api/survey`           | Modo SURVEY: estado e histogramas `{"active","mark","rows","dropped","bins","classes","hist":{pk,rms,hf,tone}}` (cada métrica: 4 clases × 32 bins) |
+| `POST`   | `/api/survey/start`     | Inicia la medición del audio de RX (reserva ~3 KB de heap mientras está activo) |
+| `POST`   | `/api/survey/stop`      | Detiene la medición |
+| `POST`   | `/api/survey/mark`      | Marca manual para etiquetar filas. Body JSON: `{"mark":0|1|2}` (0 sin marca, 1 canal libre, 2 canal ocupado) |
+
+## Modo SURVEY (calibración de nivel y canal ocupado)
+
+Pestaña **SURVEY** de la web. Mide el audio de RX durante la captura y sirve para calibrar el indicador de nivel y la detección de canal ocupado con señal real. Solo consume CPU/heap mientras está iniciado; con el modo parado, `rx_survey_push_sample()` retorna de inmediato.
+
+Cada ventana de ≈107 ms (8 bloques de 128 muestras a 9600 Hz) genera una fila `{"type":"survey",...}` por WebSocket (no se guarda en el log de reconexión) con: pico, RMS, continua, muestras saturadas, potencia en 1200 Hz, 2200 Hz, banda media (700/1700/2700 Hz) y banda alta HFNE (3150–4350 Hz) en dB, `agc` del demodulador v2, y contadores de la ventana: `fr` tramas CRC ok, `fl` flags HDLC, `fe` CRC erróneos, `fb` longitud de la última trama, `mk` marca manual, `dr` filas descartadas por el anillo. La web guarda las filas y las descarga como CSV (con la condición de la captura como comentario `#`); los histogramas se descargan en JSON.
+
+Procedimiento recomendado: iniciar, dejar capturar con canal vacío (marca "Canal libre"), pasar a "Canal ocupado" mientras la otra radio envía mensajes en 144.800 MHz, repetir con 2–3 volúmenes de la radio, descargar CSV e histogramas.
 
 ## Eventos WebSocket (`/ws`)
 

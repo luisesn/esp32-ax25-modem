@@ -235,6 +235,9 @@ abort_ota:
 
 static esp_err_t ota_upload_handler(httpd_req_t *req)
 {
+    // CORS abierto: la respuesta (ok/error) debe ser legible desde otro origen.
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
     if (!ota_acquire()) {
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "application/json");

@@ -61,7 +61,8 @@ static bool log_is_ephemeral(const char *text) {
     return strstr(text, "\"type\":\"audio_level\"")  != NULL ||
            strstr(text, "\"type\":\"squelch_sf\"")    != NULL ||
            strstr(text, "\"type\":\"repeater\"")       != NULL ||
-           strstr(text, "\"type\":\"rx_stats\"")       != NULL;
+           strstr(text, "\"type\":\"rx_stats\"")       != NULL ||
+           strstr(text, "\"type\":\"survey\"")         != NULL;
 }
 
 // ─── WAV header ──────────────────────────────────────────────────────────────
@@ -692,6 +693,19 @@ void audio_stream_stop_wav_server(void)
 
 // ─── Punto de entrada ─────────────────────────────────────────────────────────
 
+// Preflight CORS abierto para toda la API (herramientas web servidas desde otro
+// origen, p. ej. el servidor de desarrollo de server/ subiendo OTA).
+static esp_err_t cors_preflight_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+    httpd_resp_set_hdr(req, "Access-Control-Max-Age", "600");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 void audio_stream_init(void) {
     // Read configurable log capacity (aprs_msg.max_stored, default 25)
     {
@@ -724,7 +738,8 @@ void audio_stream_init(void) {
     cfg.stack_size       = 8192;
     cfg.max_open_sockets   = AUDIO_STREAM_MAX_CLIENT_FDS; // 2 WS clients + captive-portal burst (3-5) + margin
     cfg.lru_purge_enable   = true; // evict oldest idle socket when limit reached
-    cfg.max_uri_handlers   = 40;
+    cfg.max_uri_handlers   = 48;
+    cfg.uri_match_fn       = httpd_uri_match_wildcard;  // para el OPTIONS "/*" (preflight CORS)
     // Por defecto son 5 s: un cliente que no drena su socket bloqueaba la tarea
     // emisora 5 s por intento. 1 s acota el peor caso de las rutas que sí
     // esperan (texto WS, respuestas HTTP); el audio ni siquiera llega a esperar
@@ -757,6 +772,9 @@ void audio_stream_init(void) {
             ESP_LOGE(TAG, "register_uri %s failed", routes[i].uri);
     }
     api_rest_register(s_httpd);  // resto de la API REST + sondeos de conectividad (api_rest.c)
+    static const httpd_uri_t cors_route = { .uri = "/*", .method = HTTP_OPTIONS, .handler = cors_preflight_handler };
+    if (httpd_register_uri_handler(s_httpd, &cors_route) != ESP_OK)
+        ESP_LOGE(TAG, "register_uri OPTIONS /* failed");
 
     // Tarea de encoding + dispatch
     xTaskCreate(audio_stream_task, "audio_stream", 4096, NULL, 3, NULL);

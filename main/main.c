@@ -1,3 +1,4 @@
+#include "esp_app_desc.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@
 #include "netdiag.h"
 #include "repeater.h"
 #include "squelch_sf.h"
+#include "rx_survey.h"
 #include "il2p.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -477,6 +479,7 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     }
 
     afsk_notify_rx_frame();  // restart post-RX TX inhibit window
+    rx_survey_note_frame(len);
     netdiag_note_rx(buf, len);
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
@@ -626,6 +629,7 @@ static void audio_sample_hook(int8_t sample) {
     }
     repeater_audio_hook(sample);
     squelch_sf_push_sample(sample);
+    rx_survey_push_sample(sample);   // no-op salvo con el modo SURVEY iniciado
 }
 
 // Envoltorio de la función TX: anota la trama para el panel de debug de
@@ -639,6 +643,8 @@ static void tx_noted_frame(const uint8_t *data, size_t len)
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Firmware v%s (%s %s)", esp_app_get_description()->version,
+             esp_app_get_description()->date, esp_app_get_description()->time);
     file_management_init();
     // Cargamos aquí la configuración por primera vez
     config_load();
@@ -729,6 +735,7 @@ void app_main(void)
     netdiag_init();
     repeater_init(boot_cfg);
     squelch_sf_init(boot_cfg);
+    rx_survey_init();
     config_free_json(boot_cfg);
     afsk_set_channel_busy_fn(channel_is_busy);
     afsk_set_dispatch_hook(project_dispatch_hook);

@@ -5,6 +5,8 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
+#include "esp_spiffs.h"
 #include "esp_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -15,6 +17,8 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <math.h>
 #include "cJSON.h"
@@ -25,6 +29,7 @@
 #include "rx_stats.h"
 #include "AFSK.h"
 #include "squelch_sf.h"
+#include "rx_survey.h"
 #include "repeater.h"
 
 #define TAG "api_rest"
@@ -84,14 +89,19 @@ static esp_err_t sys_handler(httpd_req_t *req) {
     };
     char buf[768];
     int n = snprintf(buf, sizeof(buf),
-        "{\"uptime_s\":%lld,\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,\"stacks\":{",
+        "{\"version\":\"%s\",\"uptime_s\":%lld,\"heap_free\":%u,\"heap_min\":%u,\"heap_largest\":%u,\"stacks\":{",
+        esp_app_get_description()->version,
         (long long)(esp_timer_get_time() / 1000000LL),
         (unsigned)esp_get_free_heap_size(),
         (unsigned)esp_get_minimum_free_heap_size(),
         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     bool first = true;
     for (size_t i = 0; i < sizeof(tasks) / sizeof(tasks[0]) && n < (int)sizeof(buf) - 64; i++) {
-        TaskHandle_t h = xTaskGetHandle(tasks[i]);
+        // FreeRTOS trunca los nombres a configMAX_TASK_NAME_LEN-1 (15) al crear la
+        // tarea, y xTaskGetHandle aborta (assert) si el nombre buscado es más largo.
+        char qname[configMAX_TASK_NAME_LEN];
+        strlcpy(qname, tasks[i], sizeof(qname));
+        TaskHandle_t h = xTaskGetHandle(qname);
         if (!h) continue;
         n += snprintf(buf + n, sizeof(buf) - n, "%s\"%s\":%u", first ? "" : ",",
                       tasks[i], (unsigned)uxTaskGetStackHighWaterMark(h));
@@ -400,6 +410,16 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err
 }
 
 
+// Con el OPTIONS "/*" (preflight CORS) toda URI desconocida casa por ruta y un GET
+// da 405 en vez de 404: un GET a una ruta inexistente debe seguir tratándose como 404
+// (sondeos de conectividad, favicon...). Un 405 genuino (p. ej. POST a una ruta GET) se mantiene.
+static esp_err_t not_allowed_handler(httpd_req_t *req, httpd_err_code_t err) {
+    if (req->method == HTTP_GET || req->method == HTTP_HEAD) return captive_redirect_handler(req, err);
+    httpd_resp_set_status(req, "405 Method Not Allowed");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 // ─── Reboot endpoint ──────────────────────────────────────────────────────────
 
 static void reboot_delay_task(void *arg) {
@@ -501,6 +521,115 @@ static esp_err_t spiffs_upload_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp);
     return ESP_OK;
+}
+
+// ─── Explorador SPIFFS: listar / descargar / borrar ───────────────────────────
+
+// Nombre relativo válido: no vacío, sin ".." ni barra inicial ni caracteres de control.
+// Se admite una barra interior (SPIFFS es plano: "sstv/foto.jpg" es un nombre más).
+static bool spiffs_name_ok(const char *name)
+{
+    if (!name[0] || name[0] == '/' || strstr(name, "..")) return false;
+    for (const char *c = name; *c; c++) if ((unsigned char)*c < 0x20) return false;
+    return true;
+}
+
+static bool spiffs_query_name(httpd_req_t *req, char *name, size_t len)
+{
+    char qs[160] = {0};
+    return httpd_req_get_url_query_str(req, qs, sizeof(qs)) == ESP_OK &&
+           httpd_query_key_value(qs, "name", name, len) == ESP_OK &&
+           spiffs_name_ok(name);
+}
+
+static void spiffs_reply_err(httpd_req_t *req, const char *status, const char *msg)
+{
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, msg);
+}
+
+// GET /api/spiffs/list → {"total":N,"used":N,"files":[{"name":..,"size":..},...]}
+static esp_err_t spiffs_list_handler(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(root, "files");
+    size_t total = 0, used = 0;
+    esp_spiffs_info(NULL, &total, &used);
+    cJSON_AddNumberToObject(root, "total", (double)total);
+    cJSON_AddNumberToObject(root, "used", (double)used);
+    DIR *dir = opendir("/spiffs");
+    if (dir) {
+        struct dirent *e;
+        while ((e = readdir(dir)) != NULL) {
+            char path[sizeof("/spiffs/") + sizeof(e->d_name)];
+            snprintf(path, sizeof(path), "/spiffs/%s", e->d_name);
+            struct stat st;
+            if (stat(path, &st) != 0) continue;
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddStringToObject(o, "name", e->d_name);
+            cJSON_AddNumberToObject(o, "size", (double)st.st_size);
+            cJSON_AddItemToArray(arr, o);
+        }
+        closedir(dir);
+    }
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!out) { spiffs_reply_err(req, "500 Internal Server Error", "{\"error\":\"out of memory\"}"); return ESP_OK; }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, out);
+    free(out);
+    return ESP_OK;
+}
+
+// POST /api/spiffs/delete?name=<fichero>
+static esp_err_t spiffs_delete_handler(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    char name[64] = {0};
+    if (!spiffs_query_name(req, name, sizeof(name))) {
+        spiffs_reply_err(req, "400 Bad Request", "{\"error\":\"missing or invalid ?name=\"}");
+        return ESP_OK;
+    }
+    char path[80];
+    snprintf(path, sizeof(path), "/spiffs/%s", name);
+    if (remove(path) != 0) {
+        spiffs_reply_err(req, "404 Not Found", "{\"error\":\"not found\"}");
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "spiffs_delete: %s", path);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// GET /api/spiffs/get?name=<fichero> → descarga el fichero (adjunto)
+static esp_err_t spiffs_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    char name[64] = {0};
+    if (!spiffs_query_name(req, name, sizeof(name))) {
+        spiffs_reply_err(req, "400 Bad Request", "{\"error\":\"missing or invalid ?name=\"}");
+        return ESP_OK;
+    }
+    char path[80];
+    snprintf(path, sizeof(path), "/spiffs/%s", name);
+    FILE *f = fopen(path, "r");
+    if (!f) { spiffs_reply_err(req, "404 Not Found", "{\"error\":\"not found\"}"); return ESP_OK; }
+    char cd[112];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", strrchr(name, '/') ? strrchr(name, '/') + 1 : name);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", cd);
+    static char buf[1024];  // httpd es mono-hilo (ver spiffs_upload_handler)
+    size_t n;
+    esp_err_t r = ESP_OK;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (httpd_resp_send_chunk(req, buf, (ssize_t)n) != ESP_OK) { r = ESP_FAIL; break; }
+    }
+    fclose(f);
+    if (r == ESP_OK) httpd_resp_send_chunk(req, NULL, 0);
+    return r;
 }
 
 // ─── GET /api/repeater/status ─────────────────────────────────────────────────
@@ -617,6 +746,53 @@ static esp_err_t squelch_monitor_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ─── Modo SURVEY (medición de audio/canal para calibración) ──────────────────
+
+static esp_err_t survey_send_status(httpd_req_t *req)
+{
+    char *js = rx_survey_status_json();
+    if (!js) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sin memoria"); return ESP_FAIL; }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    esp_err_t e = httpd_resp_sendstr(req, js);
+    free(js);
+    return e;
+}
+
+static esp_err_t survey_status_handler(httpd_req_t *req) { return survey_send_status(req); }
+
+static esp_err_t survey_start_handler(httpd_req_t *req)
+{
+    if (!rx_survey_start() && !rx_survey_is_active()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no se pudo iniciar (memoria o cierre en curso)");
+        return ESP_FAIL;
+    }
+    return survey_send_status(req);
+}
+
+static esp_err_t survey_stop_handler(httpd_req_t *req)
+{
+    rx_survey_stop();
+    return survey_send_status(req);
+}
+
+static esp_err_t survey_mark_handler(httpd_req_t *req)
+{
+    char body[48] = {0};
+    int got = recv_full_body(req, body, sizeof(body));
+    if (got <= 0) return ESP_FAIL;
+    cJSON *j = cJSON_ParseWithLength(body, (size_t)got);
+    if (!j) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json"); return ESP_FAIL; }
+    cJSON *m = cJSON_GetObjectItem(j, "mark");
+    if (cJSON_IsNumber(m)) rx_survey_set_mark(m->valueint);
+    cJSON_Delete(j);
+    char resp[32];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"mark\":%d}", rx_survey_get_mark());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, resp);
+    return ESP_OK;
+}
 
 void api_rest_register(httpd_handle_t server)
 {
@@ -631,11 +807,18 @@ void api_rest_register(httpd_handle_t server)
         { .uri = "/api/morse/trigger", .method = HTTP_POST, .handler = morse_trigger_handler },
         { .uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_handler },
         { .uri = "/api/spiffs/upload", .method = HTTP_POST, .handler = spiffs_upload_handler },
+        { .uri = "/api/spiffs/list",   .method = HTTP_GET,  .handler = spiffs_list_handler },
+        { .uri = "/api/spiffs/delete", .method = HTTP_POST, .handler = spiffs_delete_handler },
+        { .uri = "/api/spiffs/get",    .method = HTTP_GET,  .handler = spiffs_get_handler },
         { .uri = "/api/repeater/status", .method = HTTP_GET, .handler = repeater_status_handler },
         { .uri = "/api/repeater/enable", .method = HTTP_POST, .handler = repeater_enable_handler },
         { .uri = "/api/squelch/sf_config", .method = HTTP_POST, .handler = squelch_sf_config_handler },
         { .uri = "/api/squelch/status", .method = HTTP_GET, .handler = squelch_status_handler },
         { .uri = "/api/squelch/monitor", .method = HTTP_POST, .handler = squelch_monitor_handler },
+        { .uri = "/api/survey", .method = HTTP_GET, .handler = survey_status_handler },
+        { .uri = "/api/survey/start", .method = HTTP_POST, .handler = survey_start_handler },
+        { .uri = "/api/survey/stop", .method = HTTP_POST, .handler = survey_stop_handler },
+        { .uri = "/api/survey/mark", .method = HTTP_POST, .handler = survey_mark_handler },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
         if (httpd_register_uri_handler(server, &routes[i]) != ESP_OK)
@@ -654,4 +837,5 @@ void api_rest_register(httpd_handle_t server)
                  s_captive_portal ? "-> portal cautivo (redirect)" : "-> responden OK (sin aviso de Internet)");
     }
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
+    httpd_register_err_handler(server, HTTPD_405_METHOD_NOT_ALLOWED, not_allowed_handler);
 }

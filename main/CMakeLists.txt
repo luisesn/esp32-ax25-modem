@@ -29,6 +29,7 @@ idf_component_register(
         "netdiag.c"
         "repeater.c"
         "squelch_sf.c"
+        "rx_survey.c"
         "rs_codec.c"
         "il2p.c"
     INCLUDE_DIRS
@@ -65,6 +66,7 @@ set_source_files_properties(
     "rs_codec.c"
     "il2p.c"
     "squelch_sf.c"
+    "rx_survey.c"
     "adpcm.c"
     "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
     PROPERTIES COMPILE_OPTIONS "-O2")
