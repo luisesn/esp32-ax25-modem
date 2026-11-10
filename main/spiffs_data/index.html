@@ -1047,39 +1047,54 @@ function chanRender(){
   }
   chanDraw();
 }
+// Ejes fijos: RMS 0–100 (unidades del ADC int8) a la izquierda, ruido HF −30…+30 dB a la derecha.
+// Los valores fuera de rango se recortan al borde. Ajustar si cambia la radio/volumen.
+const CH_RMS_MAX=100,CH_HF_MIN=-30,CH_HF_MAX=30;
 function chanDraw(){
   const cv=document.getElementById('chan-canvas');if(!cv)return;
   const dpr=window.devicePixelRatio||1;
   const w=cv.clientWidth,h=cv.clientHeight;if(!w||!h)return;
   if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);}
   const c=cv.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,w,h);
-  const now=Date.now(),X=t=>w-(now-t)/CH_SPAN*w;
-  // rejilla cada 10 s
-  c.strokeStyle='#23272e';c.lineWidth=1;c.fillStyle='#6a7480';c.font='10px monospace';
-  for(let i=1;i<6;i++){const x=w-i*w/6;c.beginPath();c.moveTo(x,0);c.lineTo(x,h-14);c.stroke();c.fillText('-'+i*10+'s',x+3,h-3);}
-  if(chHist.length<2)return;
-  const ph=h-16;
+  const L=34,R=40,T=6,B=16,pw=w-L-R,ph=h-T-B;if(pw<20||ph<20)return;
+  const now=Date.now(),X=t=>L+pw-(now-t)/CH_SPAN*pw;
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const yR=v=>T+ph-clamp(v/CH_RMS_MAX,0,1)*ph;
+  const yH=v=>T+ph-clamp((v-CH_HF_MIN)/(CH_HF_MAX-CH_HF_MIN),0,1)*ph;
+  c.font='10px monospace';c.lineWidth=1;
+  // rejilla horizontal (5 divisiones) con etiquetas en ambos ejes
+  for(let i=0;i<=4;i++){
+    const y=T+ph-i*ph/4;
+    c.strokeStyle='#23272e';c.beginPath();c.moveTo(L,y);c.lineTo(L+pw,y);c.stroke();
+    c.fillStyle='#7ecfff';c.textAlign='right';c.fillText(String(i*CH_RMS_MAX/4),L-4,y+3);
+    c.fillStyle='#b9a2ff';c.textAlign='left';c.fillText((CH_HF_MIN+i*(CH_HF_MAX-CH_HF_MIN)/4)+'',L+pw+4,y+3);
+  }
+  // rejilla vertical cada 10 s
+  c.textAlign='left';c.fillStyle='#6a7480';
+  for(let i=1;i<6;i++){const x=L+pw-i*pw/6;c.strokeStyle='#23272e';c.beginPath();c.moveTo(x,T);c.lineTo(x,T+ph);c.stroke();c.fillText('-'+i*10+'s',x+3,h-3);}
+  c.fillStyle='#7ecfff';c.textAlign='right';c.fillText('RMS',L-4,T+ph+12);
+  c.fillStyle='#b9a2ff';c.textAlign='left';c.fillText('HF dB',L+pw+4,T+ph+12);
+  c.save();c.beginPath();c.rect(L,T,pw,ph);c.clip();
   // tramos de TX propio (sin medidas de RX válidas)
   c.fillStyle='rgba(126,207,255,.10)';
-  chTxSpans.forEach(sp=>{const x0=X(sp.t0),x1=X(sp.t1===null?now:sp.t1);c.fillRect(x0,0,Math.max(x1-x0,2),ph);
-    if(x1-x0>26){c.fillStyle='#5a7a94';c.fillText('TX',x0+4,10);c.fillStyle='rgba(126,207,255,.10)';}});
-  // tramos ocupado
-  c.fillStyle='rgba(255,179,71,.16)';
-  let st=null;
-  chHist.forEach((e,i)=>{
-    if(e.busy&&st===null)st=e.t;
-    if((!e.busy||i===chHist.length-1)&&st!==null){const x0=X(st),x1=X(e.t);c.fillRect(x0,0,Math.max(x1-x0,2),ph);st=null;}
-  });
-  // series normalizadas a su rango visible
-  const line=(key,col)=>{
-    let mn=Infinity,mx=-Infinity;
-    chHist.forEach(e=>{if(e[key]<mn)mn=e[key];if(e[key]>mx)mx=e[key];});
-    if(mx-mn<1){mx=mn+1;}
-    c.strokeStyle=col;c.lineWidth=2;c.beginPath();
-    chHist.forEach((e,i)=>{const x=X(e.t),y=ph-4-(e[key]-mn)/(mx-mn)*(ph-8);(i&&e.t-chHist[i-1].t<=1500)?c.lineTo(x,y):c.moveTo(x,y);});
-    c.stroke();
-  };
-  line('hf','#b9a2ff');line('rms','#7ecfff');
+  chTxSpans.forEach(sp=>{const x0=X(sp.t0),x1=X(sp.t1===null?now:sp.t1);c.fillRect(x0,T,Math.max(x1-x0,2),ph);
+    if(x1-x0>26){c.fillStyle='#5a7a94';c.textAlign='left';c.fillText('TX',x0+4,T+10);c.fillStyle='rgba(126,207,255,.10)';}});
+  if(chHist.length>=2){
+    // tramos ocupado
+    c.fillStyle='rgba(255,179,71,.16)';
+    let st=null;
+    chHist.forEach((e,i)=>{
+      if(e.busy&&st===null)st=e.t;
+      if((!e.busy||i===chHist.length-1)&&st!==null){const x0=X(st),x1=X(e.t);c.fillRect(x0,T,Math.max(x1-x0,2),ph);st=null;}
+    });
+    const line=(key,fy,col)=>{
+      c.strokeStyle=col;c.lineWidth=2;c.beginPath();
+      chHist.forEach((e,i)=>{const x=X(e.t),y=fy(e[key]);(i&&e.t-chHist[i-1].t<=1500)?c.lineTo(x,y):c.moveTo(x,y);});
+      c.stroke();
+    };
+    line('hf',yH,'#b9a2ff');line('rms',yR,'#7ecfff');
+  }
+  c.restore();
 }
 window.addEventListener('resize',()=>{if(document.getElementById('tab-chan').classList.contains('active'))chanDraw();});
 // ── Versión del firmware ───────────────────────────────────────────────────
