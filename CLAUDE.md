@@ -48,6 +48,7 @@ esp32-aprs-modem/
 │   ├── rx_stats.{h,c}          # Contadores por demodulador (v1/v2): CRC ok/err, flags, overflows
 │   ├── il2p.{h,c} / rs_codec.{h,c} # IL2P (FEC Reed-Solomon + scrambler); RS(255,239) y cabecera sobre GF(2⁸)
 │   ├── squelch_sf.{h,c}        # Squelch HFNE (Goertzel 3150–4350 Hz); canal ocupado para LBT/monitor
+│   ├── rx_survey.{h,c}         # Modo SURVEY: mide audio RX (pico/RMS/Goertzel 1200-2200/HFNE) y emite filas por WS; sólo activo al iniciarlo (pestaña SURVEY)
 │   ├── repeater.{h,c}          # Repetidor de voz analógico (DESHABILITADO: REPEATER_ENABLED 0)
 │   ├── spiffs_data/
 │   │   ├── config.json         # Config activa flasheada en SPIFFS (¡contiene credenciales!)
@@ -77,6 +78,8 @@ esp32-aprs-modem/
 | LED RX / LED aviso | GPIO 33 (paquete decodificado) / GPIO 23 (nivel de audio fuera de rango) |
 | I2C (SSD1306)      | SDA = GPIO 13, SCL = GPIO 19            |
 | GPS (UART2)        | RX = GPIO 4, TX = GPIO 16 (según `config.h`) |
+
+**Radio**: Quansheng UV-K5 ("UV-5K") vía placa ESPRI. El audio de RX viene de la **salida de altavoz** (el nivel depende del volumen de la radio); el **squelch de la radio está desactivado**, así que sin portadora el ADC ve ruido de FM continuo y al llegar una portadora ese ruido cae. Pruebas en 144.800 MHz con una segunda radio. Un indicador de nivel basado solo en pico mide ruido; usar `rx_survey` para calibrar.
 
 **Parámetros de modulación:**
 - Tasa de bits: 1200 bps (Bell 202: 1200 Hz = mark, 2200 Hz = space)
@@ -269,6 +272,9 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 - **`index.html` se flashea comprimido**: `main/CMakeLists.txt` copia `spiffs_data/` a `build/spiffs_staging/`, gzipea `index.html` → `index.html.gz` y genera la imagen SPIFFS desde ahí (se regenera al tocar cualquier fichero de `spiffs_data`). El handler de `/` ([api_rest.c](main/api_rest.c)) prefiere un `/spiffs/index.html` suelto (subido con `/api/spiffs/upload`, útil para iterar la UI sin reflashear) y si no existe sirve el `.gz` con `Content-Encoding: gzip`. Si subes un `index.html` y luego quieres volver al flasheado, bórralo de SPIFFS.
 
 ## Al editar este proyecto
+
+- **Versión del firmware (obligatorio)**: la fuente única es `version.txt` en la raíz (`MAJOR.MINOR.PATCH`; IDF la usa como `PROJECT_VER`). Se muestra en el log de arranque (`Firmware vX.Y.Z`), en `GET /api/sys` (`version`) y en la web de `server/`. **En cada cambio que hagas, sube la versión en `version.txt` antes de compilar**: cambio menor (corrección, ajuste, texto, refactor pequeño) → `+0.0.1`; cambio mayor (funcionalidad nueva, módulo, endpoint, cambio de comportamiento) → `+0.1.0` y se pone el último dígito a 0. Un cambio que rompa compatibilidad (config, partición, protocolo) → `+1.0.0`, pregunta antes. Los cambios solo de documentación o del servidor `server/` no suben la versión del firmware. Actualiza también la mención de versión en README/CLAUDE.md si cita una.
+- **Commits (obligatorio)**: haz un commit por cada cambio relevante terminado (funcionalidad, corrección, refactor con sentido propio), sin esperar a que lo pida el usuario; un commit por tema, no uno gigante. Mensajes en español con prefijo convencional (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`), con la versión si cambió (`feat: ... (v1.1.0)`). Incluye `version.txt` en el mismo commit. **Nunca** incluyas `main/spiffs_data/config.json` (credenciales WiFi), `sdkconfig`, `sdkconfig.old`, `build/` ni `*.pem`; añade los ficheros por nombre (no `git add -A`). Los cambios en `main/LibAPRS-esp32-i2s/` se commitean dentro de ese repo anidado. No hagas `push` salvo que se pida.
 
 - **No reintroducir** `adc_oneshot`, PDM, ni el esquema "grabar→procesar": los problemas que causaban están documentados en `doc/obsolete/report.md` secciones 1.1–1.6.
 - **No cambiar GPIO_PTT_OUT a otro pin** — GPIO 26 es restricción de hardware del diseño físico. Definido en `config.h`.
