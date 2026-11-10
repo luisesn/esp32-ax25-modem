@@ -1,4 +1,5 @@
 #include "carrier_detect.h"
+#include "rx_stats.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -9,9 +10,9 @@
 #define CD_FS             9600.0f
 #define CD_NB             2        // 3525 y 3975 Hz (banda de ruido del discriminador)
 
-#define CD_ENTER_HF_DB    8.0f     // caída de HF respecto al suelo para entrar
+#define CD_ENTER_HF_DB    6.0f     // caída de HF respecto al suelo para entrar
 #define CD_ENTER_RMS_FRAC 0.65f    // RMS máximo (fracción del suelo) para entrar
-#define CD_STAY_HF_DB     5.0f     // umbrales más laxos para mantener (histéresis)
+#define CD_STAY_HF_DB     4.0f     // umbrales más laxos para mantener (histéresis)
 #define CD_STAY_RMS_FRAC  0.80f
 #define CD_ENTER_WINDOWS  2        // ventanas consecutivas para declarar ocupado
 #define CD_EXIT_WINDOWS   3        // ventanas consecutivas sin cumplir para liberar
@@ -39,6 +40,8 @@ static float    s_hist_db[CD_HIST];
 static volatile int s_hist_pos;
 static volatile bool s_busy;
 static volatile bool s_hold_req;
+static volatile uint32_t s_err_at_rise;   // frames_crc_err al declararse ocupado
+static volatile int64_t  s_last_busy_us;   // último instante con canal ocupado
 static int s_settle;
 static volatile uint32_t s_busy_events;
 
@@ -88,16 +91,26 @@ static void window_done(float hf, float rms)
 
     if (!s_busy) {
         s_hits = enter_ok ? s_hits + 1 : 0;
-        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; }
+        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; s_err_at_rise = rx_stats_v2.frames_crc_err; }
         else if (!enter_ok && !stay_ok) {
             // canal libre: el suelo sigue al ruido (EMA lenta)
             s_floor_hf  += (hf  - s_floor_hf)  / (float)(1 << CD_FLOOR_SHIFT);
             s_floor_rms += (rms - s_floor_rms) / (float)(1 << CD_FLOOR_SHIFT);
         }
     } else {
+        s_last_busy_us = now;
         s_miss = stay_ok ? 0 : s_miss + 1;
         if (s_miss >= CD_EXIT_WINDOWS) { s_busy = false; s_hits = 0; }
     }
+}
+
+int carrier_detect_errors_since_rise(void)
+{
+    // Solo cuenta mientras hay portadora (o acaba de terminar): en reposo el ruido
+    // genera cientos de "tramas" con CRC erróneo que no dicen nada de la señal.
+    if (!s_busy && (esp_timer_get_time() - s_last_busy_us) > 1500000) return 0;
+    int d = (int)(rx_stats_v2.frames_crc_err - s_err_at_rise);
+    return d < 0 ? 0 : d;
 }
 
 void carrier_detect_hold(void) { s_hold_req = true; }

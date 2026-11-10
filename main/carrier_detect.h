@@ -24,6 +24,9 @@ bool carrier_detect_busy(void);
 // Pide descartar lo acumulado y las siguientes ventanas (llamar al entrar/salir de TX).
 void carrier_detect_hold(void);
 
+// CRC erróneos desde que el canal pasó a ocupado (0 si lleva libre >1,5 s).
+int carrier_detect_errors_since_rise(void);
+
 // Estado para diagnóstico (JSON en buffer del llamador).
 int carrier_detect_status_json(char *buf, int len);
 

@@ -531,14 +531,10 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     rx_survey_note_frame(len);
 
     // Calidad estimada: quieting del canal durante la trama + nivel AGC + CRC
-    // erróneos desde la anterior trama válida. Valores relativos a esta radio.
+    // erróneos durante la portadora. Valores relativos a esta radio.
     rx_quality_t rq = {0};
     {
-        static uint32_t s_last_err = 0;
-        uint32_t cur_err = rx_stats_v2.frames_crc_err;
-        rq.er = (int)(cur_err - s_last_err);
-        if (rq.er < 0) rq.er = 0;
-        s_last_err = cur_err;
+        rq.er = carrier_detect_errors_since_rise();   // solo errores durante la portadora
         int agc = (int)afsk_v2_agc_peak;
         rq.lv = agc < 20 ? -1 : (agc > 400 ? 1 : 0);
         int dur_ms = (int)(len * 8000 / 1200) + 400;   // datos + preámbulo aprox.

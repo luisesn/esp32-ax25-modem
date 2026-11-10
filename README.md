@@ -242,6 +242,8 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 
 ## Modo SURVEY (calibración de nivel y canal ocupado)
 
+> **Volumen de la radio**: no lo pongas al máximo. Con el volumen al máximo el ruido de reposo satura el ADC (pico 127 en el 96 % de las ventanas, AGC fijo en su tope 512) y la señal útil no mejora: los tonos suben lo mismo que el ruido, así que la relación no cambia y se pierde la información de nivel. Con un nivel donde el ruido de reposo ronda pico ≈ 50 y RMS ≈ 20 el decodificado fue igual o mejor (ver CLAUDE.md, calibración).
+
 Pestaña **SURVEY** de la web. Mide el audio de RX durante la captura y sirve para calibrar el indicador de nivel y la detección de canal ocupado con señal real. Solo consume CPU/heap mientras está iniciado; con el modo parado, `rx_survey_push_sample()` retorna de inmediato.
 
 Cada ventana de ≈107 ms (8 bloques de 128 muestras a 9600 Hz) genera una fila `{"type":"survey",...}` por WebSocket (no se guarda en el log de reconexión) con: pico, RMS, continua, muestras saturadas, potencia en 1200 Hz, 2200 Hz, banda media (700/1700/2700 Hz) y banda alta HFNE (3150–4350 Hz) en dB, `agc` del demodulador v2, y contadores de la ventana: `fr` tramas CRC ok, `fl` flags HDLC, `fe` CRC erróneos, `fb` longitud de la última trama, `mk` marca manual, `dr` filas descartadas por el anillo. La web guarda las filas y las descarga como CSV (con la condición de la captura como comentario `#`); los histogramas se descargan en JSON.
@@ -255,7 +257,7 @@ El WebSocket mezcla tramas binarias (audio IMA ADPCM) con mensajes de texto JSON
 | `type` | Dirección | Descripción |
 |--------|-----------|-------------|
 | *(binario)* | servidor→cliente | Bloque de audio IMA ADPCM (512 B = 1 017 muestras a 9 600 Hz) |
-| `aprs` | servidor→cliente | Paquete AX.25 decodificado: `{"type":"aprs","src":"...","dst":"...","path":"...","info":"...","q":1-4,"qdb":X.X,"lv":-1/0/1,"er":N}` (calidad estimada: `q`/`qdb` = caída de ruido HF durante la trama, `lv` = nivel de audio bajo/ok/alto, `er` = CRC erróneos desde la trama anterior; estimación relativa, no S-meter) |
+| `aprs` | servidor→cliente | Paquete AX.25 decodificado: `{"type":"aprs","src":"...","dst":"...","path":"...","info":"...","q":1-4,"qdb":X.X,"lv":-1/0/1,"er":N}` (calidad estimada: `q`/`qdb` = caída de ruido HF durante la trama, `lv` = nivel de audio bajo/ok/alto, `er` = CRC erróneos desde que el canal pasó a ocupado; estimación relativa, no S-meter) |
 | `channel` | servidor→cliente | Estado del detector de canal: `{"type":"channel","busy","events","warm","floor_hf_db","floor_rms","hf_db","rms"}` (alimenta la vista CANAL) |
 | `ack_sent` | servidor→cliente | ACK automático transmitido: `{"type":"ack_sent","to":"..."}` |
 | `digipeated` | servidor→cliente | Trama retransmitida por el digipeater: `{"type":"digipeated","src":"...","dst":"...","path":"...","info":"..."}` |
