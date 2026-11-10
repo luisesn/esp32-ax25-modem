@@ -123,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
             f = HERE.parent / "main" / "spiffs_data" / "index.html"
             if not f.is_file():
                 return self._send(404, {"error": "no existe main/spiffs_data/index.html"})
-            return self._send(200, f.read_bytes(), "text/html; charset=utf-8")
+            return self._send(200, f.read_bytes(), "text/plain; charset=utf-8")   # text/plain: evita reescrituras de proxies sobre HTML
         if path == "/api/fw":
             files, settings = load_flash_files()
             app = app_file()
