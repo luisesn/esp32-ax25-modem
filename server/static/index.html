@@ -319,6 +319,9 @@ window.flashSerial = async (what) => {
 };
 
 // ── OTA ───────────────────────────────────────────────────────────────────
+// Prefijo de la API del ESP32 compuesto en tiempo de ejecución: un proxy inverso (p. ej. /esp/)
+// que reescriba literales '/api/...' no debe tocar las URLs que van directas al dispositivo.
+const DEV = '/' + 'ap' + 'i';
 async function otaBrowser(host) {
   const base = 'http://' + host;
   if (location.protocol === 'https:') log('ota', 'Aviso: página en HTTPS: el navegador bloqueará la subida a http:// (contenido mixto). Usa HTTP o el modo servidor.', 'e');
@@ -330,11 +333,11 @@ async function otaBrowser(host) {
     const r = await fetch('/fw/' + app.path);
     if (!r.ok) throw new Error('descarga: HTTP ' + r.status);
     const bin = await r.blob();
-    log('ota', `Binario: ${(bin.size / 1024).toFixed(0)} KB. Subiendo a ${base}/api/ota/upload`, 'p');
+    log('ota', `Binario: ${(bin.size / 1024).toFixed(0)} KB. Subiendo a ${base}${DEV}/ota/upload`, 'p');
     $('oprog').value = 0; let lastPc = -1;
     await new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
-      x.open('POST', base + '/api/ota/upload');
+      x.open('POST', base + DEV + '/ota/upload');
       x.timeout = 180000;
       x.setRequestHeader('Content-Type', 'text/plain'); // petición simple: sin preflight CORS
       x.upload.onprogress = e => {
@@ -354,7 +357,7 @@ async function otaBrowser(host) {
     for (let i = 0; i < 40; i++) {
       await sleep(1500);
       try {
-        await fetch(base + '/api/sys', { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(1200) });
+        await fetch(base + DEV + '/sys', { mode: 'no-cors', cache: 'no-store', signal: AbortSignal.timeout(1200) });
         if (down) { log('ota', '✓ Dispositivo de vuelta tras reiniciar: OTA completada', 'o'); return; }
       } catch (_) { if (!down) { down = true; log('ota', 'Dispositivo reiniciando…', 'p'); } }
     }
@@ -376,8 +379,8 @@ window.uploadIndex = async () => {
     const r = await fetch('/ui/index.html');
     if (!r.ok) throw new Error('descarga: HTTP ' + r.status);
     const html = await r.blob();
-    log('ota', `index.html: ${(html.size / 1024).toFixed(0)} KB. Subiendo a ${base}/api/spiffs/upload?name=index.html`, 'p');
-    const resp = await fetch(base + '/api/spiffs/upload?name=index.html', {
+    log('ota', `index.html: ${(html.size / 1024).toFixed(0)} KB. Subiendo a ${base}${DEV}/spiffs/upload?name=index.html`, 'p');
+    const resp = await fetch(base + DEV + '/spiffs/upload?name=index.html', {
       method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: html,   // petición simple: sin preflight
       signal: AbortSignal.timeout(60000) }).catch(e => { if (e.name === 'TimeoutError') throw new Error('tiempo agotado'); return null; });
     if (resp) {
