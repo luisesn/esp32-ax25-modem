@@ -6,3 +6,6 @@ main/spiffs_data/sstv/*
 main/spiffs_data/config.json
 main/spiffs_data/config.json.normal
 main/spiffs_data/config.json
+
+# server de desarrollo
+server/*.pem

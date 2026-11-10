@@ -17,5 +17,5 @@
 			]
 		}
 	},
-	"runArgs": ["--privileged"]
+	"runArgs": ["--privileged", "-v", "/dev:/dev"]
 }
