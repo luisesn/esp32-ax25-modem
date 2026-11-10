@@ -33,6 +33,9 @@ static int64_t  s_last_win_us;
 static float    s_floor_hf, s_floor_rms;   // potencia HF y RMS en canal libre
 static int      s_warm, s_hits, s_miss;
 static float    s_last_hf_db, s_last_rms;
+#define CD_HIST 16                 // ventanas recientes (~1,7 s) para calidad por trama
+static float    s_hist_db[CD_HIST];
+static volatile int s_hist_pos;
 static volatile bool s_busy;
 static volatile uint32_t s_busy_events;
 
@@ -56,6 +59,8 @@ static void window_done(float hf, float rms)
 
     s_last_hf_db = 10.0f * log10f(hf + 1e-3f);
     s_last_rms = rms;
+    s_hist_db[s_hist_pos % CD_HIST] = s_last_hf_db;
+    s_hist_pos = (s_hist_pos + 1) % CD_HIST;
 
     if (s_warm < CD_WARMUP_WINDOWS) {          // aprender el suelo inicial
         if (s_warm == 0) { s_floor_hf = hf; s_floor_rms = rms; }
@@ -121,4 +126,22 @@ int carrier_detect_status_json(char *buf, int len)
         s_busy ? "true" : "false", (unsigned)s_busy_events,
         s_warm >= CD_WARMUP_WINDOWS ? "true" : "false",
         10.0f * log10f(s_floor_hf + 1e-3f), s_floor_rms, s_last_hf_db, s_last_rms);
+}
+
+// Calidad de una trama recién recibida: caída del ruido HF (quieting) respecto
+// al suelo del canal libre, promediada en dB sobre las ventanas que cubren la
+// trama. Más caída = portadora más fuerte. Es relativa a esta radio y volumen.
+bool carrier_detect_frame_quality(int duration_ms, float *quiet_db)
+{
+    if (s_warm < CD_WARMUP_WINDOWS || s_floor_rms < CD_MIN_FLOOR_RMS) return false;
+    int n = duration_ms / 107 + 1;
+    if (n < 2) n = 2;
+    if (n > CD_HIST) n = CD_HIST;
+    int pos = s_hist_pos;
+    float acc = 0.0f;
+    for (int i = 0; i < n; i++)
+        acc += s_hist_db[(pos - 1 - i + 2 * CD_HIST) % CD_HIST];
+    float q = 10.0f * log10f(s_floor_hf + 1e-3f) - acc / (float)n;
+    *quiet_db = q < 0.0f ? 0.0f : q;
+    return true;
 }

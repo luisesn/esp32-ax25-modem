@@ -255,7 +255,8 @@ El WebSocket mezcla tramas binarias (audio IMA ADPCM) con mensajes de texto JSON
 | `type` | Dirección | Descripción |
 |--------|-----------|-------------|
 | *(binario)* | servidor→cliente | Bloque de audio IMA ADPCM (512 B = 1 017 muestras a 9 600 Hz) |
-| `aprs` | servidor→cliente | Paquete AX.25 decodificado: `{"type":"aprs","src":"...","dst":"...","path":"...","info":"..."}` |
+| `aprs` | servidor→cliente | Paquete AX.25 decodificado: `{"type":"aprs","src":"...","dst":"...","path":"...","info":"...","q":1-4,"qdb":X.X,"lv":-1/0/1,"er":N}` (calidad estimada: `q`/`qdb` = caída de ruido HF durante la trama, `lv` = nivel de audio bajo/ok/alto, `er` = CRC erróneos desde la trama anterior; estimación relativa, no S-meter) |
+| `channel` | servidor→cliente | Estado del detector de canal: `{"type":"channel","busy","events","warm","floor_hf_db","floor_rms","hf_db","rms"}` (alimenta la vista CANAL) |
 | `ack_sent` | servidor→cliente | ACK automático transmitido: `{"type":"ack_sent","to":"..."}` |
 | `digipeated` | servidor→cliente | Trama retransmitida por el digipeater: `{"type":"digipeated","src":"...","dst":"...","path":"...","info":"..."}` |
 | `audio_level` | servidor→cliente | Nivel de audio y AGC: `{"type":"audio_level","peak":N,"agc":N}` |

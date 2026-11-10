@@ -23,3 +23,8 @@ bool carrier_detect_busy(void);
 
 // Estado para diagnóstico (JSON en buffer del llamador).
 int carrier_detect_status_json(char *buf, int len);
+
+// Calidad de recepción de la trama que acaba de llegar: caída de ruido HF (dB)
+// respecto al canal libre, sobre las ventanas que cubren `duration_ms`.
+// false si el detector aún no tiene suelo válido (calentamiento o sin ruido).
+bool carrier_detect_frame_quality(int duration_ms, float *quiet_db);

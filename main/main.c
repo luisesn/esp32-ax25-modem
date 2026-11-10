@@ -32,6 +32,7 @@
 #include "squelch_sf.h"
 #include "rx_survey.h"
 #include "carrier_detect.h"
+#include "rx_stats.h"
 #include "il2p.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -98,8 +99,17 @@ static const uint8_t *ax25_decode_addr(const uint8_t *p,
     return p + 7;
 }
 
+// Calidad estimada de una trama recibida (ver on_ax25_raw_frame).
+typedef struct {
+    bool  have_q;      // quieting disponible
+    float qdb;         // caída de ruido HF en dB
+    int   q;           // 0..4 (barras)
+    int   lv;          // -1 audio bajo, 0 ok, 1 alto/saturado
+    int   er;          // tramas con CRC erróneo desde la anterior válida
+} rx_quality_t;
+
 static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
-                                char *out, size_t out_size) {
+                                char *out, size_t out_size, const rx_quality_t *rq) {
     if (len < 16) return false;
     const uint8_t *p = buf, *end = buf + len;
     bool is_last;
@@ -139,9 +149,22 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
     escaped[ei] = '\0';
 
     int n = snprintf(out, out_size,
-        "{\"src\":\"%s\",\"dst\":\"%s\",\"path\":\"%s\",\"info\":\"%s\"}",
+        "{\"src\":\"%s\",\"dst\":\"%s\",\"path\":\"%s\",\"info\":\"%s\"",
         src, dst, path, escaped);
-    return (n > 0 && (size_t)n < out_size);
+    if (n <= 0 || (size_t)n >= out_size) return false;
+    if (rq) {
+        int m;
+        if (rq->have_q)
+            m = snprintf(out + n, out_size - n, ",\"q\":%d,\"qdb\":%.1f,\"lv\":%d,\"er\":%d}",
+                         rq->q, (double)rq->qdb, rq->lv, rq->er);
+        else
+            m = snprintf(out + n, out_size - n, ",\"lv\":%d,\"er\":%d}", rq->lv, rq->er);
+        if (m <= 0 || (size_t)m >= out_size - n) return false;
+        return true;
+    }
+    if ((size_t)n + 2 > out_size) return false;
+    out[n] = '}'; out[n + 1] = '\0';
+    return true;
 }
 
 #endif // TNC_MODE == TNC_MODE_KISS
@@ -242,8 +265,13 @@ static void audio_level_task(void *arg)
             if (busy != busy_prev || ++ws_div >= 5) {
                 ws_div = 0;
                 busy_prev = busy;
-                audio_stream_ws_send_text(busy ? "{\"type\":\"channel\",\"busy\":true}"
-                                               : "{\"type\":\"channel\",\"busy\":false}");
+                // {"type":"channel", busy, events, warm, floor_hf_db, floor_rms, hf_db, rms}
+                static char ch_json[200];
+                int n = snprintf(ch_json, sizeof(ch_json), "{\"type\":\"channel\",");
+                carrier_detect_status_json(ch_json + n, sizeof(ch_json) - n - 1);
+                // quitar la '{' que abre el JSON de estado
+                memmove(ch_json + n, ch_json + n + 1, strlen(ch_json + n + 1) + 1);
+                audio_stream_ws_send_text(ch_json);
             }
         }
 
@@ -480,6 +508,27 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
 
     afsk_notify_rx_frame();  // restart post-RX TX inhibit window
     rx_survey_note_frame(len);
+
+    // Calidad estimada: quieting del canal durante la trama + nivel AGC + CRC
+    // erróneos desde la anterior trama válida. Valores relativos a esta radio.
+    rx_quality_t rq = {0};
+    {
+        static uint32_t s_last_err = 0;
+        uint32_t cur_err = rx_stats_v2.frames_crc_err;
+        rq.er = (int)(cur_err - s_last_err);
+        if (rq.er < 0) rq.er = 0;
+        s_last_err = cur_err;
+        int agc = (int)afsk_v2_agc_peak;
+        rq.lv = agc < 20 ? -1 : (agc > 400 ? 1 : 0);
+        int dur_ms = (int)(len * 8000 / 1200) + 400;   // datos + preámbulo aprox.
+        rq.have_q = carrier_detect_frame_quality(dur_ms, &rq.qdb);
+        if (rq.have_q) {
+            int q = rq.qdb >= 15.0f ? 4 : rq.qdb >= 11.0f ? 3 : rq.qdb >= 7.0f ? 2 : 1;
+            if (rq.lv != 0 && q > 2) q = 2;
+            if (rq.er > 0 && q > 1) q--;
+            rq.q = q;
+        }
+    }
     netdiag_note_rx(buf, len);
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
@@ -509,7 +558,7 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
     ax25ip_rx_frame(buf, len);
 
     static char s_aprs_json[APRS_JSON_BUF];
-    if (ax25_frame_to_json(buf, len, s_aprs_json, sizeof(s_aprs_json))) {
+    if (ax25_frame_to_json(buf, len, s_aprs_json, sizeof(s_aprs_json), &rq)) {
         audio_stream_ws_send_text(s_aprs_json);
         if (digipeated) {
             static char s_digi_json[APRS_JSON_BUF + 32];
