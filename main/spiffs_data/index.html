@@ -1018,6 +1018,13 @@ function logFootStats(){
 }
 // ── Vista CANAL: tarjetas + gráfica en canvas (sin librerías) ──────────────
 const CH_SPAN=60000;const chHist=[];let chLast=null;
+const chTxSpans=[];
+function chanTx(on){
+  const now=Date.now();
+  if(on)chTxSpans.push({t0:now,t1:null});
+  else if(chTxSpans.length&&chTxSpans[chTxSpans.length-1].t1===null)chTxSpans[chTxSpans.length-1].t1=now;
+  while(chTxSpans.length&&chTxSpans[0].t1!==null&&now-chTxSpans[0].t1>CH_SPAN)chTxSpans.shift();
+}
 function chanOnMsg(p){
   const now=Date.now();
   chLast=p;
@@ -1052,6 +1059,10 @@ function chanDraw(){
   for(let i=1;i<6;i++){const x=w-i*w/6;c.beginPath();c.moveTo(x,0);c.lineTo(x,h-14);c.stroke();c.fillText('-'+i*10+'s',x+3,h-3);}
   if(chHist.length<2)return;
   const ph=h-16;
+  // tramos de TX propio (sin medidas de RX válidas)
+  c.fillStyle='rgba(126,207,255,.10)';
+  chTxSpans.forEach(sp=>{const x0=X(sp.t0),x1=X(sp.t1===null?now:sp.t1);c.fillRect(x0,0,Math.max(x1-x0,2),ph);
+    if(x1-x0>26){c.fillStyle='#5a7a94';c.fillText('TX',x0+4,10);c.fillStyle='rgba(126,207,255,.10)';}});
   // tramos ocupado
   c.fillStyle='rgba(255,179,71,.16)';
   let st=null;
@@ -1065,7 +1076,7 @@ function chanDraw(){
     chHist.forEach(e=>{if(e[key]<mn)mn=e[key];if(e[key]>mx)mx=e[key];});
     if(mx-mn<1){mx=mn+1;}
     c.strokeStyle=col;c.lineWidth=2;c.beginPath();
-    chHist.forEach((e,i)=>{const x=X(e.t),y=ph-4-(e[key]-mn)/(mx-mn)*(ph-8);i?c.lineTo(x,y):c.moveTo(x,y);});
+    chHist.forEach((e,i)=>{const x=X(e.t),y=ph-4-(e[key]-mn)/(mx-mn)*(ph-8);(i&&e.t-chHist[i-1].t<=1500)?c.lineTo(x,y):c.moveTo(x,y);});
     c.stroke();
   };
   line('hf','#b9a2ff');line('rms','#7ecfff');
@@ -1157,7 +1168,7 @@ applyVV();
 const M_DB=48,M_LO=8,M_HI=115;
 let mTgt=0,mLvl=0,mPeak=0,mPeakAt=0,mRaf=0,mPk=0;
 let mTx=false;
-function meterTx(on){mTx=on;const el=document.getElementById('meter-db');
+function meterTx(on){mTx=on;chanTx(on);const el=document.getElementById('meter-db');
   if(on){mTgt=0;el.textContent='TX';el.className='tx';if(!mRaf)mRaf=requestAnimationFrame(meterTick);}
   else{el.textContent='—';el.className='';}}
 function meterPush(pk){

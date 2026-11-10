@@ -234,6 +234,7 @@ static void audio_level_task(void *arg)
         const bool txing = afsk_is_transmitting();
         if (txing != tx_prev) {
             tx_prev = txing;
+            carrier_detect_hold();   // las medidas alrededor del TX no son válidas
             audio_stream_ws_send_text(txing ? "{\"type\":\"audio_level\",\"pk\":0,\"tx\":1}"
                                             : "{\"type\":\"audio_level\",\"pk\":0,\"tx\":0}");
         }

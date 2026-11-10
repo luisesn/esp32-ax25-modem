@@ -21,6 +21,9 @@ void carrier_detect_push_sample(int8_t sample);
 // true mientras se detecta una portadora ajena. Seguro desde cualquier tarea.
 bool carrier_detect_busy(void);
 
+// Pide descartar lo acumulado y las siguientes ventanas (llamar al entrar/salir de TX).
+void carrier_detect_hold(void);
+
 // Estado para diagnóstico (JSON en buffer del llamador).
 int carrier_detect_status_json(char *buf, int len);
 

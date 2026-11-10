@@ -18,6 +18,7 @@
 #define CD_WARMUP_WINDOWS 20       // ~2 s de suelo antes de poder disparar
 #define CD_FLOOR_SHIFT    6        // EMA del suelo: 1/64 por ventana (~7 s)
 #define CD_MIN_FLOOR_RMS  6.0f     // suelo de RMS mínimo útil: sin ruido => no detecta
+#define CD_SETTLE_WINDOWS 4        // ventanas (~430 ms) descartadas tras un TX: transitorio del ADC y cola de la radio
 #define CD_GAP_US         400000   // hueco entre ventanas (TX/ADC parado) => descartar
 
 static const float s_freq[CD_NB] = { 3525.0f, 3975.0f };
@@ -37,6 +38,8 @@ static float    s_last_hf_db, s_last_rms;
 static float    s_hist_db[CD_HIST];
 static volatile int s_hist_pos;
 static volatile bool s_busy;
+static volatile bool s_hold_req;
+static int s_settle;
 static volatile uint32_t s_busy_events;
 
 void carrier_detect_init(void)
@@ -52,6 +55,11 @@ static void window_done(float hf, float rms)
     int64_t now = esp_timer_get_time();
     bool gap = s_last_win_us && (now - s_last_win_us) > CD_GAP_US;
     s_last_win_us = now;
+    if (s_settle > 0) {        // reposo tras TX: ni historial ni suelo ni estado
+        s_settle--;
+        s_hits = 0; s_miss = 0; s_busy = false;
+        return;
+    }
     if (gap) {                 // tras un TX o una pausa: no mezclar ventanas
         s_hits = 0; s_miss = 0; s_busy = false;
         return;
@@ -92,8 +100,16 @@ static void window_done(float hf, float rms)
     }
 }
 
+void carrier_detect_hold(void) { s_hold_req = true; }
+
 void carrier_detect_push_sample(int8_t sample)
 {
+    if (s_hold_req) {          // se atiende aquí (único productor): sin carreras con los acumuladores
+        s_hold_req = false;
+        for (int i = 0; i < CD_NB; i++) { s_s1[i] = 0.0f; s_s2[i] = 0.0f; }
+        s_pos = 0; s_blk = 0; s_phf = 0.0f; s_sumsq = 0;
+        s_settle = CD_SETTLE_WINDOWS;
+    }
     float fx = (float)sample;
     s_sumsq += (uint32_t)((int32_t)sample * sample);
     for (int i = 0; i < CD_NB; i++) {
