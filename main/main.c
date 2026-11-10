@@ -181,6 +181,7 @@ static void audio_level_task(void *arg)
     int ws_div  = 0;
     bool alarm_led_state = false;
     bool alarm_active = false;
+    bool busy_prev = false;
 
     // Configure the warning LED (red, GPIO_LED_WARN) as output.
 #if GPIO_LED_WARN >= 0
@@ -235,17 +236,15 @@ static void audio_level_task(void *arg)
             }
         }
 #endif
-        // Send WS level update every 5 ticks (500 ms).
-        if (++ws_div >= 5) {
-            ws_div = 0;
-            char lvl_buf[80];
-            const char *st = out_of_range
-                ? (peak < AUDIO_LEVEL_TOO_LOW ? "low" : "high")
-                : "ok";
-            snprintf(lvl_buf, sizeof(lvl_buf),
-                     "{\"type\":\"audio_level\",\"peak\":%d,\"status\":\"%s\"}",
-                     (int)peak, st);
-            audio_stream_ws_send_text(lvl_buf);
+        // Estado del canal (detector de portadora ajena): al cambiar y cada 500 ms.
+        {
+            bool busy = carrier_detect_busy();
+            if (busy != busy_prev || ++ws_div >= 5) {
+                ws_div = 0;
+                busy_prev = busy;
+                audio_stream_ws_send_text(busy ? "{\"type\":\"channel\",\"busy\":true}"
+                                               : "{\"type\":\"channel\",\"busy\":false}");
+            }
         }
 
         (void)bar; (void)log_div;

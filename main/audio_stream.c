@@ -59,6 +59,7 @@ static int               s_log_max      = 25; // runtime effective capacity
 // Returns true for high-frequency periodic events that should NOT be persisted.
 static bool log_is_ephemeral(const char *text) {
     return strstr(text, "\"type\":\"audio_level\"")  != NULL ||
+           strstr(text, "\"type\":\"channel\"")      != NULL ||
            strstr(text, "\"type\":\"squelch_sf\"")    != NULL ||
            strstr(text, "\"type\":\"repeater\"")       != NULL ||
            strstr(text, "\"type\":\"rx_stats\"")       != NULL ||
