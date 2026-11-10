@@ -583,3 +583,8 @@ Compila limpio (binario 0xeb230 B, 43 % libre; DRAM estática ≈107 KB → 78,6
 - `audio_stream.c` (1451 líneas) dividido: la API REST y los sondeos de conectividad pasan a `api_rest.c` (`api_rest_register()`); mismas 17 rutas.
 - `index.html` (88,7 KB) se flashea como `index.html.gz` (22,7 KB, −74 %); el handler `/` prefiere un `index.html` suelto y si no sirve el `.gz`. Buffer de lectura 512 → 1024 B. Sin verificar en dispositivo.
 - Análisis del frontend (sin aplicar): pausar timers y descarte de audio con pestaña oculta, helper `api()` con `r.ok`/timeout, persistencia en localStorage, CSS táctil (≥44 px, inputs 16 px), `esc()` no escapa `'` (XSS vía `fillDest`).
+
+### Canal ocupado y calidad por trama (2026-11-10, v1.4.0–v1.4.7)
+- Web rediseñada (una columna + barra lateral), vista CANAL con ejes fijos, medidor de nivel nuevo (pico dBFS desde firmware), balizas propias en el log; sin medidas de RX durante el TX (`afsk_is_transmitting()`, `carrier_detect_hold()`).
+- Calidad por trama (`q`/`qdb`/`lv`/`er`); `er` cuenta solo CRC erróneos desde que el canal se ocupa (v1.4.6). Umbrales HF 6/4 dB según capturas SURVEY a volumen medio y máximo (el máximo satura: no usarlo).
+- v1.4.7: `carrier_detect` reaprende el suelo tras ~12 s seguidos ocupado (con volumen 25 % se quedaba ocupado fijo; causa probable: suelo aprendido alto en el arranque, no reproducido offline). Pendiente de verificar en hardware con `GET /api/carrier`.
