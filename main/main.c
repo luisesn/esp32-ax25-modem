@@ -228,6 +228,13 @@ static void audio_level_task(void *arg)
         audio_peak  = 0;
         g_display_peak = peak;  // feed display task without destructive race
 
+        // Nivel para el medidor de la web (efímero: no entra en el ring de log)
+        {
+            char lv_json[48];
+            snprintf(lv_json, sizeof(lv_json), "{\"type\":\"audio_level\",\"pk\":%d}", peak < 0 ? 0 : (int)peak);
+            audio_stream_ws_send_text(lv_json);
+        }
+
         bool out_of_range = (peak < AUDIO_LEVEL_TOO_LOW) || (peak > AUDIO_LEVEL_TOO_HIGH);
         if (out_of_range) {
             alarm_active = true;
@@ -816,6 +823,6 @@ void app_main(void)
 
 #endif  // TNC_MODE
 
-    xTaskCreate(audio_level_task, "audio_lvl", 2048, NULL, 3, NULL);
+    xTaskCreate(audio_level_task, "audio_lvl", 3072, NULL, 3, NULL);
     xTaskCreate(ota_validate_task, "ota_valid", 2048, NULL, 1, NULL);
 }
