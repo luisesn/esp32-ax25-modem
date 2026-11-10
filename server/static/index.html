@@ -89,6 +89,7 @@ code{background:var(--bg);padding:0 .25rem;border-radius:3px}
   <div class="row">
     <label>IP del dispositivo <input id="otahost" size="18" placeholder="192.168.4.1"></label>
     <button id="btn-ota" class="go" onclick="otaStart()">Subir por OTA</button>
+    <button id="btn-idx" onclick="uploadIndex()" title="Sube main/spiffs_data/index.html a /spiffs/index.html del dispositivo (tiene prioridad sobre la web flasheada). No reinicia.">Subir index.html (web)</button>
   </div>
   <progress id="oprog" value="0" max="100"></progress>
   <div id="ostatus" class="mut">La subida la hace este navegador directamente al dispositivo (debe estar en tu red). Sin SHA-256 (la petición es «simple» para que funcione también con firmware antiguo sin CORS). El dispositivo reinicia al terminar. No funciona si abres el servidor con <code>--https</code> (contenido mixto).</div>
@@ -362,6 +363,34 @@ async function otaBrowser(host) {
     log('ota', '✗ ' + e.message + ' — ¿este equipo ve ' + host + '? (¿conectado al WiFi del dispositivo?)', 'e');
   } finally { $('btn-ota').disabled = false; }
 }
+
+window.uploadIndex = async () => {
+  const host = $('otahost').value.trim();
+  if (!host) { log('ota', 'Indica la IP del dispositivo', 'e'); return; }
+  try { localStorage.setItem('otahost', host); } catch (_) {}
+  if (location.protocol === 'https:') log('ota', 'Aviso: página en HTTPS: el navegador bloqueará la subida a http://.', 'e');
+  const base = 'http://' + host;
+  $('btn-idx').disabled = true;
+  try {
+    log('ota', 'Descargando index.html del repositorio…', 'p');
+    const r = await fetch('/ui/index.html');
+    if (!r.ok) throw new Error('descarga: HTTP ' + r.status);
+    const html = await r.blob();
+    log('ota', `index.html: ${(html.size / 1024).toFixed(0)} KB. Subiendo a ${base}/api/spiffs/upload?name=index.html`, 'p');
+    const resp = await fetch(base + '/api/spiffs/upload?name=index.html', {
+      method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: html,   // petición simple: sin preflight
+      signal: AbortSignal.timeout(60000) }).catch(e => { if (e.name === 'TimeoutError') throw new Error('tiempo agotado'); return null; });
+    if (resp) {
+      const t = await resp.text();
+      log('ota', `Respuesta del dispositivo: HTTP ${resp.status} ${t}`, resp.ok ? 'o' : 'e');
+      if (resp.ok) log('ota', '✓ Subido. Recarga la web del dispositivo (Ctrl+F5).', 'o');
+    } else {
+      log('ota', '? Respuesta ilegible (firmware sin CORS en este endpoint o fallo de red). Comprueba la pestaña SPIFFS del dispositivo.', 'e');
+    }
+  } catch (e) {
+    log('ota', '✗ ' + e.message + ' — ¿este equipo ve ' + host + '?', 'e');
+  } finally { $('btn-idx').disabled = false; }
+};
 
 window.otaStart = async () => {
   const host = $('otahost').value.trim();

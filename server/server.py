@@ -119,6 +119,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in STATIC:
             name, ctype = STATIC[path]
             return self._send(200, (HERE / "static" / name).read_bytes(), ctype)
+        if path == "/ui/index.html":   # web del dispositivo (para subirla por SPIFFS sin cable)
+            f = HERE.parent / "main" / "spiffs_data" / "index.html"
+            if not f.is_file():
+                return self._send(404, {"error": "no existe main/spiffs_data/index.html"})
+            return self._send(200, f.read_bytes(), "text/html; charset=utf-8")
         if path == "/api/fw":
             files, settings = load_flash_files()
             app = app_file()

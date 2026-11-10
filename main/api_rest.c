@@ -438,6 +438,7 @@ static esp_err_t reboot_handler(httpd_req_t *req) {
 
 static esp_err_t spiffs_upload_handler(httpd_req_t *req)
 {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");   // subida desde el servidor de desarrollo
     // ?name=<filename> — must be a bare name, no slashes, no '..'
     char qs[128] = {0};
     char name[64] = {0};
