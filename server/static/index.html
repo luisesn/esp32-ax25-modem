@@ -330,7 +330,7 @@ async function otaBrowser(host) {
   $('btn-ota').disabled = true;
   try {
     log('ota', 'Descargando binario del servidor…', 'p');
-    const r = await fetch('/fw/' + app.path);
+    const r = await fetch('fw/' + app.path);
     if (!r.ok) throw new Error('descarga: HTTP ' + r.status);
     const bin = await r.blob();
     log('ota', `Binario: ${(bin.size / 1024).toFixed(0)} KB. Subiendo a ${base}${DEV}/ota/upload`, 'p');
@@ -376,7 +376,7 @@ window.uploadIndex = async () => {
   $('btn-idx').disabled = true;
   try {
     log('ota', 'Descargando index.html del repositorio…', 'p');
-    const r = await fetch('/ui/index.html');
+    const r = await fetch('ui/index.html');
     if (!r.ok) throw new Error('descarga: HTTP ' + r.status);
     const html = await r.blob();
     log('ota', `index.html: ${(html.size / 1024).toFixed(0)} KB. Subiendo a ${base}${DEV}/spiffs/upload?name=index.html`, 'p');
