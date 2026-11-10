@@ -30,6 +30,7 @@
 #include "AFSK.h"
 #include "squelch_sf.h"
 #include "rx_survey.h"
+#include "carrier_detect.h"
 #include "repeater.h"
 
 #define TAG "api_rest"
@@ -748,6 +749,14 @@ static esp_err_t squelch_monitor_handler(httpd_req_t *req)
 
 // ─── Modo SURVEY (medición de audio/canal para calibración) ──────────────────
 
+static esp_err_t carrier_status_handler(httpd_req_t *req)
+{
+    char buf[200];
+    carrier_detect_status_json(buf, sizeof(buf));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, buf);
+}
+
 static esp_err_t survey_send_status(httpd_req_t *req)
 {
     char *js = rx_survey_status_json();
@@ -815,6 +824,7 @@ void api_rest_register(httpd_handle_t server)
         { .uri = "/api/squelch/sf_config", .method = HTTP_POST, .handler = squelch_sf_config_handler },
         { .uri = "/api/squelch/status", .method = HTTP_GET, .handler = squelch_status_handler },
         { .uri = "/api/squelch/monitor", .method = HTTP_POST, .handler = squelch_monitor_handler },
+        { .uri = "/api/carrier", .method = HTTP_GET, .handler = carrier_status_handler },
         { .uri = "/api/survey", .method = HTTP_GET, .handler = survey_status_handler },
         { .uri = "/api/survey/start", .method = HTTP_POST, .handler = survey_start_handler },
         { .uri = "/api/survey/stop", .method = HTTP_POST, .handler = survey_stop_handler },

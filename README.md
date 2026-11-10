@@ -234,6 +234,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `GET`    | `/api/spiffs/get?name=<fichero>` | Descarga un fichero de SPIFFS |
 | `POST`   | `/api/tune/start`       | Inicia el barrido de ajuste de retardo TX. Requiere `ip.enabled` y `ip.remote.addr`. Responde `{"ok":true}` o error `409` si ya hay un barrido en curso |
 | `POST`   | `/api/tune/stop`        | Aborta el barrido en curso. Responde `{"ok":true}` |
+| `GET`    | `/api/carrier`          | Detector de portadora ajena (LBT): `{"busy","events","warm","floor_hf_db","floor_rms","hf_db","rms"}` |
 | `GET`    | `/api/survey`           | Modo SURVEY: estado e histogramas `{"active","mark","rows","dropped","bins","classes","hist":{pk,rms,hf,tone}}` (cada métrica: 4 clases × 32 bins) |
 | `POST`   | `/api/survey/start`     | Inicia la medición del audio de RX (reserva ~3 KB de heap mientras está activo) |
 | `POST`   | `/api/survey/stop`      | Detiene la medición |

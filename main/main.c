@@ -31,6 +31,7 @@
 #include "repeater.h"
 #include "squelch_sf.h"
 #include "rx_survey.h"
+#include "carrier_detect.h"
 #include "il2p.h"
 #include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
@@ -532,7 +533,7 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
 // lbt_max_wait_ms (10 s por defecto) sin que haya nadie transmitiendo.
 // Sin fuente de squelch viva, el canal se considera libre.
 static bool channel_is_busy(void) {
-    return squelch_sf_is_active() && squelch_hfne_is_open();
+    return carrier_detect_busy() || (squelch_sf_is_active() && squelch_hfne_is_open());
 }
 
 // Espera de encolado en TX. server_task puede bloquearse sin riesgo: mientras lo
@@ -629,6 +630,7 @@ static void audio_sample_hook(int8_t sample) {
     }
     repeater_audio_hook(sample);
     squelch_sf_push_sample(sample);
+    carrier_detect_push_sample(sample);
     rx_survey_push_sample(sample);   // no-op salvo con el modo SURVEY iniciado
 }
 
@@ -736,6 +738,7 @@ void app_main(void)
     repeater_init(boot_cfg);
     squelch_sf_init(boot_cfg);
     rx_survey_init();
+    carrier_detect_init();
     config_free_json(boot_cfg);
     afsk_set_channel_busy_fn(channel_is_busy);
     afsk_set_dispatch_hook(project_dispatch_hook);

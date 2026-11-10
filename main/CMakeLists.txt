@@ -30,6 +30,7 @@ idf_component_register(
         "repeater.c"
         "squelch_sf.c"
         "rx_survey.c"
+        "carrier_detect.c"
         "rs_codec.c"
         "il2p.c"
     INCLUDE_DIRS
@@ -67,6 +68,7 @@ set_source_files_properties(
     "il2p.c"
     "squelch_sf.c"
     "rx_survey.c"
+    "carrier_detect.c"
     "adpcm.c"
     "LibAPRS-esp32-i2s/src/CRC-CCIT.c"
     PROPERTIES COMPILE_OPTIONS "-O2")
