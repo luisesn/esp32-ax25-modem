@@ -205,6 +205,7 @@ static void audio_level_task(void *arg)
     bool alarm_led_state = false;
     bool alarm_active = false;
     bool busy_prev = false;
+    bool tx_prev = false;
 
     // Configure the warning LED (red, GPIO_LED_WARN) as output.
 #if GPIO_LED_WARN >= 0
@@ -226,6 +227,18 @@ static void audio_level_task(void *arg)
 
         int8_t peak = audio_peak;
         audio_peak  = 0;
+
+        // Durante el TX el ADC está parado: el pico sería 0 y desvirtuaría el medidor,
+        // la alarma LED, la pantalla y las medidas del canal. No se actualiza nada;
+        // la web recibe un único aviso al entrar/salir de TX.
+        const bool txing = afsk_is_transmitting();
+        if (txing != tx_prev) {
+            tx_prev = txing;
+            audio_stream_ws_send_text(txing ? "{\"type\":\"audio_level\",\"pk\":0,\"tx\":1}"
+                                            : "{\"type\":\"audio_level\",\"pk\":0,\"tx\":0}");
+        }
+        if (txing) continue;
+
         g_display_peak = peak;  // feed display task without destructive race
 
         // Nivel para el medidor de la web (efímero: no entra en el ring de log)

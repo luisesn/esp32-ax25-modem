@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
+#include "audio_stream.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
 #include <sys/time.h>
@@ -246,6 +247,11 @@ static void gps_beacon_task(void *arg) {
                  (double)course, (double)speed);
         APRS_queue_beacon(info);
         ESP_LOGI(TAG, "beacon sent: %s", info);
+        {   // aviso a la web (el log solo mostraba lo enviado desde la propia UI)
+            char ev[96];
+            snprintf(ev, sizeof(ev), "{\"type\":\"beacon_tx\",\"info\":\"%s\"}", info);
+            audio_stream_ws_send_text(ev);
+        }
     }
 }
 

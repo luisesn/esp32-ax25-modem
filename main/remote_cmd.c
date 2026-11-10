@@ -1,3 +1,4 @@
+#include "audio_stream.h"
 #include "remote_cmd.h"
 #include "sstv.h"
 #include "morse.h"
@@ -112,6 +113,11 @@ static void cmd_tx_aprs_position(const char *src_call, int src_ssid) {
              dlat, mlat / 100, mlat % 100, lat >= 0.0 ? 'N' : 'S',
              dlon, mlon / 100, mlon % 100, lon >= 0.0 ? 'E' : 'W');
     APRS_queue_beacon(info);
+    {
+        char ev[80];
+        snprintf(ev, sizeof(ev), "{\"type\":\"beacon_tx\",\"info\":\"%s\"}", info);
+        audio_stream_ws_send_text(ev);
+    }
     APRS_queue_msg(src_call, src_ssid, "Position sent");
 }
 

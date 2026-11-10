@@ -42,7 +42,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #meter-wrap::after{content:"";position:absolute;inset:0;pointer-events:none;
   background:repeating-linear-gradient(90deg,transparent 0,transparent calc(100%/24 - 1px),#10141a calc(100%/24 - 1px),#10141a calc(100%/24))}
 #meter-db{font:.7rem monospace;color:#8b94a1;min-width:3.6rem;text-align:right}
-#meter-db.hi{color:#ff7a6a}#meter-db.lo{color:#ffb347}
+#meter-db.tx{color:#7ecfff}#meter-db.hi{color:#ff7a6a}#meter-db.lo{color:#ffb347}
 #busy-ind{font-size:.8rem;padding:.35rem .7rem;border:1px solid #333;border-radius:4px;color:#555;background:#141414;user-select:none;transition:color .2s,background .2s,border-color .2s}
 #busy-ind.on{color:#ffb347;border-color:#c07000;background:#3a2400}
 #log-hdr{padding:.35rem .6rem;font-size:.7rem;color:#4a9a4a;
@@ -1080,10 +1080,12 @@ function loadVersion(){
 }
 // ── Dispatcher de mensajes WebSocket / historial ──────────────────────────
 function handleMsg(p){
-  if(p.type==='audio_level'){meterPush(p.pk|0);return;}
+  if(p.type==='audio_level'){if(p.tx!==undefined)meterTx(!!p.tx);else if(!mTx)meterPush(p.pk|0);return;}
   if(p.seq)s_last_log_seq=p.seq;
   if(p.type==='ack_sent'){
     appendSentLog(p.to,p.ssid,'ack'+p.id);
+  } else if(p.type==='beacon_tx'){
+    appendSentLog('APRS',-1,p.info);
   } else if(p.type==='morse_tx'){
     appendSentLog('CW',-1,'Morse: '+p.call);
   } else if(p.type==='digipeated'&&p.src!=null){
@@ -1154,6 +1156,10 @@ applyVV();
 // ── Medidor de nivel (pico int8 enviado por el firmware, {"type":"audio_level","pk":N}) ──
 const M_DB=48,M_LO=8,M_HI=115;
 let mTgt=0,mLvl=0,mPeak=0,mPeakAt=0,mRaf=0,mPk=0;
+let mTx=false;
+function meterTx(on){mTx=on;const el=document.getElementById('meter-db');
+  if(on){mTgt=0;el.textContent='TX';el.className='tx';if(!mRaf)mRaf=requestAnimationFrame(meterTick);}
+  else{el.textContent='—';el.className='';}}
 function meterPush(pk){
   mPk=pk;const db=pk>0?20*Math.log10(pk/127):-99;
   mTgt=Math.max(0,Math.min(1,(db+M_DB)/M_DB));
@@ -1172,7 +1178,7 @@ function meterTick(t){
   pe.style.left='calc('+(mPeak*100).toFixed(1)+'% - 2px)';pe.style.opacity=mPeak>0.02?1:0;
   if(mLvl>0.001||mPeak>0.02||mTgt>0)mRaf=requestAnimationFrame(meterTick);
 }
-function meterReset(){mTgt=0;mPk=0;document.getElementById('meter-db').textContent='—';
+function meterReset(){mTgt=0;mPk=0;mTx=false;document.getElementById('meter-db').textContent='—';
   document.getElementById('meter-db').className='';if(!mRaf)mRaf=requestAnimationFrame(meterTick);}
 let ws=null,wsTimer=null,wsDelay=1000; // backoff 1→2→4→5 s
 function setStatus(t){document.getElementById('status').textContent=t;}
