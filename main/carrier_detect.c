@@ -20,6 +20,7 @@
 #define CD_FLOOR_SHIFT    6        // EMA del suelo: 1/64 por ventana (~7 s)
 #define CD_MIN_FLOOR_RMS  6.0f     // suelo de RMS mínimo útil: sin ruido => no detecta
 #define CD_SETTLE_WINDOWS 4        // ventanas (~430 ms) descartadas tras un TX: transitorio del ADC y cola de la radio
+#define CD_MAX_BUSY_WINDOWS 112    // ~12 s seguidos ocupado: casi seguro suelo mal aprendido => reaprender
 #define CD_GAP_US         400000   // hueco entre ventanas (TX/ADC parado) => descartar
 
 static const float s_freq[CD_NB] = { 3525.0f, 3975.0f };
@@ -43,6 +44,7 @@ static volatile bool s_hold_req;
 static volatile uint32_t s_err_at_rise;   // frames_crc_err al declararse ocupado
 static volatile int64_t  s_last_busy_us;   // último instante con canal ocupado
 static int s_settle;
+static int s_busy_run;
 static volatile uint32_t s_busy_events;
 
 void carrier_detect_init(void)
@@ -91,7 +93,7 @@ static void window_done(float hf, float rms)
 
     if (!s_busy) {
         s_hits = enter_ok ? s_hits + 1 : 0;
-        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; s_err_at_rise = rx_stats_v2.frames_crc_err; }
+        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; s_busy_run = 0; s_err_at_rise = rx_stats_v2.frames_crc_err; }
         else if (!enter_ok && !stay_ok) {
             // canal libre: el suelo sigue al ruido (EMA lenta)
             s_floor_hf  += (hf  - s_floor_hf)  / (float)(1 << CD_FLOOR_SHIFT);
@@ -101,6 +103,12 @@ static void window_done(float hf, float rms)
         s_last_busy_us = now;
         s_miss = stay_ok ? 0 : s_miss + 1;
         if (s_miss >= CD_EXIT_WINDOWS) { s_busy = false; s_hits = 0; }
+        else if (++s_busy_run >= CD_MAX_BUSY_WINDOWS) {
+            // El suelo no se adapta mientras está ocupado: si se aprendió demasiado alto
+            // (p. ej. ruido anómalo en el arranque) el canal se quedaba ocupado para siempre.
+            // Se vuelve a aprender el suelo (falla en abierto durante ~2 s).
+            s_busy = false; s_hits = 0; s_miss = 0; s_warm = 0;
+        }
     }
 }
 
