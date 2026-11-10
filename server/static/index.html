@@ -73,9 +73,11 @@ code{background:var(--bg);padding:0 .25rem;border-radius:3px}
     <label>Baudios flasheo <select id="fbaud"><option>460800</option><option>115200</option><option>921600</option></select></label>
     <button id="btn-fapp" class="go" onclick="flashSerial('app')" disabled>Flashear app</button>
     <button id="btn-fall" onclick="flashSerial('all')" disabled>Flashear todo (bootloader + particiones + app)</button>
+    <button id="btn-fspiffs" class="stop" onclick="flashSerial('spiffs')" disabled>Flashear solo SPIFFS</button>
+    <label class="mut"><input id="inclspiffs" type="checkbox" checked> incluir SPIFFS en «todo»</label>
   </div>
   <progress id="fprog" value="0" max="100"></progress>
-  <div id="fstatus" class="mut">Conecta primero el puerto en la pestaña Consola. "Flashear todo" no incluye SPIFFS salvo que el servidor se lance con <code>--allow-spiffs</code> (contiene credenciales WiFi).</div>
+  <div id="fstatus" class="mut">Conecta primero el puerto en la pestaña Consola. SPIFFS (<code>config.json</code> con credenciales WiFi) está disponible salvo que el servidor se lance con <code>--no-spiffs</code>. <b>Flashear SPIFFS sobrescribe la config y la web del dispositivo.</b></div>
   <div id="log-flash" class="log" role="log"></div>
   <div class="row"><button onclick="logClear('flash')">Limpiar</button><button onclick="logDownload('flash')">Descargar</button></div>
 </section></div>
@@ -151,6 +153,7 @@ window.loadFw = async () => {
     fw = await api('/api/fw');
     for (const t of ['flash', 'ota']) log(t, fw.app ? `Firmware v${fw.version || '?'}: app ${(fw.app.size / 1024).toFixed(1)} KB, sha256 ${fw.app.sha256.slice(0, 16)}…` : 'Firmware: no hay binario en build/', fw.app ? 'p' : 'e');
     const a = fw.app;
+    if (!fw.spiffs_allowed) log('flash', 'SPIFFS no disponible: el servidor se lanzó con --no-spiffs o no hay spiffs.bin en build/', 'p');
     setFwInfo(a
       ? `versión <b>${fw.version || '?'}</b> — app: <b>${(a.size / 1024).toFixed(1)} KB</b> — compilado ${new Date(a.mtime * 1000).toLocaleString()} — sha256 <code>${a.sha256.slice(0, 16)}…</code><br>` +
         fw.files.map(f => `0x${f.offset.toString(16)} ${f.path} (${(f.size / 1024).toFixed(1)} KB)`).join('<br>')
@@ -168,6 +171,10 @@ function updateButtons() {
   $('txline').disabled = !c; $('btn-send').disabled = !c;
   $('btn-fapp').disabled = !c || !fw || !fw.app;
   $('btn-fall').disabled = !c || !fw || !fw.app;
+  const hasSp = !!(fw && fw.files.some(f => f.role === 'spiffs'));
+  $('btn-fspiffs').disabled = !c || !hasSp;
+  $('inclspiffs').disabled = !hasSp;
+  if (!hasSp) $('inclspiffs').checked = false;
 }
 
 function termWrite(s) {
@@ -257,12 +264,16 @@ function toBinaryString(buf) {
 
 window.flashSerial = async (what) => {
   if (!port || !fw) return;
-  const files = what === 'app' ? fw.files.filter(f => f.role === 'app') : fw.files;
+  const files = what === 'app' ? fw.files.filter(f => f.role === 'app')
+    : what === 'spiffs' ? fw.files.filter(f => f.role === 'spiffs')
+    : fw.files.filter(f => f.role !== 'spiffs' || $('inclspiffs').checked);
+  if (!files.length) return;
+  if (files.some(f => f.role === 'spiffs') && !confirm('Se sobrescribirá SPIFFS: config.json y la web del dispositivo quedarán como en el repo (con sus credenciales WiFi). ¿Continuar?')) return;
   const total = files.reduce((n, f) => n + f.size, 0);
   const setSt = (t, cls) => { $('fstatus').className = cls || 'mut'; $('fstatus').textContent = t; log('flash', t, cls === 'ok' ? 'o' : cls === 'err' ? 'e' : 'p'); };
-  $('btn-fapp').disabled = $('btn-fall').disabled = true;
+  $('btn-fapp').disabled = $('btn-fall').disabled = $('btn-fspiffs').disabled = true;
   $('fprog').value = 0;
-  log('flash', `Inicio: ${what === 'app' ? 'solo app' : 'todo'} (${files.map(f => f.path + '@0x' + f.offset.toString(16)).join(', ')}), ${(total / 1024).toFixed(0)} KB @ ${$('fbaud').value}`);
+  log('flash', `Inicio: ${what === 'app' ? 'solo app' : what === 'spiffs' ? 'solo SPIFFS' : 'todo'} (${files.map(f => f.path + '@0x' + f.offset.toString(16)).join(', ')}), ${(total / 1024).toFixed(0)} KB @ ${$('fbaud').value}`);
   let transport = null;
   try {
     setSt('Descargando binarios…');

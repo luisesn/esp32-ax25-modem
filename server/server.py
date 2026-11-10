@@ -131,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 version = json.loads((CFG.build_dir / "project_description.json").read_text()).get("project_version")
             except (OSError, ValueError):
                 pass
-            return self._send(200, {"files": files, "flash_settings": settings, "app": info, "version": version,
+            return self._send(200, {"files": files, "flash_settings": settings, "app": info, "version": version, "spiffs_allowed": CFG.allow_spiffs,
                                     })
         if path.startswith("/fw/"):
             rel = path[len("/fw/"):]
@@ -188,12 +188,12 @@ def main():
     ap.add_argument("--cert", default=str(HERE / "cert.pem"))
     ap.add_argument("--key", default=str(HERE / "key.pem"))
     ap.add_argument("--san", action="append", default=[], help="IP/DNS extra para el certificado (repetible)")
-    ap.add_argument("--allow-spiffs", action="store_true",
-                    help="permite servir/flashear spiffs.bin (contiene config.json con credenciales WiFi)")
+    ap.add_argument("--no-spiffs", action="store_true",
+                    help="no sirve ni permite flashear spiffs.bin (contiene config.json con credenciales WiFi)")
     a = ap.parse_args()
 
     CFG.build_dir = Path(a.build_dir).resolve()
-    CFG.allow_spiffs = a.allow_spiffs
+    CFG.allow_spiffs = not a.no_spiffs
 
     port = a.port or (8443 if a.https else 8000)
     srv = ThreadingHTTPServer((a.host, port), Handler)
