@@ -602,3 +602,7 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 - `AFSK.cpp`: `tx_gate_open()` (post-RX + LBT + CSMA) con estado independiente para la cola AFSK y para el hook; `afsk_tx_clear_to_send()` para transmisores del hook. Morse y SSTV la usan; el repetidor no (decisión documentada).
 - CSMA p-persistente: `tx.persist` (63) y `tx.slottime_ms` (100), sólo con LBT activo; comandos KISS P y SlotTime. TXDELAY/TXTAIL por KISS siguen ignorados.
 - Compila (binario ≈ 0xedf20 B, 43 % libre). **Sin verificar en hardware**: probar con la segunda radio que SSTV/morse esperan con portadora presente y comprobar la latencia añadida por P=63.
+
+## 2026-11-11 — Correcciones B1–B6 (v1.6.1–v1.6.4)
+- B1 (parcial) tramas TUN siempre por AX.25; B5 auto-ACK alfanumérico (v1.6.1). B2 timeout de envío KISS y B3 reintento STA desde el AP (v1.6.2). B4 formato de posición compartido (v1.6.3). B6 digipeater (v1.6.4).
+- Trabajo repartido en 4 agentes en paralelo por fichero; compilación conjunta OK (≈43 % libre). **Sin probar en hardware**; B6 verificado con test de host.

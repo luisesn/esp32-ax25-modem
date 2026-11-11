@@ -21,12 +21,12 @@ Cada hallazgo lleva una etiqueta de confianza:
 
 | # | Problema | Efecto | Esfuerzo |
 |---|----------|--------|----------|
-| B1 | IL2P no se aplica al tráfico IP en modo TUN (y corrompe ~1 de cada 256 paquetes) | Tu configuración actual (`ip.mode=tun` + `il2p.enabled`) no obtiene FEC y pierde paquetes al azar | Bajo |
-| B2 | `send()` bloqueante al cliente KISS dentro del hook de RX | Un cliente KISS colgado detiene toda la recepción | Bajo |
-| B3 | La caída a AP es definitiva | Un corte de router de unos minutos deja el nodo en AP hasta reiniciar | Bajo |
-| B4 | Minutos "60.00" en las balizas de posición | Posición inválida de forma esporádica | Bajo |
-| B5 | Auto-ACK sólo con identificadores numéricos | Mensajes de clientes con ID alfanumérico nunca reciben ACK | Bajo |
-| B6 | Digipeater: dedup sobre la trama completa y sin filtro de tramas propias | Repeticiones duplicadas en cuanto haya otro digi en cobertura | Medio |
+| ~~B1~~ ✅ | IL2P no se aplica al tráfico IP en modo TUN (y corrompe ~1 de cada 256 paquetes) | Tu configuración actual (`ip.mode=tun` + `il2p.enabled`) no obtiene FEC y pierde paquetes al azar | Bajo |
+| ~~B2~~ ✅ | `send()` bloqueante al cliente KISS dentro del hook de RX | Un cliente KISS colgado detiene toda la recepción | Bajo |
+| ~~B3~~ ✅ | La caída a AP es definitiva | Un corte de router de unos minutos deja el nodo en AP hasta reiniciar | Bajo |
+| ~~B4~~ ✅ | Minutos "60.00" en las balizas de posición | Posición inválida de forma esporádica | Bajo |
+| ~~B5~~ ✅ | Auto-ACK sólo con identificadores numéricos | Mensajes de clientes con ID alfanumérico nunca reciben ACK | Bajo |
+| ~~B6~~ ✅ | Digipeater: dedup sobre la trama completa y sin filtro de tramas propias | Repeticiones duplicadas en cuanto haya otro digi en cobertura | Medio |
 | B7 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
 | B14 | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
 | B15 | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
@@ -38,7 +38,7 @@ Cada hallazgo lleva una etiqueta de confianza:
 
 ### 1.1 Prioridad alta
 
-**B1. IL2P y modo TUN no encajan** — `smart_tx_frame` en [main/main.c](main/main.c), `il2p.c` · **[Leído]**
+**B1. ✅ IL2P y modo TUN no encajan** — `smart_tx_frame` en [main/main.c](main/main.c), `il2p.c` · **[Leído]**
 
 `smart_tx_frame` recorre las direcciones AX.25 de la trama para localizar el PID y manda por IL2P sólo lo que lleva PID 0xCC. En modo TUN las tramas que genera `ax25ip.c` son `00 00 08 00` + IPv4 en crudo, **sin cabecera AX.25**. El byte que se interpreta como PID es entonces un byte cualquiera de la cabecera IP o del transporte. Consecuencias con la configuración actual (`ip.mode = "tun"`, `il2p.enabled = true`):
 
@@ -47,7 +47,9 @@ Cada hallazgo lleva una etiqueta de confianza:
 
 Arreglo propuesto: que `ax25ip` marque sus tramas (o que `smart_tx_frame` reconozca el prefijo TUN) y que IL2P tenga un modo "payload opaco" sin recodificar indicativos. Ver también B14.
 
-**B2. Escritura bloqueante al cliente KISS desde la ruta de RX** — `wifi_transport_write` en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**, impacto **[Hipótesis]**
+> **Hecho 2026-11-11** — parcial (v1.6.1): las tramas TUN (`00 00 08 00` + IPv4) van siempre por AX.25 (`smart_tx_or_tun` en `main.c`), lo que elimina la corrupción de ~1/256 paquetes. **Pendiente**: FEC IL2P para TUN (requiere modo payload opaco en `il2p.c` y arreglar B14).
+
+**B2. ✅ Escritura bloqueante al cliente KISS desde la ruta de RX** — `wifi_transport_write` en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**, impacto **[Hipótesis]**
 
 `kiss_send_frame()` se llama desde `on_ax25_raw_frame`, que corre en `aprs_poll_task`. El `send()` es bloqueante y el socket no tiene `SO_SNDTIMEO`. Si el cliente KISS deja de leer (portátil suspendido, WiFi inestable), la tarea que procesa **toda** la recepción se queda parada hasta que el keepalive cierra la conexión (~25 s), o indefinidamente si el otro extremo sigue respondiendo a nivel TCP pero no lee. Mientras tanto se llena el FIFO de RX y se pierden tramas, ACK y digipeticiones.
 
@@ -55,31 +57,41 @@ Arreglo: `SO_SNDTIMEO` corto (100–200 ms) y descartar la trama si expira; mejo
 
 El mismo patrón, más acotado, existe con el WebSocket: `audio_stream_ws_send_text` puede esperar hasta 200 ms de mutex más 500 ms por cliente dentro del hook.
 
-**B3. La caída a AP es terminal** — bucle de reconexión en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**
+> **Hecho 2026-11-11** — v1.6.2: `SO_SNDTIMEO` de 150 ms; si expira se descarta la trama, y tras un envío parcial o 100 descartes seguidos se cierra el cliente. El WebSocket (`audio_stream_ws_send_text`) sigue sin tratar.
+
+**B3. ✅ La caída a AP es terminal** — bucle de reconexión en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**
 
 Tras 5 rondas fallidas el nodo pasa a AP y la tarea de reconexión deja de intentar (`if (state == WIFI_STATUS_HOTSPOT) continue;`). Un corte del router de unos minutos deja el equipo en AP hasta un reinicio manual, mal comportamiento para un nodo desatendido.
 
 Arreglo: en modo AP, reintentar STA cada N minutos si no hay clientes asociados al AP (o usar APSTA).
 
-**B4. Minutos "60.00" en la posición** — [main/gps.c](main/gps.c), `aprs_beacon_handler` en [main/api_rest.c](main/api_rest.c) · **[Leído]**
+> **Hecho 2026-11-11** — v1.6.2: desde el AP, sin clientes asociados, se reintenta STA cada 5 min (el AP cae mientras dura el intento).
+
+**B4. ✅ Minutos "60.00" en la posición** — [main/gps.c](main/gps.c), `aprs_beacon_handler` en [main/api_rest.c](main/api_rest.c) · **[Leído]**
 
 `gps.c` formatea los minutos con `%05.2f` sin acotar: 59,996' se imprime como `60.00`, que no es una posición APRS válida. En `api_rest.c` el comentario dice que se limita a 59.99 pero la comprobación es `lat_m >= 60.0`, que nunca se cumple. `remote_cmd.c` ya lo hace bien, con centésimas enteras.
 
 Arreglo: una única función `aprs_format_position()` compartida por los tres sitios, usando la versión entera de `remote_cmd.c`. De paso se unifica el tipo de dato (`!` en `gps.c`, `=` en la API).
 
-**B5. El auto-ACK sólo acepta identificadores numéricos** — `try_auto_ack` en [main/main.c](main/main.c) · **[Leído]**
+> **Hecho 2026-11-11** — v1.6.3: `aprs_format_position()` única (centésimas enteras con acarreo a grados) en `gps.c`, API y `remote_cmd.c`; tipo de dato unificado a `=`. NaN en la API no se rechaza.
+
+**B5. ✅ El auto-ACK sólo acepta identificadores numéricos** — `try_auto_ack` en [main/main.c](main/main.c) · **[Leído]**
 
 El bucle que extrae el ID sólo admite `0`–`9`. La especificación APRS permite de 1 a 5 caracteres alfanuméricos, y muchos clientes (APRSdroid, Xastir, YAAC) usan IDs con letras o el formato reply-ack `{AB}CD`. A esos mensajes no se les envía ACK: el remitente reintenta hasta rendirse. Además, como no se entra en la rama de dedup, el comando remoto tampoco se ejecuta.
 
 Arreglo: aceptar alfanuméricos y cortar en `}`.
 
-**B6. Digipeater** — [main/digipeater.c](main/digipeater.c) · **[Leído]** (afecta sólo si `digi.enabled`, hoy desactivado)
+> **Hecho 2026-11-11** — v1.6.1: ID alfanumérico de 1–5 caracteres. El reply-ack `{AB}CD` confirma solo `AB`.
+
+**B6. ✅ Digipeater** — [main/digipeater.c](main/digipeater.c) · **[Leído]** (afecta sólo si `digi.enabled`, hoy desactivado)
 
 - El hash de dedup cubre la trama entera, **incluido el path**. La misma trama recibida de nuevo a través de otro digipeater lleva otro path, da otro hash y se vuelve a repetir. El dedup debe calcularse sobre origen + destino + información.
 - No se descartan las tramas cuyo origen es el propio indicativo: el nodo puede repetir sus balizas cuando vuelven por otro digi.
 - No hay tope de N (`WIDE7-7` se acepta) ni comprobación del límite de 8 repetidores al insertar el indicativo propio.
 - No se atiende el indicativo propio puesto explícitamente en el path, sólo los alias.
 - Copia de 600 B en la pila de `aprs_poll_task` (3072 B); el comentario dice `receive_audio_task` (8 KB), que ya no es cierto. Conviene medir con `/api/sys` o pasar el buffer a `static`.
+
+> **Hecho 2026-11-11** — v1.6.4: dedup sobre destino+origen+info; descarte de origen propio; `DIGI_MAX_N`=2 y máximo 8 repetidores; indicativo propio explícito en el path; buffer `static`. Probado en host (8 casos); sin probar en hardware.
 
 ### 1.2 Prioridad media
 
