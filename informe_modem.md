@@ -1,6 +1,6 @@
 # Informe del módem: cómo decodificar más tramas
 
-Fecha: 2026-11-10 · Firmware analizado: v1.4.7 · Código: `main/LibAPRS-esp32-i2s/src/AFSK.cpp` (demodulador v2, el único activo).
+Fecha: 2026-11-10 (revisado el 2026-11-11: códec Reed-Solomon) · Firmware analizado: v1.4.7 · Código: `main/LibAPRS-esp32-i2s/src/AFSK.cpp` (demodulador v2, el único activo).
 
 ## Alcance y método
 
@@ -16,7 +16,7 @@ Etiquetas: **[Calculado]** = verificado numéricamente con los coeficientes; **[
 2. El filtro de diezmado 48 k → 9,6 k deja pasar el ruido de alta frecuencia casi sin atenuar, y con el squelch de la radio abierto ese ruido es abundante.
 3. El AGC se queda sin recorrido con señal fuerte (tope en 512 cuentas de 2048) y todo el DSP posterior trabaja en 8 bits con recortes.
 4. El decisor es un umbral fijo en 0 sobre un detector asimétrico: sensible al desequilibrio entre tonos ("twist"), que es justo lo que varía de una estación a otra.
-5. No hay recuperación de tramas con un bit erróneo ni FEC efectivo (IL2P no se aplica al tráfico en modo TUN, ver el otro informe).
+5. No hay recuperación de tramas con un bit erróneo ni FEC efectivo: el códec Reed-Solomon de IL2P no decodifica ni sus propios bloques (comprobado en PC) y además IL2P no se aplica al tráfico en modo TUN (B14 y B1 del otro informe).
 
 Orden recomendado: **banco de pruebas → filtros → decisor adaptativo o múltiple → demodulador por correlación → reparación de bits**.
 
@@ -146,11 +146,13 @@ Es el cambio más grande. Hacerlo sólo si, tras 3.2 y 3.3, el banco muestra una
 ### 3.5 Recuperación de tramas con errores
 
 - **Reparación de un bit**: si el CRC falla, probar a invertir cada bit de la trama (≤ 600×8 CRC; con CRC incremental son microsegundos) y aceptar si cuadra **y** la trama pasa comprobaciones de cordura (direcciones con caracteres válidos, control 0x03, PID 0xF0, texto imprimible). Imprescindible limitarlo a tramas recibidas con portadora detectada (`carrier_detect`), porque sobre ruido produciría tramas falsas. Aplicarlo sólo a APRS, no al tráfico IP (PID 0xCC), donde una trama falsa hace más daño que una perdida. Marcar las tramas reparadas en el JSON (`fix:1`) y no digipetearlas.
-- **FX.25** (RX): compatible con AX.25 normal y cada vez más extendido; el códec RS ya está en `rs_codec.c`. Prioridad baja mientras no haya estaciones FX.25 en la zona.
-- **IL2P**: hoy no protege el tráfico en modo TUN y previsiblemente no interopera (ver B1 y B14 en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md)). Para el enlace IP entre dos equipos propios, arreglar B1 es la mejora de fiabilidad más barata de este informe.
+- **Códec Reed-Solomon (requisito de FX.25 e IL2P)** — **[Calculado]**: `rs_codec.c`, compilado en el PC, rechaza todos los bloques aunque no tengan errores (0 de 300 por longitud; cabecera 0 de 2000). Con cinco correcciones localizadas (detalle en B14 de [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md)) corrige hasta 8 errores por bloque en 300 de 300 casos. Añadir esa prueba de ida y vuelta al banco offline.
+- **IL2P**: con `il2p.enabled` el receptor IL2P no entrega hoy ninguna trama (B14), el tráfico en modo TUN no pasa por IL2P (B1) y el formato previsiblemente no interopera con Dire Wolf (B14 bis). Mientras no se arregle, activarlo no aporta nada a la recepción. Arreglados B14 y B1, es la mejora de fiabilidad más barata para el enlace IP entre dos equipos propios.
+- **FX.25** (RX): compatible con AX.25 normal y cada vez más extendido; reutiliza el códec RS una vez corregido (ojo: FX.25 usa otros parámetros de código, comprobar polinomio y primera raíz). Prioridad baja mientras no haya estaciones FX.25 en la zona.
 
 ### 3.6 Portadora de datos, nivel y diagnóstico
 
+- El squelch HFNE (`squelch_sf.c`) no participa en la decodificación (sólo monitor, repetidor y LBT); sus defectos están en B18 del otro informe.
 - Condicionar HDLC y estadísticas a un DCD (el de `carrier_detect` o, mejor, el del propio demodulador en 3.4) y eliminar el squelch del v2.
 - **Nivel de audio**: las capturas indican que a volumen máximo se satura (pico 127, AGC en el tope) y a volumen medio no. Mientras no se suba el tope del AGC, trabajar a volumen medio. Añadir a la web un aviso de saturación.
 - Diagnóstico por trama: añadir al JSON `aprs` el twist medido (diferencia mark/space en dB) y, con decisores múltiples, qué rama decodificó. Con esos dos datos se ve enseguida si las tramas que se pierden son las de twist alto.

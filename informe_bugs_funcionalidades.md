@@ -1,18 +1,20 @@
 # Informe de mejoras: bugs y funcionalidades
 
-Fecha: 2026-11-10 · Firmware analizado: v1.4.7 · Complementa a `informe_mejoras.md` (2026-10-08), no lo sustituye.
+Fecha: 2026-11-10 (ampliado el 2026-11-11 con los módulos que faltaban) · Firmware analizado: v1.4.7 · Complementa a `informe_mejoras.md` (2026-10-08), no lo sustituye.
 
 ## Alcance y método
 
-- Análisis **por lectura de código**. Nada de lo que sigue se ha probado en hardware ni se ha compilado ningún cambio.
+- Análisis **por lectura de código**, más dos comprobaciones en el PC (no en el dispositivo): el códec Reed-Solomon compilado con gcc y probado con errores aleatorios, y el bucle de subida de imágenes SSTV reproducido en Python. Nada se ha probado en hardware ni se ha cambiado código del firmware.
 - **Seguridad excluida** a petición (autenticación, exposición de credenciales, etc.).
-- Leídos a fondo: `main.c`, `kiss.c`, `transport_wifi.c`, `audio_stream.c`, `api_rest.c`, `ax25ip.c`, `il2p.c`, `gps.c`, `digipeater.c`, `remote_cmd.c`, `carrier_detect.c`, `aux_config.c` y la librería (`AFSK.*`, `LibAPRS.cpp`).
-- **No revisados**: `sstv.c`, `morse.c`, `display.c`, `ota.c`, `ota_net.c`, `rf_console.c`, `delay_tune.c`, `netdiag.c`, `squelch_sf.c`, `rx_survey.c`, `rs_codec.c`, `repeater.c` y el JavaScript de `index.html`. Puede haber fallos ahí que este informe no recoge.
+- Primera pasada: `main.c`, `kiss.c`, `transport_wifi.c`, `audio_stream.c`, `api_rest.c`, `ax25ip.c`, `il2p.c`, `gps.c`, `digipeater.c`, `remote_cmd.c`, `carrier_detect.c`, `aux_config.c` y la librería (`AFSK.*`, `LibAPRS.cpp`).
+- Segunda pasada (2026-11-11): `sstv.c`, `morse.c`, `display.c`, `ota.c`, `ota_net.c`, `rf_console.c`, `delay_tune.c`, `netdiag.c`, `squelch_sf.c`, `rx_survey.c`, `rs_codec.c`, `repeater.c`, `dedup.c`, `adpcm.c` y el JavaScript de `index.html`. Sus hallazgos son B14 (reescrito) y B15–B22. Sin defectos reseñables: `ota.c`, `ota_net.c`, `rx_survey.c`, `dedup.c`, `adpcm.c`.
+- Sin revisar: `server/` (herramienta de desarrollo en Python) y `espota.py`.
 - Las mejoras del demodulador están en [informe_modem.md](informe_modem.md).
 
 Cada hallazgo lleva una etiqueta de confianza:
 
 - **[Leído]**: el defecto se ve directamente en el código.
+- **[Calculado]**: reproducido en el PC con el código real (o un port fiel) fuera del dispositivo.
 - **[Hipótesis]**: consecuencia razonada que conviene confirmar en el dispositivo antes de invertir tiempo.
 
 ## Resumen: lo más importante
@@ -26,6 +28,9 @@ Cada hallazgo lleva una etiqueta de confianza:
 | B5 | Auto-ACK sólo con identificadores numéricos | Mensajes de clientes con ID alfanumérico nunca reciben ACK | Bajo |
 | B6 | Digipeater: dedup sobre la trama completa y sin filtro de tramas propias | Repeticiones duplicadas en cuanto haya otro digi en cobertura | Medio |
 | B7 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
+| B14 | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
+| B15 | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
+| B16 | SSTV y morse transmiten sin LBT ni espera post-RX | Pisan el canal aunque `tx.lbt_enabled` esté activo | Bajo |
 | F1 | Reintento de mensajes con seguimiento de ACK | Hoy un mensaje perdido se pierde sin aviso | Medio |
 | F2 | Acceso al canal CSMA p-persistente | Menos colisiones con LBT activo | Medio |
 
@@ -108,9 +113,84 @@ El resto (indicativo, GPS y periodo de baliza, IL2P, LBT, consola…) necesita r
 - La validez del fix oscila: RMC con `V` la pone a falso y GGA con calidad > 0 la pone a verdadero, sentencia a sentencia.
 - Siempre añade rumbo/velocidad aunque el nodo sea fijo; símbolo `/>` fijo; sin comentario ni altitud.
 
-**B14. IL2P no es interoperable** — [main/il2p.c](main/il2p.c) · **[Hipótesis]** (comparación hecha de memoria con la especificación, sin contrastar con el documento)
+**B14. El códec Reed-Solomon está roto: IL2P no puede recibir nada** — [main/rs_codec.c](main/rs_codec.c), [main/il2p.c](main/il2p.c) · **[Calculado]** (prioridad alta si se usa IL2P)
 
-La implementación difiere de IL2P estándar en varios puntos: tamaño de cabecera (14+2 frente a 13+2), codificación de indicativos, preámbulo 0x7E y exigencia de flags antes del sync, semilla del scrambler, reparto de bloques RS y uso de NRZI. Además descarta el path de digipeaters. Funciona entre dos equipos con este firmware, pero es muy improbable que Dire Wolf la decodifique. CLAUDE.md ya lo lista como "sin verificar"; esto lo convierte en "previsiblemente no". Decidir si se quiere IL2P estándar (reescritura parcial contrastando con la especificación y con Dire Wolf) o un FEC propio documentado como tal.
+`rs_codec.c` compilado en el PC tal como está en el repositorio:
+
+| Prueba | Resultado |
+|--------|-----------|
+| `rs8_encode` + `rs8_decode` sin ningún error, 300 bloques por longitud (13, 50, 100, 205, 239 B) | 0 de 300 decodificados: devuelve −1 siempre |
+| Cabecera (`rsh_encode` + `rsh_decode`) sin errores, 2000 bloques | 0 correctos, 1993 rechazados, 7 "corregidos" mal |
+
+`il2p.c` descarta la trama cuando el decodificador devuelve un valor negativo, así que con `il2p.enabled` el receptor IL2P no entrega **ninguna** trama, ni siquiera las de otro equipo con este mismo firmware. La paridad que se transmite tampoco es la de un RS estándar, por lo que Dire Wolf no puede decodificarla. Corrige la versión anterior de este punto, que suponía que funcionaba entre dos equipos iguales.
+
+Cinco defectos, aislados uno a uno:
+
+1. **Polinomio generador mal construido** (`gf8_init` y `rsh_init`): el bucle debe ser `for (j = i + 1; j > 0; j--) tmp[j] = tmp[j-1] ^ gf8_mul(tmp[j], root);` seguido de `tmp[0] = gf8_mul(tmp[0], root);`.
+2. **`rs8_encode` usa los coeficientes en orden inverso**: `rs8_gp[j]` debe ser `rs8_gp[RS8_NROOTS - j]`.
+3. **`rsh_decode`**: la magnitud del error es `gf8_mul(s[0], gf8_inv(X))`, no `s[0]`.
+4. **Cálculo de omega**: el bucle `m <= i && m <= L` debe ser `m <= i`.
+5. **Forney**: sobra el factor `xk_fcr`; queda `err = gf8_mul(omega_val, gf8_inv(sigma_prime))`.
+
+Con las cinco correcciones, en la misma prueba: 0 a 8 errores por bloque corregidos en 300 de 300 casos, 9 errores detectados y rechazados; cabecera con 0 o 1 error, 2000 de 2000. Una cabecera con 2 errores se "corrige" mal en ≈5,5 % de los casos, límite propio de tener sólo 2 bytes de paridad (conviene una comprobación de cordura de la cabecera decodificada).
+
+Falta comprobar que el polinomio y la primera raíz coinciden con los de la especificación IL2P; la prueba sólo demuestra que el códec es coherente consigo mismo.
+
+**B14 bis. IL2P no es interoperable aunque se arregle el códec** — [main/il2p.c](main/il2p.c) · **[Hipótesis]** (comparación hecha de memoria con la especificación)
+
+La implementación difiere de IL2P estándar en varios puntos: tamaño de cabecera (14+2 frente a 13+2), codificación de indicativos, preámbulo 0x7E y exigencia de flags antes del sync, semilla del scrambler, reparto de bloques RS y uso de NRZI. Además descarta el path de digipeaters. Decidir si se quiere IL2P estándar (reescritura parcial contrastando con la especificación y con Dire Wolf) o un FEC propio documentado como tal.
+
+**B15. La subida de imágenes SSTV corrompe el fichero** — `sstv_upload_handler` en [main/sstv.c](main/sstv.c) · **[Calculado]** (port del bucle a Python) (prioridad alta si se usa SSTV)
+
+En el estado `MP_IMAGE_DATA`, tras escribir la parte segura del buffer, el bucle vuelve a entrar con 0 bytes seguros, avanza el índice hasta el final y el código de arrastre guarda 0 bytes. Los últimos ~42 bytes de cada ventana de 592 (la longitud del delimitador multipart) ni se escriben ni se arrastran. Una imagen de 20 000 bytes se guarda con 18 572 (≈7 % perdido), el estado termina en "hecho" y la respuesta es `ok`. La web sube el JPEG por esta ruta, así que todas las imágenes subidas desde ella están afectadas; las flasheadas con la imagen SPIFFS o subidas con `/api/spiffs/upload` no.
+
+Comprobación en el dispositivo: comparar el `size` que devuelve la subida con el tamaño real del fichero enviado.
+
+Arreglo: al quedarse sin bytes seguros, arrastrar el resto (`buf_len - i`) al principio del buffer en lugar de descartarlo. Otros fallos de la misma función: un `\r\n\r\n` partido entre dos lecturas no se detecta en los estados de cabecera; no se comprueba el espacio libre; si el último trozo llega corto y no aparece el delimitador final, se informa de éxito igualmente.
+
+**B16. SSTV, morse y repetidor transmiten sin LBT ni espera post-RX** — bucle de despacho en [AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) · **[Leído]**
+
+La inhibición post-RX y el LBT sólo condicionan el despacho de `s_tx_queue`. El `s_dispatch_hook()` (morse, SSTV, repetidor) se ejecuta con la única condición de no estar ya transmitiendo. Una baliza CW o una imagen SSTV salen aunque el canal esté ocupado o se acabe de recibir una trama. Arreglo: aplicar al hook la misma comprobación (con el mismo tiempo máximo de espera).
+
+**B17. Rutas de error de SSTV** — [main/sstv.c](main/sstv.c) · **[Leído]**
+
+- El PTT y la cabecera VIS salen **antes** de abrir y validar el JPEG: con un fichero corrupto (ver B15) o de ancho no admitido se transmite ~1 s de VIS y nada más, y aun así se envía `sstv_done` por WebSocket.
+- Si el fichero no se puede abrir no hay ningún evento hacia la web.
+- La altura de la imagen no se comprueba; un modo desconocido se transmite como Martin M1 sin avisar.
+- La orden de parada se borra al empezar la transmisión: un `stop` enviado mientras la petición está en cola se pierde.
+- Una transmisión dura hasta ~114 s dentro de `receive_audio_task`: durante ese tiempo no hay RX, la cola AFSK no se despacha y un cliente KISS queda bloqueado por la contrapresión (15 s) y pierde tramas. Es inherente al diseño half-duplex, pero conviene documentarlo y rechazar SSTV si hay tramas en cola.
+
+Arreglo del primer punto: decodificar la cabecera del JPEG y validar dimensiones antes de pulsar el PTT, y emitir un evento `sstv_error` con el motivo.
+
+**B18. Squelch HFNE** — [main/squelch_sf.c](main/squelch_sf.c) · **[Leído]**, impacto **[Hipótesis]** (sólo con monitor o repetidor activos)
+
+- `send_ws()` llama a `audio_stream_ws_send_text` desde `receive_audio_task` cada ~100 ms. Es el mismo patrón bloqueante que B2, pero en la tarea que lee el ADC: un cliente web lento puede provocar desbordamientos del ADC. Mover el envío a otra tarea (bandera + tarea de baja prioridad).
+- El suelo de ruido nunca baja si el nivel de ruido disminuye (por ejemplo al bajar el volumen). `carrier_detect` ya lo resuelve reaprendiendo desde v1.4.7; aquí falta.
+- Estado de Goertzel en `int32` con coeficiente en coma flotante: se trunca en cada muestra. Usar `float` para el estado.
+
+**B19. Chat de la web** — JavaScript de [main/spiffs_data/index.html](main/spiffs_data/index.html) · **[Leído]**
+
+- La conversación muestra como burbuja **cualquier** trama del contacto activo que no sea un ACK: balizas, mensajes a terceros, telemetría. Debe filtrarse por mensajes (`:DEST     :`) dirigidos al indicativo propio.
+- Los mensajes enviados sólo existen en la memoria de la página: al recargar desaparecen, junto con el estado "pendiente de ACK". El firmware no los devuelve en `/api/log`.
+- La expresión del ACK sólo admite dígitos (`/^ack\d+/`), coherente con B5; no se trata `rej`.
+- Un mensaje sin ACK queda indefinidamente "pendiente": no hay tiempo límite ni indicación de fallo (ver F1).
+- `parseAPRSPos` sólo entiende posiciones sin comprimir: Mic-E y comprimidas (la mayoría de los equipos portátiles y APRSdroid) no dan posición.
+
+**B20. Indicadores que siguen mostrando el demodulador v1** — [main/display.c](main/display.c), pestaña STATS de la web · **[Leído]**
+
+Con el v1 desactivado, la fila `APRS:` del display muestra `v1/v2` con el primer valor siempre a 0, y la pestaña STATS conserva la columna v1 vacía. Además, el contador `frames_err` del pie del LOG cuenta sobre todo CRC erróneos producidos por ruido en reposo (≈90 % según las capturas SURVEY), así que no indica calidad. Mostrar sólo v2 y, para los errores, el contador limitado a portadora (`er`).
+
+**B21. Consola RF** — [main/rf_console.c](main/rf_console.c) · **[Leído]**
+
+- `config` vuelca el JSON completo por un enlace de 1200 bps (más de un minuto de canal). Limitarlo a un resumen o a una sección (`config aprs`).
+- Si `ax25ip` no está levantado al iniciar, la consola queda desactivada hasta el reinicio. `listen()` sin comprobar; lectura byte a byte.
+- Sólo cuatro comandos; ver F7.
+
+**B22. Diagnóstico de red** — [main/netdiag.c](main/netdiag.c) · **[Leído]**
+
+- `POST /api/netdiag/stop` puede bloquear hasta 2 s la única tarea del servidor HTTP: en ese tiempo no se atiende ninguna otra petición.
+- `GET /api/netdiag` usa ~3,7 KB de pila (varios buffers locales) de los 8 KB de la tarea httpd. Sin margen medido; pasar los buffers a heap o `static`.
+- La web siempre pide `count: 1` en el ping.
 
 ### 1.3 Prioridad baja y limpieza
 
@@ -126,6 +206,12 @@ La implementación difiere de IL2P estándar en varios puntos: tamaño de cabece
 - **`ax25ip.c`**: `ip_info()` usa un buffer `static` desde dos tareas (sólo afecta al texto del log).
 - **WiFi**: no se llama a `esp_wifi_set_ps(WIFI_PS_NONE)`; el modem-sleep por defecto añade latencia a KISS y al audio. SNTP fijo a `pool.ntp.org` y sin zona horaria. Canal del AP fijo a 1.
 - **Respuestas de `remote_cmd`**: salen como mensaje con `{NNN}` nuevo y sin reintento; `tx,morse` no responde; los comandos desconocidos se ignoran en silencio.
+- **Morse** ([main/morse.c](main/morse.c)): la tabla sólo tiene A–Z y 0–9 (un indicativo con `/`, como `EA1XXX/P`, pierde la barra); manipulación sin rampa (clics de manipulación, más ancho de banda); `wpm` y tono sin límites; la primera baliza sale tras un periodo completo.
+- **TUNE** ([main/delay_tune.c](main/delay_tune.c)): `ip.remote.addr` se lee sólo al arrancar (cambiarlo exige reinicio); el comentario de cabecera dice 150–2000 ms y el barrido real es 50–2000 ms.
+- **Display** ([main/display.c](main/display.c)): errores de I2C ignorados al refrescar (si la pantalla se desconecta no se detecta); ~2 KB estáticos aunque no haya pantalla.
+- **Repetidor** ([main/repeater.c](main/repeater.c), deshabilitado): mismo envío WS desde `receive_audio_task` que B18 y buffer de 2 KB en la pila; revisar antes de reactivarlo.
+- **OTA**: `espota.py` no genera eventos de progreso en la web; la web sólo confirma el éxito por el evento WS `ota_done` (sin WebSocket no hay confirmación).
+- **Web**: `downloadLog` revoca la URL del blob inmediatamente (la descarga puede fallar en algunos navegadores); `repRefresh` se llama dos veces al cargar; la pestaña activa se restaura buscando el texto del `onclick`.
 - **Código muerto**: `CONFIG_PTT_ON_DELAY_MS`/`OFF_DELAY_MS` definidos y sin usar; `s_rx[0]` de IL2P (~1,9 KB de RAM para el demodulador v1 desactivado); `APRS_sendLoc`/`APRS_sendMsg` heredados con `malloc` sin comprobar.
 
 ### 1.4 Documentación desalineada con el código
@@ -139,7 +225,9 @@ La implementación difiere de IL2P estándar en varios puntos: tamaño de cabece
 | Paso bajo "Butterworth 600 Hz" | −3 dB real ≈1350 Hz |
 | `ax25ip_rx_frame` y el digipeater corren en `receive_audio_task` (comentarios) | Corren en `aprs_poll_task` |
 
-El margen de DMA con 4 descriptores es la mitad del que describe la trampa de `TX_SAMPLE_BUFLEN`; conviene confirmar cuál de los dos valores es el deseado.
+Las tres primeras filas, la ausencia de `netdiag` y `/api/sys` en la documentación, el rango de TUNE del README (350–1950 ms; real 50–2000 ms) y el estado de IL2P se corrigieron en CLAUDE.md, README.md y PROGRESS.md el 2026-11-11. Las tres últimas son comentarios del código y siguen pendientes.
+
+El margen de DMA con 4 descriptores es la mitad del que describía la trampa de `TX_SAMPLE_BUFLEN`; conviene confirmar cuál de los dos valores es el deseado.
 
 ## 2. Funcionalidades
 
@@ -159,7 +247,15 @@ Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran
 
 **F6. Reconexión desde AP** (es B3) y `reboot_required` en la config (es B12).
 
+**F7. Consola RF útil.** Añadir `stats` (tramas RX/TX, CRC), `heard`, `beacon`, `reboot` y `config <sección>`; son las órdenes que se necesitan cuando el nodo sólo es alcanzable por radio.
+
+**F8. Chat persistente.** Guardar los mensajes enviados en el log del firmware (tipo `sent`, con `msg_id` y estado) para que sobrevivan a una recarga y se vean desde otro navegador. Encaja con F1.
+
 ### 2.2 Medio plazo
+
+- **Posiciones Mic-E y comprimidas en la web** (ver B19): sin ellas el mapa y la tabla de estaciones quedarán medio vacíos.
+- **SSTV**: validación previa al PTT con `sstv_error` (B17), más tamaños de reescalado en la web (hoy sólo 320×256 y 320×240) e identificación CW al final.
+- **Morse**: carácter `/`, rampa de 5 ms en los flancos.
 
 - **Tabla de estaciones oídas** (backlog): indicativo, última vez, número de tramas, calidad `q`/`qdb` media, posición si la hay. Los datos ya pasan por `on_ax25_raw_frame`; con ella son casi gratis el **mapa** y las estadísticas por estación.
 - **iGate APRS-IS** (backlog): RX→IS es sencillo (conexión TCP + filtro de tramas no reenviables); IS→RF pide más cuidado.
@@ -176,7 +272,7 @@ KISS por UART/USB/Bluetooth, AGWPE, RX de SSTV, CTCSS, PTT activo bajo configura
 
 ## 3. Calidad y mantenimiento
 
-- **Sin tests ni CI.** Tres módulos se pueden probar en host sin tocar hardware y cubren los bugs de este informe: formateo de posición (B4), análisis de mensajes/ACK (B5) y digipeater (B6). `kiss.c` y `dedup.c` también son puros.
+- **Sin tests ni CI.** `rs_codec.c` es el caso más claro: una prueba de ida y vuelta de diez líneas habría detectado B14. Otros tres módulos se pueden probar en host sin tocar hardware y cubren los bugs de este informe: formateo de posición (B4), análisis de mensajes/ACK (B5) y digipeater (B6). `kiss.c` y `dedup.c` también son puros.
 - **Formateadores duplicados** (posición ×3, separación indicativo/SSID ×3 en `try_auto_ack`): extraer a un módulo `aprs_util`.
 - **Pilas sin medir**: `aprs_poll_task` (3072 B) ejecuta el hook completo, incluidos digipeater, cJSON y `snprintf`. Leer `/api/sys` tras una sesión con tráfico antes de dar el valor por bueno.
 - **Librería como repo anidado sin enlazar** y `config.json` seguido por git: ya conocidos, siguen pendientes.
@@ -184,8 +280,10 @@ KISS por UART/USB/Bluetooth, AGWPE, RX de SSTV, CTCSS, PTT activo bajo configura
 ## 4. Orden de trabajo sugerido
 
 1. B1, B2, B3, B4, B5: cambios pequeños y localizados con efecto directo en el uso diario.
-2. B7, B8, B9, B10, B11 y corrección de la documentación (1.4).
-3. F1 (reintentos) y F3 (path).
-4. Captura de audio crudo y banco de pruebas del módem.
-5. B6 antes de activar el digipeater; F2 antes de activar LBT de forma permanente.
-6. Decisión sobre IL2P (B14).
+2. B15 y B17 si se usa SSTV; B16 antes de activar LBT.
+3. B14 (códec RS, con su prueba en host) junto con B1 y B11 si se quiere IL2P entre equipos propios; si no, desactivar `il2p.enabled`, que hoy sólo resta.
+4. B7, B8, B9, B10, B18 y los comentarios pendientes de 1.4.
+5. F1 (reintentos) con F8 y B19; F3 (path).
+6. Captura de audio crudo y banco de pruebas del módem.
+7. B6 antes de activar el digipeater; F2 antes de activar LBT de forma permanente.
+8. Decisión sobre IL2P estándar (B14 bis).
