@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "msg_retry.c"
         "kiss.c"
         "transport.c"
         "transport_wifi.c"

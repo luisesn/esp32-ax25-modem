@@ -260,6 +260,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .bubble-in .bubble-ts{justify-content:flex-start}
 .bubble-ack{color:#444;font-size:.7rem;transition:color .4s}
 .bubble-ack.acked{color:#4fc84f}
+.bubble-ack.failed{color:#e05050}
 #chat-input-bar{display:flex;gap:.4rem;padding:.4rem .5rem;
   border-top:1px solid #2a1a00;flex-shrink:0;align-items:center;background:#0a0a0a}
 #send-text{flex:1;background:#111;color:#e0e0e0;border:1px solid #333;
@@ -723,6 +724,14 @@ function chatMarkAcked(msgIdInt){
   if(sp){sp.classList.add('acked');}
   chatPendingAcks.delete(msgIdInt);
 }
+// F1: el firmware agotó los reintentos sin recibir ACK
+function chatMarkFailed(msgIdInt){
+  const d=chatPendingAcks.get(msgIdInt);
+  if(!d)return;
+  const sp=d.querySelector('[data-ack]');
+  if(sp){sp.classList.add('failed');sp.textContent='✗ sin ACK';}
+  chatPendingAcks.delete(msgIdInt);
+}
 function openChat(call,ssid){
   const c=call.toUpperCase().trim();
   const s=parseInt(ssid,10);
@@ -1110,6 +1119,8 @@ function handleMsg(p){
   if(p.seq)s_last_log_seq=p.seq;
   if(p.type==='ack_sent'){
     appendSentLog(p.to,p.ssid,'ack'+p.id);
+  } else if(p.type==='msg_failed'){
+    chatMarkFailed(p.id);
   } else if(p.type==='beacon_tx'){
     appendSentLog('APRS',-1,p.info);
   } else if(p.type==='morse_tx'){

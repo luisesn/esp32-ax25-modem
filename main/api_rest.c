@@ -2,6 +2,7 @@
 // configuración, morse, reinicio, subida a SPIFFS, repetidor/squelch y
 // respuestas a los sondeos de conectividad (404).
 #include "audio_stream.h"
+#include "msg_retry.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -173,7 +174,18 @@ static esp_err_t aprs_send_handler(httpd_req_t *req) {
     if (ssid_val > 15) ssid_val = 15;
 
     int seq = APRS_queue_msg(j_to->valuestring, ssid_val, j_text->valuestring);
+    if (seq < 0) {
+        // Cola TX llena (B8): el mensaje NO salió; la UI no debe esperar ACK.
+        ESP_LOGW(TAG, "APRS MSG no encolado (cola TX llena) → %s-%d", j_to->valuestring, ssid_val);
+        cJSON_Delete(root);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"cola TX llena\"}");
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "APRS MSG queued → %s-%d: %s (seq=%d)", j_to->valuestring, ssid_val, j_text->valuestring, seq);
+    // F1: seguimiento de ACK con reintentos (mismo id).
+    msg_retry_track(j_to->valuestring, ssid_val, seq, j_text->valuestring);
 
     char resp[48];
     snprintf(resp, sizeof(resp), "{\"ok\":true,\"msg_id\":%d}", seq);

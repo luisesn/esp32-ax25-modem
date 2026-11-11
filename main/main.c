@@ -23,6 +23,7 @@
 #include "gps.h"
 #include "display.h"
 #include "remote_cmd.h"
+#include "msg_retry.h"
 #include "rf_console.h"
 #include "ota.h"
 #include "ota_net.h"
@@ -417,7 +418,23 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
     size_t tlen = info_len - 11;
     if (tlen >= 3 &&
         (txt[0]=='a'||txt[0]=='A') && (txt[1]=='c'||txt[1]=='C') &&
-        (txt[2]=='k'||txt[2]=='K')) return;
+        (txt[2]=='k'||txt[2]=='K')) {
+        // ACK recibido: cancela el reintento del mensaje pendiente (F1).
+        char ack_id[6]; size_t n = 0;
+        for (const uint8_t *a = txt + 3; a < txt + tlen && n < 5 &&
+             ((*a >= '0' && *a <= '9') || (*a >= 'A' && *a <= 'Z') ||
+              (*a >= 'a' && *a <= 'z')); a++)
+            ack_id[n++] = (char)*a;
+        ack_id[n] = '\0';
+        char *dsh = strchr(src_call, '-');
+        int ack_ssid = dsh ? atoi(dsh + 1) : 0;
+        char ack_base[7];
+        size_t bl = dsh ? (size_t)(dsh - src_call) : strlen(src_call);
+        if (bl > 6) bl = 6;
+        memcpy(ack_base, src_call, bl); ack_base[bl] = '\0';
+        msg_retry_on_ack(ack_base, ack_ssid, ack_id);
+        return;
+    }
 
     // Buscar "{NNN}" al final
     const uint8_t *brace = NULL;
@@ -806,6 +823,7 @@ void app_main(void)
     digi_init(boot_cfg);
     morse_init(boot_cfg);
     remote_cmd_init(boot_cfg);
+    msg_retry_init();
     rf_console_init(boot_cfg);
     config_free_json(boot_cfg);
 
