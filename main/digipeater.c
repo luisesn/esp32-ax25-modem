@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include <string.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@ static alias_t         s_aliases[MAX_ALIASES];
 static int             s_alias_count   = 0;
 static char            s_call[8]       = "";
 static int             s_call_ssid     = 0;
+static char            s_my_call[8]    = "";   // aprs.callsign/ssid (origen propio)
+static int             s_my_ssid       = 0;
 
 // Protects config fields written by digi_init (httpd task) and read by
 // digi_process_frame (receive_audio_task). portMUX is a spinlock safe for
@@ -97,6 +100,19 @@ void digi_init(const cJSON *cfg) {
         }
     }
 
+    // Indicativo propio de aprs.* (para descartar tramas con origen propio)
+    char my_call[8] = "";
+    int  my_ssid = 0;
+    {
+        const cJSON *aprs = cJSON_GetObjectItemCaseSensitive(cfg, "aprs");
+        if (aprs) {
+            const cJSON *ac = cJSON_GetObjectItemCaseSensitive(aprs, "callsign");
+            const cJSON *as = cJSON_GetObjectItemCaseSensitive(aprs, "ssid");
+            if (cJSON_IsString(ac)) { strncpy(my_call, ac->valuestring, 7); my_call[7] = '\0'; }
+            if (cJSON_IsNumber(as)) my_ssid = (int)as->valueint;
+        }
+    }
+
     // ── Apply atomically so digi_process_frame always sees a consistent view ──
     taskENTER_CRITICAL(&s_digi_mux);
     s_enabled     = new_enabled;
@@ -104,6 +120,8 @@ void digi_init(const cJSON *cfg) {
     memcpy(s_aliases, new_aliases, (size_t)new_count * sizeof(alias_t));
     memcpy(s_call, new_call, 8);
     s_call_ssid   = new_ssid;
+    memcpy(s_my_call, my_call, 8);
+    s_my_ssid     = my_ssid;
     taskEXIT_CRITICAL(&s_digi_mux);
 
     ESP_LOGI(TAG, "digi_init: enabled=%d aliases=%d via=%s-%d",
@@ -162,6 +180,19 @@ static bool call_eq(const char *a, const char *b) {
 
 // ─── Main digipeat logic ──────────────────────────────────────────────────────
 
+// Política: máximo N aceptado en WIDEn-N (el SSID del alias es el N restante).
+// Estándar actual: WIDE1-1 / WIDE2-2; rechaza p. ej. WIDE7-7. Subir si se desea.
+#define DIGI_MAX_N          2
+// Límite AX.25 de repetidores en el path.
+#define DIGI_MAX_PATH_RPT   8
+
+// Buffer de trabajo estático (no en la pila de aprs_poll_task, 3072 B). Se usa
+// primero para componer los datos del hash y luego como copia mutable. El
+// callback no debe bloquear: si ya está en uso (reentrada desde otra tarea) la
+// trama se descarta en lugar de esperar.
+static uint8_t s_work[AX25_MAX_FRAME_LEN];
+static volatile bool s_work_busy = false;
+
 bool digi_process_frame(const uint8_t *buf, size_t len) {
     // Snapshot config atomically to prevent races with digi_init called from
     // the httpd task during a config reload.
@@ -173,105 +204,130 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
     char cfg_call[8];
     memcpy(cfg_call, s_call, 8);
     int cfg_ssid = s_call_ssid;
+    char my_call[8];
+    memcpy(my_call, s_my_call, 8);
+    int my_ssid = s_my_ssid;
     taskEXIT_CRITICAL(&s_digi_mux);
 
     if (!cfg_enabled) return false;
-    if (len < 16 || cfg_call[0] == '\0' || cfg_count == 0) return false;
+    if (len < 16 || len > AX25_MAX_FRAME_LEN || cfg_call[0] == '\0') return false;
 
-    // ── Duplicate check (on the original frame before we modify it) ──────────
-    uint32_t frame_hash = dedup_hash(buf, len);
-    if (dedup_check_and_add(&s_dedup, frame_hash)) {
-        ESP_LOGD(TAG, "Duplicate frame suppressed (hash=0x%08" PRIx32 ")", frame_hash);
-        return false;
+    // ── Origen propio: no repetir nuestras balizas si vuelven por otro digi ──
+    {
+        char sc[8]; int ss; bool sh, sl;
+        addr_read(buf + 7, sc, &ss, &sh, &sl);
+        if ((call_eq(sc, cfg_call) && ss == cfg_ssid) ||
+            (my_call[0] && call_eq(sc, my_call) && ss == my_ssid))
+            return false;
     }
 
-    // ── Work on a mutable copy (stack-allocated; receive_audio_task has 8 KB) ─
-    uint8_t frame[AX25_MAX_FRAME_LEN];
-    if (len > AX25_MAX_FRAME_LEN) return false;
-    memcpy(frame, buf, len);
+    // ── Localizar fin del campo de direcciones (bit 0 del SSID) ──────────────
+    size_t addr_end = 14;
+    bool is_last_src = (buf[13] & 0x01) != 0;   // SRC end-bit at byte 13
+    int  path_n = 0;
+    if (!is_last_src) {
+        for (;;) {
+            if (addr_end + 7 > len) return false;
+            bool last = (buf[addr_end + 6] & 0x01) != 0;
+            addr_end += 7;
+            path_n++;
+            if (last) break;
+            if (path_n >= 8) return false;   // path malformado (>8 sin bit final)
+        }
+    }
+    if (addr_end + 2 > len) return false;                 // falta control + PID
+    size_t info_off = addr_end + 2;
 
-    uint8_t *p   = frame;
+    if (__atomic_exchange_n(&s_work_busy, true, __ATOMIC_ACQUIRE)) return false;
+    bool did_digi = false;
+
+    // ── Buscar el primer salto sin usar (H=0) del path ───────────────────────
+    uint8_t *frame = s_work;
+    memcpy(frame, buf, len);
+    uint8_t *p   = frame + 14;
     uint8_t *end = frame + len;
 
-    // Skip DST and SRC
-    if (p + 14 > end) return false;
-    bool is_last_src = (p[13] & 0x01) != 0;   // SRC end-bit at byte 13
-    p += 14;
-
-    // ── Loop-prevention: bail if our callsign (H=1) already in path ─────────
-    {
-        const uint8_t *scan = p;
-        bool scan_last = is_last_src;
-        while (!scan_last && (scan + 7) <= end) {
-            char sc[8]; int ss; bool sh, sl;
-            addr_read(scan, sc, &ss, &sh, &sl);
-            if (sh && call_eq(sc, cfg_call) && ss == cfg_ssid) {
-                return false;   // we already repeated this frame
-            }
-            scan_last = sl;
-            scan += 7;
-        }
+    // Loop-prevention: si nuestro indicativo ya está con H=1 en el path, salir.
+    for (int i = 0, n = path_n; i < n; i++) {
+        char sc[8]; int ss; bool sh, sl;
+        addr_read(p + 7 * i, sc, &ss, &sh, &sl);
+        if (sh && call_eq(sc, cfg_call) && ss == cfg_ssid) goto out;
     }
 
-    // ── Find first unused path entry matching any of our aliases ─────────────
-    bool did_digi = false;
-    bool cur_last = is_last_src;
+    {
+        bool cur_last = is_last_src;
+        while (!cur_last && (p + 7) <= end) {
+            char rpt_call[8]; int rpt_ssid; bool rpt_h, rpt_last;
+            addr_read(p, rpt_call, &rpt_ssid, &rpt_h, &rpt_last);
+            if (rpt_h) {   // ya repetido por otro: pasar al primer salto pendiente
+                cur_last = rpt_last;
+                p += 7;
+                continue;
+            }
 
-    while (!cur_last && (p + 7) <= end) {
-        char rpt_call[8]; int rpt_ssid; bool rpt_h, rpt_last;
-        addr_read(p, rpt_call, &rpt_ssid, &rpt_h, &rpt_last);
+            // p es el primer salto sin usar: es el único sobre el que se puede
+            // actuar (AX.25). Dos casos: indicativo propio explícito o alias.
+            bool explicit_me = call_eq(rpt_call, cfg_call) && rpt_ssid == cfg_ssid;
+            int  ai_match = -1;
+            if (!explicit_me) {
+                for (int ai = 0; ai < cfg_count; ai++) {
+                    if (call_eq(rpt_call, cfg_aliases[ai].call) &&
+                        rpt_ssid == cfg_aliases[ai].ssid) { ai_match = ai; break; }
+                }
+                if (ai_match < 0) goto out;
+                if (rpt_ssid > DIGI_MAX_N) goto out;     // WIDE7-7 etc.
+                if (path_n >= DIGI_MAX_PATH_RPT) goto out;   // sin hueco para insertar
+                if (len + 7 > AX25_MAX_FRAME_LEN) goto out;
+            }
 
-        if (rpt_h) {
-            // Already repeated by someone else — skip past it to find the
-            // first still-unused hop, which is the only one we may act on.
-            cur_last = rpt_last;
-            p += 7;
-            continue;
-        }
+            // ── Dedup sobre origen + destino + información (sin path) ────────
+            // Se comprueba aquí (sólo si vamos a repetir) para no "quemar" el
+            // hash con tramas que no nos corresponden. Se compone en s_work
+            // ([dst][src][info], con SSID enmascarado) y luego se restaura la copia.
+            size_t ilen = len - info_off;
+            size_t poff = (size_t)(p - frame);        // posición del salto
+            memcpy(frame, buf, 14);
+            frame[6]  &= 0x1E;    // sólo SSID (sin H, bit final ni reservados)
+            frame[13] &= 0x1E;
+            memmove(frame + 14, buf + info_off, ilen);
+            uint32_t frame_hash = dedup_hash(frame, 14 + ilen);
+            if (dedup_check_and_add(&s_dedup, frame_hash)) {
+                ESP_LOGD(TAG, "Duplicate frame suppressed (hash=0x%08" PRIx32 ")", frame_hash);
+                goto out;
+            }
 
-        // p is now the first unused (H=0) address in the path. AX.25
-        // digipeating requires acting only on this entry: matching one of
-        // our aliases further down the path instead (the old behaviour,
-        // which kept scanning here on a miss) would digipeat via a later
-        // alias while leaving this earlier, unclaimed hop untouched —
-        // corrupting the WIDEn-N path order.
-        for (int ai = 0; ai < cfg_count; ai++) {
-            if (!call_eq(rpt_call, cfg_aliases[ai].call)) continue;
-            if (rpt_ssid != cfg_aliases[ai].ssid) continue;
+            // Restaurar la copia mutable y reposicionar punteros.
+            memcpy(frame, buf, len);
+            p   = frame + poff;
+            end = frame + len;
 
-            // rpt_ssid==0 (e.g. an alias configured as "WIDE0-0") has nothing
-            // left to decrement; clamp instead of going negative — otherwise
-            // new_ssid==-1 wraps to 15 when addr_write() packs it, and the
-            // h==(new_ssid==0) check below stays false, leaving the entry
-            // marked "unused" so it (or a later digipeater) could act on it
-            // again.
-            int new_ssid = (rpt_ssid > 0) ? rpt_ssid - 1 : 0;
-
-            if (len + 7 > AX25_MAX_FRAME_LEN) break;   // no room
-
-            memmove(p + 7, p, (size_t)(end - p));
-            len += 7;
-            end += 7;
-
-            addr_write(p, cfg_call, cfg_ssid, /*last=*/false, /*h=*/true);
-            p += 7;
-
-            addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
-
-            char src_call[8]; int src_ssid; bool src_h, src_last;
-            addr_read(&frame[7], src_call, &src_ssid, &src_h, &src_last);
-            ESP_LOGI(TAG, "%s-%d digipeated via alias %s-%d → %s-%d (len=%u)",
-                     src_call, src_ssid,
-                     cfg_aliases[ai].call, cfg_aliases[ai].ssid,
-                     cfg_call, cfg_ssid, (unsigned)len);
+            if (explicit_me) {
+                // Indicativo propio en el path: sólo se marca H=1 (sin insertar).
+                p[6] |= 0x80;
+                ESP_LOGI(TAG, "digipeated via own callsign %s-%d (len=%u)",
+                         cfg_call, cfg_ssid, (unsigned)len);
+            } else {
+                // rpt_ssid>0 aquí salvo alias "WIDE0-0": clamp a 0 (si no, -1
+                // daría 15 al empaquetar y el H quedaría sin marcar).
+                int new_ssid = (rpt_ssid > 0) ? rpt_ssid - 1 : 0;
+                memmove(p + 7, p, (size_t)(end - p));
+                len += 7;
+                addr_write(p, cfg_call, cfg_ssid, /*last=*/false, /*h=*/true);
+                p += 7;
+                addr_write(p, rpt_call, new_ssid, rpt_last, /*h=*/(new_ssid == 0));
+                ESP_LOGI(TAG, "digipeated via alias %s-%d -> %s-%d (len=%u)",
+                         cfg_aliases[ai_match].call, cfg_aliases[ai_match].ssid,
+                         cfg_call, cfg_ssid, (unsigned)len);
+            }
             did_digi = true;
             break;
         }
-        break;   // matched or not, the first unused hop is the only one we consider
     }
 
     if (did_digi)
-        afsk_queue_tx_frame(frame, len);
+        afsk_queue_tx_frame(frame, len);   // copia a la cola (no retiene el puntero)
 
+out:
+    __atomic_store_n(&s_work_busy, false, __ATOMIC_RELEASE);
     return did_digi;
 }
