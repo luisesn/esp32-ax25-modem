@@ -623,3 +623,7 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 
 - Con `il2p.enabled`, `ax25ip` envía el IP de TUN como UI AX.25 PID 0xCC (QST→indicativo), que IL2P codifica como tipo 1 estándar; ya no se usa el formato opaco `00 00 08 00` por IL2P. RX en modo TUN acepta ambos formatos (sólo UI con IPv4). Añadido `il2p_is_enabled()`.
 - SSTV: la subida con nombre existente sobrescribe (comportamiento ya vigente, `fopen "wb"`).
+
+## 2026-11-11 — v1.10.0: F3–F8
+- F3 path configurable (`aprs.path`/`aprs.ack_path`, librería); F4 SmartBeaconing + altitud + posición fija + formato común de baliza; F5 2 clientes KISS (decodificador reentrante, cola por cliente, ≈+13 KB heap); F7 `heard`/`beacon`/`config <sección>` en consola RF y `GET /api/heard`; F8 mensajes enviados en `/api/log` (`type:sent`) con estado, incluido REJ. F6 cubierta por B3/B12.
+- Trabajo repartido en agentes en paralelo; compila (≈42 % libre). **Sin probar en hardware**: medir heap con dos clientes KISS y verificar SmartBeaconing en movimiento.

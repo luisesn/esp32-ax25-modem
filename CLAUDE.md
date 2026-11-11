@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.8.0): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P estándar (v1.8.0, validado en host con los vectores de la spec; sin probar en el aire), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.10.0): **compila limpio (binario ~990 KB, ~42 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P estándar (v1.8.0, validado en host con los vectores de la spec; sin probar en el aire), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
 
 Se basa en una adaptación de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino). El fork propio vive en **https://github.com/luisesn/LibAPRS-esp32-i2s** y está clonado en `main/LibAPRS-esp32-i2s/` como **repo git anidado** (ver "Librería LibAPRS" más abajo). Reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -45,6 +45,7 @@ esp32-aprs-modem/
 │   ├── sstv.{h,c}              # TX SSTV (Martin M1/M2, Scottie S1, Robot 36/72), JPEG vía TJpgDec en ROM
 │   ├── gps.{h,c}               # NMEA por UART2 + tarea de baliza de posición (gps.use_for_beacon)
 │   ├── display.{h,c}           # SSD1306 128×64 I2C sin librería externa
+│   ├── heard.{h,c}             # Tabla de las últimas 20 estaciones oídas (/api/heard, consola RF)
 │   ├── rf_console.{h,c}        # Consola de texto (TCP y/o UDP, puerto 23) sobre la interfaz RF de ax25ip
 │   ├── ota.{h,c} / ota_net.{h,c} # OTA por HTTP (/api/ota/upload) y por espota.py (:3232)
 │   ├── delay_tune.{h,c}        # Autoajuste de post_rx_tx_delay_ms por barrido ICMP
@@ -173,8 +174,8 @@ on_ax25_raw_frame (main.c, llamado por el raw_hook de AX25 y de IL2P):
   ├── ax25ip_rx_frame()              → inyecta en lwIP si PID=0xCC
   └── audio_stream_ws_send_text()    → JSON {type:aprs,...} (+ {type:digipeated,...})
 
-server_task (transport_wifi.c, cliente TCP KISS conectado; TCP keepalive + escritura con buffer):
-  recibe bytes KISS → kiss_rx_byte() → on_kiss_frame → afsk_queue_tx_frame()
+server_task (transport_wifi.c) solo acepta; hasta 2 clientes KISS (KISS_MAX_CLIENTS), cada uno con tareas kiss_cliN/kiss_wrN, contexto KISS propio y cola de escritura (v1.10.0):
+  recibe bytes KISS → kiss_ctx_rx_byte() → on_kiss_frame → afsk_queue_tx_frame()
     (bloquea hasta KISS_TX_ENQUEUE_TIMEOUT_MS = 15 s si la cola está llena: contrapresión)
     ↑ NO llama APRS_send_raw_frame directamente (viola mutex ADC)
 
@@ -236,6 +237,8 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 - **Baliza GPS**: `gps.use_for_beacon` + `gps.beacon_period_s` (por defecto 600 s en código; el `config.json` actual usa 60 s). La tarea `gps_beacon` vive en `gps.c`. Para balizas manuales: `POST /api/aprs/beacon` o `tx,aprs,position` por APRS.
 
 - **Consola RF** (`rf_console.c`): escucha en el puerto `console.port` (23) sólo en la interfaz RF de `ax25ip`; `console.tcp` y `console.udp` se activan por separado (por defecto TCP sí, UDP no). Comandos: `help`, `status`, `config`, `quit`. Sin autenticación.
+
+- **v1.10.0 (F3–F8)**: `aprs.path`/`aprs.ack_path` (`APRS_set_path`/`APRS_set_ack_path` en la librería; vacío = sin path; hot). Baliza común `gps_build_beacon_info()` con SmartBeaconing (`gps.smart_beacon`), `gps.altitude` y posición fija (`gps.use_fixed`, `fixed_lat/lon`); `gps_send_beacon_now()` para la consola RF. 2 clientes KISS (≈+13 KB de heap, sin medir). `heard.c` (20 estaciones, `GET /api/heard`, comando `heard`). Chat persistente: `audio_stream_log_sent()` crea entradas `type:"sent"` en el log (estados pending/acked/rejected/failed, desde `msg_retry.c`; REJ vía `msg_retry_on_rej`). Todo sin probar en hardware.
 
 - **`aprs_poll_task` y el `raw_hook`**: `APRS_poll()` ya no corre en `receive_audio_task` sino en `aprs_poll_task` (prio 9), por lo que `on_ax25_raw_frame` se ejecuta en esa tarea. No bloquear en el hook (WS lento, mutex) o se llenan los FIFOs de RX. `FIFO.h` tiene variantes `_locked` (portMUX); el resto de `fifo_*` sin lock se usa en rutas de una sola tarea/ISR — auditar antes de tocar.
 
@@ -321,6 +324,7 @@ Resumen rápido (2026-11-11):
 - GPS + baliza de posición periódica; display SSD1306; digipeater WIDEn-N; baliza CW ✅
 - IL2P ⚠️ reescrito al estándar (v1.8.0): vectores de la spec OK en host, IP (también en modo TUN) como UI AX.25 PID 0xCC estándar, interoperable; pendiente de pruebas en el aire/HW
 - Subida de imágenes SSTV desde la web corregida (v1.6.6, B15; probada en host, falta HW) ✅
+- v1.10.0: path configurable, SmartBeaconing/posición fija, 2 clientes KISS, chat persistente, `heard` ✅ (sin probar en HW)
 - Reintento de mensajes con seguimiento de ACK (`msg_retry.c`, v1.8.0, F1) ✅
 - Diagnóstico de red en la web (`netdiag.c`: ping, miniconsola TCP/UDP) ✅
 - OTA por HTTP y por `espota.py`; WiFi multi-red con fallback AP ✅

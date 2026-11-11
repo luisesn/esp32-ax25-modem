@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-11-11, firmware v1.8.0): compila limpio (binario ~928 KB, ~46 % libre de la partición de app). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (detector de portadora `carrier_detect`, más el squelch HFNE si el monitor o el repetidor están activos) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json` (reescrito al estándar en v1.8.0; **experimental**: validado en host, sin probar sobre el aire, ver la sección IL2P). **Novedades desde junio**: WiFi multi-red con reconexión; KISS TCP con keepalive, escritura con buffer y contrapresión; deduplicación de tramas del doble módem (`on_ax25_raw_frame`, 300 ms); tráfico de terceros en el log; baliza GPS periódica (`gps.use_for_beacon`); consola RF por TCP y/o UDP; `sdkconfig.defaults` completo (build reproducible); `APRS_poll()` en tarea propia (`aprs_poll_task`). RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-11-11, firmware v1.10.0): compila limpio (binario ~990 KB, ~42 % libre de la partición de app). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (detector de portadora `carrier_detect`, más el squelch HFNE si el monitor o el repetidor están activos) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json` (reescrito al estándar en v1.8.0; **experimental**: validado en host, sin probar sobre el aire, ver la sección IL2P). **v1.10.0**: path APRS configurable (`aprs.path`/`aprs.ack_path`), SmartBeaconing y posición fija en la baliza, 2 clientes KISS simultáneos, chat persistente (entradas `sent` en `/api/log`), tabla de estaciones oídas (`/api/heard`) y comandos `heard`/`beacon` en la consola RF. **Novedades desde junio**: WiFi multi-red con reconexión; KISS TCP con keepalive, escritura con buffer y contrapresión; deduplicación de tramas del doble módem (`on_ax25_raw_frame`, 300 ms); tráfico de terceros en el log; baliza GPS periódica (`gps.use_for_beacon`); consola RF por TCP y/o UDP; `sdkconfig.defaults` completo (build reproducible); `APRS_poll()` en tarea propia (`aprs_poll_task`). RX pendiente verificación con señal RF real.**
 
 ---
 
@@ -103,7 +103,7 @@ esp32-aprs-modem/
 │   │                                  Goertzel (3150–4350 Hz); fuentes: repetidor y monitor UI;
 │   │                                  REST: /api/squelch/*; WS: {"type":"squelch_sf",...}
 │   ├── rf_console.h / rf_console.c     consola TCP line-based sobre la IP RF (ax25ip); comandos
-│   │                                  help, status, config, quit; un cliente simultáneo; port 23
+│   │                                  help, status, config [sección], stats, heard, beacon, reboot, quit; un cliente simultáneo; port 23
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
 │   ├── carrier_detect.h / .c          detector de portadora ajena (canal ocupado para LBT, calidad
 │   │                                  por trama); REST: /api/carrier; WS: {"type":"channel",...}
@@ -249,6 +249,7 @@ Navega a `http://<IP-del-ESP32>/` para acceder a la UI web integrada:
 | `POST`   | `/api/tune/stop`        | Aborta el barrido en curso. Responde `{"ok":true}` |
 | `GET`    | `/api/sys`              | Estado del sistema: versión del firmware, heap libre y margen de pila de las tareas |
 | `GET`    | `/api/netdiag?gen=G&since=N` | Diagnóstico de red: estado de la operación en curso y texto de salida nuevo desde `since` |
+| `GET`    | `/api/heard`            | Últimas 20 estaciones oídas: `{"heard":[{"call","age","n","q"?,"lat"?,"lon"?}]}` |
 | `POST`   | `/api/netdiag/ping`     | Ping ICMP. Body JSON: `{"host":"...","count":N,"size":N}` (`count` y `size` opcionales) |
 | `POST`   | `/api/netdiag/connect`  | Abre la miniconsola. Body JSON: `{"host":"...","port":N,"proto":"tcp"}` (`proto`: `tcp` por defecto, `udp` o `telnet`; en modo telnet las negociaciones de opciones se rechazan automáticamente) |
 | `POST`   | `/api/netdiag/send`     | Envía texto por la conexión abierta. Body JSON: `{"data":"...","eol":"lf"}` (`eol` opcional: `lf`, `cr` o `none`; fin de línea que se añade al texto) |
@@ -600,13 +601,27 @@ O establece `CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y` en `menuconfig`.
   "enabled": true,
   "baud": 9600,
   "use_for_beacon": false,
-  "beacon_period_s": 600
+  "beacon_period_s": 600,
+  "altitude": false,
+  "use_fixed": false,
+  "fixed_lat": 0.0,
+  "fixed_lon": 0.0,
+  "smart_beacon": {
+    "enabled": false,
+    "fast_speed_kmh": 60, "slow_speed_kmh": 5,
+    "fast_rate_s": 180, "slow_rate_s": 1800,
+    "min_turn_deg": 28, "turn_slope": 26, "min_turn_time_s": 15
+  }
 }
 ```
 
 - `enabled: false` deshabilita UART2 y la tarea GPS; el firmware arranca igualmente.
 - `use_for_beacon`: si es `true`, una tarea transmite periódicamente una baliza de posición con la posición del GPS.
 - `beacon_period_s`: periodo de la baliza en segundos (600 por defecto).
+- `altitude`: añade `/A=nnnnnn` (pies) a la baliza si el GPS da altitud.
+- `use_fixed` + `fixed_lat`/`fixed_lon`: posición de reserva cuando no hay fix (también permite nodos sin GPS: `enabled:false`, `use_for_beacon:true`).
+- `smart_beacon` (HamHUD): periodo `slow_rate_s` por debajo de `slow_speed_kmh`, `fast_rate_s` por encima de `fast_speed_kmh` y proporcional en medio; además baliza al girar más de `min_turn_deg + turn_slope/velocidad` grados (mín. `min_turn_time_s` entre balizas). Con `fast_speed<=slow_speed` o `fast_rate>slow_rate` se desactiva.
+- La baliza manual (`POST /api/aprs/beacon`, `tx,aprs,position`) usa el mismo formato (símbolo y comentario de la config).
 - La tarea GPS (`gps_task`) tiene prioridad 4, stack 2048 B.
 
 ---
@@ -753,7 +768,11 @@ telnet <ip.addr> 23
 | Comando | Descripción |
 |---------|-------------|
 | `status` | Callsign, IP RF, IP WiFi, heap libre y uptime en segundos |
-| `config` | Vuelca el `config.json` completo |
+| `config [sección]` | Resumen del config, o la sección indicada |
+| `stats` | Contadores de tramas RX/TX y CRC |
+| `heard` | Últimas estaciones oídas |
+| `beacon` | Envía una baliza de posición ahora |
+| `reboot` | Reinicia el nodo (sin autenticación) |
 | `help` | Lista de comandos disponibles |
 | `quit` / `exit` | Cierra la conexión |
 
@@ -903,9 +922,13 @@ El intervalo entre pings dentro de cada paso es de 100 ms (mucho menor que D), d
 
 ```json
 "aprs": {
-  "post_rx_tx_delay_ms": 500
+  "post_rx_tx_delay_ms": 500,
+  "path": "WIDE1-1,WIDE2-2",
+  "ack_path": "WIDE1-1,WIDE2-2"
 }
 ```
+
+`path` y `ack_path` (hasta 2 repetidores; cadena vacía = sin path) se aplican en caliente. Si no se definen se usa `WIDE1-1,WIDE2-2`.
 
 Ponlo a `0` para deshabilitar el retardo completamente.
 
