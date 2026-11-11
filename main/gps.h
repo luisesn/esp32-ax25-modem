@@ -29,6 +29,10 @@ void gps_unlock_pos(void);
 // cfg may be NULL; reads gps.enabled and gps.baud from config.json if present.
 void gps_init(cJSON *cfg);
 
+// Reaplica en caliente gps.beacon_period_s, symbol_table, symbol_code, comment
+// y course_speed desde cfg (el resto de la sección gps requiere reinicio).
+void gps_reload_config(cJSON *cfg);
+
 // Posición APRS sin comprimir compartida (gps.c, api_rest.c, remote_cmd.c).
 // Escribe "=DDMM.mmN/DDDMM.mmE" + symbol + '\0' en out (tabla de símbolos '/').
 // out_len debe ser >= APRS_POS_BUF_LEN. Minutos en centésimas enteras, con
