@@ -16,6 +16,10 @@
 
 #include "ax25ip.h"
 #include "aux_config.h"
+#include "rx_stats.h"
+#include <strings.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
 
 #define TAG "rf_console"
@@ -70,7 +74,9 @@ static void cmd_help(conn_t *c)
         "Commands:\r\n"
         "  help    - this message\r\n"
         "  status  - system status\r\n"
-        "  config  - dump config JSON\r\n"
+        "  config  - summary; 'config <section>' shows one section\r\n"
+        "  stats   - RX frame counters\r\n"
+        "  reboot  - restart the device\r\n"
         "  quit    - close connection\r\n";
     conn_write(c, msg, strlen(msg));
 }
@@ -122,24 +128,96 @@ static void cmd_status(conn_t *c)
     conn_write(c, rsp, (size_t)n);
 }
 
-static void cmd_config(conn_t *c)
+// Elimina recursivamente los campos "password" (objetos y arrays).
+static void strip_secrets(cJSON *node)
 {
+    cJSON *it = node ? node->child : NULL;
+    while (it) {
+        cJSON *next = it->next;
+        if (it->string && strcasecmp(it->string, "password") == 0)
+            cJSON_Delete(cJSON_DetachItemViaPointer(node, it));
+        else if (cJSON_IsObject(it) || cJSON_IsArray(it))
+            strip_secrets(it);
+        it = next;
+    }
+}
+
+static const char *cfg_bool(const cJSON *cfg, const char *sec, const char *key)
+{
+    const cJSON *s = cJSON_GetObjectItem(cfg, sec);
+    const cJSON *v = s ? cJSON_GetObjectItem(s, key) : NULL;
+    return cJSON_IsBool(v) ? (cJSON_IsTrue(v) ? "on" : "off") : "?";
+}
+
+static void cmd_config(conn_t *c, const char *arg)
+{
+    static const char *err = "error: config not loaded\r\n";
     cJSON *cfg = config_get();
-    if (!cfg) {
-        static const char *err = "error: config not loaded\r\n";
-        conn_write(c, err, strlen(err));
+    if (!cfg) { conn_write(c, err, strlen(err)); return; }
+
+    char rsp[256];
+    if (!arg || !*arg) {
+        // Resumen corto: el JSON completo tardaría minutos a 1200 bps.
+        char call[16] = "?";
+        int ssid_num = 0;
+        APRS_getCallsign(call, &ssid_num);
+        int n = snprintf(rsp, sizeof(rsp), "Callsign: %s-%d\r\nSections:", call, ssid_num);
+        for (cJSON *it = cfg->child; it && n < (int)sizeof(rsp) - 20; it = it->next)
+            if (it->string && (cJSON_IsObject(it) || cJSON_IsArray(it)))
+                n += snprintf(rsp + n, sizeof(rsp) - (size_t)n, " %s", it->string);
+        n += snprintf(rsp + n, sizeof(rsp) - (size_t)n,
+                      "\r\nIL2P:%s LBT:%s IP:%s\r\nUse: config <section>\r\n",
+                      cfg_bool(cfg, "il2p", "enabled"),
+                      cfg_bool(cfg, "tx", "lbt_enabled"),
+                      cfg_bool(cfg, "ip", "enabled"));
+        config_free_json(cfg);
+        conn_write(c, rsp, (size_t)n);
         return;
     }
-    char *js = cJSON_PrintUnformatted(cfg);
+
+    cJSON *sec = cJSON_GetObjectItem(cfg, arg);   // insensible a mayusculas
+    if (!sec) {
+        config_free_json(cfg);
+        static const char *nf = "error: no such section\r\n";
+        conn_write(c, nf, strlen(nf));
+        return;
+    }
+    cJSON *copy = cJSON_Duplicate(sec, 1);
     config_free_json(cfg);
+    if (!copy) { conn_write(c, err, strlen(err)); return; }
+    strip_secrets(copy);
+    char *js = cJSON_PrintUnformatted(copy);
+    cJSON_Delete(copy);
     if (!js) {
-        static const char *err = "error: cJSON_Print failed\r\n";
-        conn_write(c, err, strlen(err));
+        static const char *pe = "error: cJSON_Print failed\r\n";
+        conn_write(c, pe, strlen(pe));
         return;
     }
     conn_write(c, js, strlen(js));
     conn_write(c, "\r\n", 2);
     free(js);
+}
+
+static void cmd_stats(conn_t *c)
+{
+    char rsp[256];
+    int n = snprintf(rsp, sizeof(rsp),
+        "v1 ok:%lu err:%lu flags:%lu ovf:%lu\r\n"
+        "v2 ok:%lu err:%lu flags:%lu ovf:%lu\r\n",
+        (unsigned long)rx_stats_v1.frames_crc_ok, (unsigned long)rx_stats_v1.frames_crc_err,
+        (unsigned long)rx_stats_v1.hdlc_flags, (unsigned long)rx_stats_v1.fifo_overflows,
+        (unsigned long)rx_stats_v2.frames_crc_ok, (unsigned long)rx_stats_v2.frames_crc_err,
+        (unsigned long)rx_stats_v2.hdlc_flags, (unsigned long)rx_stats_v2.fifo_overflows);
+    conn_write(c, rsp, (size_t)n);
+}
+
+static void cmd_reboot(conn_t *c)
+{
+    static const char *m = "Rebooting\r\n";
+    conn_write(c, m, strlen(m));
+    conn_flush(c);
+    vTaskDelay(pdMS_TO_TICKS(500));   // deja salir la respuesta
+    esp_restart();
 }
 
 // Dispatch a NUL-terminated, trimmed line. Returns true to keep connection open.
@@ -157,7 +235,7 @@ static bool dispatch(conn_t *c, char *line)
     }
 
     // Lowercase for matching
-    char lower[64];
+    char lower[128];
     snprintf(lower, sizeof(lower), "%s", line);
     for (char *p = lower; *p; p++)
         if (*p >= 'A' && *p <= 'Z') *p += 32;
@@ -166,8 +244,14 @@ static bool dispatch(conn_t *c, char *line)
         cmd_help(c);
     } else if (strcmp(lower, "status") == 0) {
         cmd_status(c);
-    } else if (strcmp(lower, "config") == 0) {
-        cmd_config(c);
+    } else if (strcmp(lower, "config") == 0 || strncmp(lower, "config ", 7) == 0) {
+        const char *arg = lower + 6;
+        while (*arg == ' ') arg++;
+        cmd_config(c, arg);
+    } else if (strcmp(lower, "stats") == 0) {
+        cmd_stats(c);
+    } else if (strcmp(lower, "reboot") == 0) {
+        cmd_reboot(c);
     } else if (strcmp(lower, "quit") == 0 || strcmp(lower, "exit") == 0) {
         conn_write(c, "Bye\r\n", 5);
         return false;
@@ -203,36 +287,38 @@ static void handle_client(int fd, const char *client_ip)
     bool skip_lf   = false;
     bool need_banner = true;
 
-    while (1) {
-        char ch;
-        int n = recv(fd, &ch, 1, 0);
-        if (n <= 0) break;
+    bool done = false;
+    while (!done) {
+        char rb[32];
+        int rn = recv(fd, rb, sizeof(rb), 0);
+        if (rn <= 0) break;
 
-        if (ch == '\n' && skip_lf) {
-            skip_lf = false;    // consumed the \n of a \r\n pair — already dispatched
-        } else if (ch == '\n' || ch == '\r') {
-            skip_lf = (ch == '\r');
-            line[pos] = '\0';
-            if (need_banner) {
-                static const char *banner = "RF Console (type 'help' for commands)\r\n";
-                conn_write(&c, banner, strlen(banner));
-                need_banner = false;
-            }
-            bool keep = dispatch(&c, line);
-            conn_flush(&c);
-            if (!keep) break;
-            pos = 0;
-        } else {
-            skip_lf = false;
-            if (pos < (int)sizeof(line) - 1)
-                line[pos++] = ch;
-            else {
-                // Line too long: flush and report
+        for (int i = 0; i < rn && !done; i++) {
+            char ch = rb[i];
+            if (ch == '\n' && skip_lf) {
+                skip_lf = false;    // \n de un par \r\n ya despachado
+            } else if (ch == '\n' || ch == '\r') {
+                skip_lf = (ch == '\r');
                 line[pos] = '\0';
-                static const char *err = "error: line too long\r\n> ";
-                conn_write(&c, err, strlen(err));
+                if (need_banner) {
+                    static const char *banner = "RF Console (type 'help' for commands)\r\n";
+                    conn_write(&c, banner, strlen(banner));
+                    need_banner = false;
+                }
+                bool keep = dispatch(&c, line);
                 conn_flush(&c);
+                if (!keep) done = true;
                 pos = 0;
+            } else {
+                skip_lf = false;
+                if (pos < (int)sizeof(line) - 1)
+                    line[pos++] = ch;
+                else {
+                    static const char *err = "error: line too long\r\n> ";
+                    conn_write(&c, err, strlen(err));
+                    conn_flush(&c);
+                    pos = 0;
+                }
             }
         }
     }
@@ -249,29 +335,29 @@ static void handle_client(int fd, const char *client_ip)
 
 static void rf_console_udp_task(void *arg)
 {
-    ip4_addr_t rf_ip = *(ip4_addr_t *)arg;
-    free(arg);
-
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "udp socket() failed: %d", errno);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons((uint16_t)s_port),
-        .sin_addr.s_addr = rf_ip.addr,
-    };
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        ESP_LOGE(TAG, "udp bind() failed: %d", errno);
-        close(sock);
-        vTaskDelete(NULL);
-        return;
+    (void)arg;
+    ip4_addr_t rf_ip;
+    int sock = -1;
+    for (;;) {   // reintenta cada 5 s hasta que ax25ip este arriba y el bind funcione
+        if (ax25ip_get_addr(&rf_ip)) {
+            sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (sock >= 0) {
+                int opt = 1;
+                setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                struct sockaddr_in addr = {
+                    .sin_family      = AF_INET,
+                    .sin_port        = htons((uint16_t)s_port),
+                    .sin_addr.s_addr = rf_ip.addr,
+                };
+                if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) break;
+                ESP_LOGW(TAG, "udp bind() failed: %d (retry)", errno);
+                close(sock);
+                sock = -1;
+            } else {
+                ESP_LOGW(TAG, "udp socket() failed: %d (retry)", errno);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
     char ip_str[16];
@@ -307,31 +393,34 @@ static void rf_console_udp_task(void *arg)
 
 static void rf_console_task(void *arg)
 {
-    ip4_addr_t rf_ip = *(ip4_addr_t *)arg;
-    free(arg);
-
-    int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (srv < 0) {
-        ESP_LOGE(TAG, "socket() failed: %d", errno);
-        vTaskDelete(NULL);
-        return;
+    (void)arg;
+    ip4_addr_t rf_ip;
+    int srv = -1;
+    for (;;) {   // reintenta cada 5 s hasta que ax25ip este arriba y listen() funcione
+        if (ax25ip_get_addr(&rf_ip)) {
+            srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (srv >= 0) {
+                int opt = 1;
+                setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+                struct sockaddr_in addr = {
+                    .sin_family      = AF_INET,
+                    .sin_port        = htons((uint16_t)s_port),
+                    .sin_addr.s_addr = rf_ip.addr,
+                };
+                if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+                    if (listen(srv, 1) == 0) break;
+                    ESP_LOGW(TAG, "listen() failed: %d (retry)", errno);
+                } else {
+                    ESP_LOGW(TAG, "bind() failed: %d (retry)", errno);
+                }
+                close(srv);
+                srv = -1;
+            } else {
+                ESP_LOGW(TAG, "socket() failed: %d (retry)", errno);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
-
-    int opt = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons((uint16_t)s_port),
-        .sin_addr.s_addr = rf_ip.addr,
-    };
-    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        ESP_LOGE(TAG, "bind() failed: %d", errno);
-        close(srv);
-        vTaskDelete(NULL);
-        return;
-    }
-    listen(srv, 1);
 
     char ip_str[16];
     inet_ntop(AF_INET, &rf_ip.addr, ip_str, sizeof(ip_str));
@@ -389,27 +478,9 @@ void rf_console_init(const cJSON *cfg)
 
     if (!enable_tcp && !enable_udp) return;
 
-    ip4_addr_t rf_ip;
-    if (!ax25ip_get_addr(&rf_ip)) {
-        ESP_LOGW(TAG, "ax25ip not up — console disabled");
-        return;
-    }
-
-    if (enable_tcp) {
-        ip4_addr_t *addr = malloc(sizeof(ip4_addr_t));
-        if (!addr) { ESP_LOGE(TAG, "malloc failed"); }
-        else {
-            *addr = rf_ip;
-            xTaskCreate(rf_console_task, "rf_console", 6144, addr, 3, NULL);
-        }
-    }
-
-    if (enable_udp) {
-        ip4_addr_t *addr = malloc(sizeof(ip4_addr_t));
-        if (!addr) { ESP_LOGE(TAG, "malloc failed"); }
-        else {
-            *addr = rf_ip;
-            xTaskCreate(rf_console_udp_task, "rf_console_u", 4096, addr, 3, NULL);
-        }
-    }
+    // Las tareas esperan a que ax25ip este disponible (reintento cada 5 s).
+    if (enable_tcp)
+        xTaskCreate(rf_console_task, "rf_console", 6144, NULL, 3, NULL);
+    if (enable_udp)
+        xTaskCreate(rf_console_udp_task, "rf_console_u", 4096, NULL, 3, NULL);
 }
