@@ -627,6 +627,10 @@ done:
 // ---------------------------------------------------------------------------
 void sstv_dispatch_if_pending(void) {
     if (!s_sstv_queue) return;
+    if (uxQueueMessagesWaiting(s_sstv_queue) == 0) return;
+    // LBT + CSMA + inhibición post-RX; si el canal no está libre se reintenta
+    // en la siguiente iteración (la petición sigue en cola).
+    if (!afsk_tx_clear_to_send()) return;
     SstvRequest req;
     if (xQueueReceive(s_sstv_queue, &req, 0) == pdTRUE)
         sstv_transmit(&req);

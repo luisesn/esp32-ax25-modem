@@ -10,6 +10,7 @@
 #include "cJSON.h"
 #include "morse.h"
 #include "audio_stream.h"
+#include "LibAPRS-esp32-i2s/src/AFSK.h"
 
 static const char *TAG = "morse";
 
@@ -145,6 +146,10 @@ static void do_morse_tx(const char *callsign) {
 
 bool morse_check_and_dispatch(void) {
     if (!s_enabled || !s_ready_sem) return false;
+    if (uxSemaphoreGetCount(s_ready_sem) == 0) return false;   // nada pendiente
+    // LBT + CSMA + inhibición post-RX; si el canal no está libre se reintenta
+    // en la siguiente iteración (la tarea de baliza espera hasta 60 s).
+    if (!afsk_tx_clear_to_send()) return false;
     if (xSemaphoreTake(s_ready_sem, 0) != pdTRUE) return false;
 
     // Snapshot mutable config to avoid a race with morse_init during TX.
