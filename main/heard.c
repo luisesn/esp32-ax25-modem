@@ -132,42 +132,8 @@ static bool parse_mice(const uint8_t *dest, const uint8_t *inf, size_t il, float
     return true;
 }
 
-void heard_note(const uint8_t *ax25, size_t len, int q)
+static void heard_upsert(const char *call, bool pos_ok, float lat, float lon, int q)
 {
-    if (!ax25 || len < 16) return;
-
-    char call[10];
-    int k = 0;
-    for (int i = 7; i < 13; i++) {
-        char ch = (char)(ax25[i] >> 1);
-        if (ch != ' ' && k < 6) call[k++] = ch;
-    }
-    if (k == 0) return;
-    int ssid = (ax25[13] >> 1) & 0x0F;
-    if (ssid) k += snprintf(call + k, sizeof(call) - (size_t)k, "-%d", ssid);
-    else call[k] = '\0';
-
-    // Fin de direcciones: primer byte con bit0 = 1 desde el origen.
-    size_t i = 13;
-    while (i < len && !(ax25[i] & 1)) i += 7;
-    i++;                       // al control
-    i += 2;                    // control + PID
-    bool pos_ok = false;
-    float lat = 0, lon = 0;
-    if (i < len) {
-        const uint8_t *inf = ax25 + i;
-        size_t il = len - i;
-        if (inf[0] == '!' || inf[0] == '=') {
-            pos_ok = parse_pos(inf + 1, il - 1, &lat, &lon);
-            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 1, il - 1, &lat, &lon);
-        } else if ((inf[0] == '/' || inf[0] == '@') && il > 8) {
-            pos_ok = parse_pos(inf + 8, il - 8, &lat, &lon);
-            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 8, il - 8, &lat, &lon);
-        } else if (inf[0] == '\'' || inf[0] == '`') {
-            pos_ok = parse_mice(ax25, inf, il, &lat, &lon);
-        }
-    }
-
     uint32_t t = now_s();
     portENTER_CRITICAL(&s_mux);
     heard_t *e = NULL;
@@ -212,6 +178,75 @@ void heard_note(const uint8_t *ax25, size_t len, int q)
         }
     }
     portEXIT_CRITICAL(&s_mux);
+}
+
+void heard_note(const uint8_t *ax25, size_t len, int q)
+{
+    if (!ax25 || len < 16) return;
+
+    char call[10];
+    int k = 0;
+    for (int i = 7; i < 13; i++) {
+        char ch = (char)(ax25[i] >> 1);
+        if (ch != ' ' && k < 6) call[k++] = ch;
+    }
+    if (k == 0) return;
+    int ssid = (ax25[13] >> 1) & 0x0F;
+    if (ssid) k += snprintf(call + k, sizeof(call) - (size_t)k, "-%d", ssid);
+    else call[k] = '\0';
+
+    // Fin de direcciones: primer byte con bit0 = 1 desde el origen.
+    size_t i = 13;
+    while (i < len && !(ax25[i] & 1)) i += 7;
+    i++;                       // al control
+    i += 2;                    // control + PID
+    bool pos_ok = false;
+    float lat = 0, lon = 0;
+    if (i < len) {
+        const uint8_t *inf = ax25 + i;
+        size_t il = len - i;
+        if (inf[0] == '!' || inf[0] == '=') {
+            pos_ok = parse_pos(inf + 1, il - 1, &lat, &lon);
+            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 1, il - 1, &lat, &lon);
+        } else if ((inf[0] == '/' || inf[0] == '@') && il > 8) {
+            pos_ok = parse_pos(inf + 8, il - 8, &lat, &lon);
+            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 8, il - 8, &lat, &lon);
+        } else if (inf[0] == '\'' || inf[0] == '`') {
+            pos_ok = parse_mice(ax25, inf, il, &lat, &lon);
+        }
+    }
+
+    // Tráfico de terceros (}SRC>DST,PATH:INFO): la posición es de la estación interna.
+    if (pos_ok == false && i < len && ax25[i] == '}') {
+        const char *in = (const char *)ax25 + i + 1, *e_ = (const char *)ax25 + len;
+        const char *gt = memchr(in, '>', (size_t)(e_ - in));
+        const char *co = gt ? memchr(gt, ':', (size_t)(e_ - gt)) : NULL;
+        if (gt && co && gt - in > 0 && gt - in <= 9) {
+            char icall[10];
+            memcpy(icall, in, (size_t)(gt - in)); icall[gt - in] = '\0';
+            const char *inf = co + 1; size_t il = (size_t)(e_ - inf);
+            float ilat = 0, ilon = 0; bool iok = false;
+            if (il > 1) {
+                if (inf[0] == '!' || inf[0] == '=') {
+                    iok = parse_pos((const uint8_t *)inf + 1, il - 1, &ilat, &ilon);
+                    if (!iok) iok = parse_pos_compressed((const uint8_t *)inf + 1, il - 1, &ilat, &ilon);
+                } else if ((inf[0] == '/' || inf[0] == '@') && il > 8) {
+                    iok = parse_pos((const uint8_t *)inf + 8, il - 8, &ilat, &ilon);
+                    if (!iok) iok = parse_pos_compressed((const uint8_t *)inf + 8, il - 8, &ilat, &ilon);
+                } else if (inf[0] == '\'' || inf[0] == '`') {
+                    uint8_t d6[6] = {0};   // destino interno, desplazado como en AX.25
+                    const char *dp = gt + 1;
+                    for (int k = 0; k < 6 && dp + k < co && dp[k] != ','; k++) d6[k] = (uint8_t)((uint8_t)dp[k] << 1);
+                    iok = parse_mice(d6, (const uint8_t *)inf, il, &ilat, &ilon);
+                }
+            }
+            heard_upsert(call, false, 0, 0, q);          // el gateway sí se oyó
+            heard_upsert(icall, iok, ilat, ilon, q);     // la estación interna, con su posición
+            return;
+        }
+    }
+
+    heard_upsert(call, pos_ok, lat, lon, q);
 }
 
 int heard_track(heard_pt_t *out, int max, uint32_t max_age_s)

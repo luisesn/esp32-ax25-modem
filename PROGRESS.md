@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Tráfico de terceros en el mapa (v1.15.3)
+- `heard.c` extrae la posición de la estación interna de los paquetes `}`; el gateway se anota aparte.
+
 ## 2026-11-11 — Ajustes del mapa (v1.15.2)
 - Línea continua (directo o digi con posición) / discontinua (digi sin posición); marcador propio triángulo verde; contorno verde ejército.
 

@@ -2363,7 +2363,7 @@ let mapCv=null,mapCtx=null,mapW=0,mapH=0,mapC={lon:-3.5,lat:40.2},mapS=60,mapSta
 function mapPx(lon,lat){return[mapW/2+(lon-mapC.lon)*MAP_K*mapS,mapH/2-(lat-mapC.lat)*mapS];}
 // Ruta de la última trama directa/vía digi de la estación h (según el historial del log local).
 function mapHoverRoute(h){
-  let r=null;for(let i=logHist.length-1;i>=0;i--){const x=logHist[i];if(x.k==='r'&&!x.dg&&x.src===h.call){r=x;break;}}
+  let r=null;for(let i=logHist.length-1;i>=0;i--){const x=logHist[i];if(x.k==='r'&&!x.dg){const tp=parseThirdParty(x.info);if((tp?tp.src:x.src)===h.call){r=x;break;}}}
   if(!r)return null;
   const hops=(r.path||'').split(',').map(t=>t.trim()).filter(Boolean),used=hops.filter(t=>t.endsWith('*'));
   if(!used.length)return {pts:[h,mapMe]};   // directa: línea continua

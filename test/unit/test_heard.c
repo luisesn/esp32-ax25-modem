@@ -267,6 +267,24 @@ TEST(mice_too_short_no_position)
     cJSON_Delete(r);
 }
 
+TEST(third_party_position_goes_to_inner_station)
+{
+    fresh();
+    size_t n = build_s(frame, "ED2ZAD", 3, "}ED2ZAD>APBM1S,TCPIP,ED2ZAD-3*:@112236z4322.21N/00245.80WrPHG0000RD985");
+    heard_note(frame, n, 2);
+    cJSON *r = get_json();
+    CHECK(r != NULL);
+    if (!r) return;
+    cJSON *e = find_entry(r, "ED2ZAD");
+    CHECK(e != NULL);
+    if (e) {
+        CHECK(fabs(cJSON_GetObjectItem(e, "lat")->valuedouble - 43.37017) < 0.0005);
+        CHECK(fabs(cJSON_GetObjectItem(e, "lon")->valuedouble + 2.76333) < 0.0005);
+    }
+    CHECK(find_entry(r, "ED2ZAD-3") != NULL);   // el gateway también se oyó
+    cJSON_Delete(r);
+}
+
 TEST(status_has_no_position_and_q_average)
 {
     fresh();
@@ -503,6 +521,7 @@ TEST(random_garbage_no_crash)
 int main(void)
 {
     RUN(uncompressed_position_with_ssid);
+    RUN(third_party_position_goes_to_inner_station);
     RUN(sign_of_coordinates);
     RUN(timestamped_position);
     RUN(compressed_position);
