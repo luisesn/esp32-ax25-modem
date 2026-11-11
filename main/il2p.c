@@ -191,13 +191,23 @@ static int il2p_decode_header(const uint8_t hdr[IL2P_HEADER_DATA],
     src[6]    = '\0';
     *src_ssid  = (int)unpack_bits(hdr, &bp, 4);
 
-    /* frame type (reserved, 4 bits) */
-    unpack_bits(hdr, &bp, 4);
+    /* frame type (reserved, 4 bits): el emisor siempre escribe 0 */
+    uint32_t reserved = unpack_bits(hdr, &bp, 4);
 
     *pid  = (uint8_t)unpack_bits(hdr, &bp, 8);
     *ctrl = (uint8_t)unpack_bits(hdr, &bp, 8);
 
     int payload_len = (int)unpack_bits(hdr, &bp, 10);
+
+    /* Comprobación de cordura (B14): con 2 errores el RS de 2 bytes de
+     * paridad "corrige" mal en ≈5,5 % de los casos. Rechazar cabeceras con
+     * campos imposibles: bits reservados o sobrantes distintos de 0,
+     * indicativos vacíos o con símbolos fuera de A-Z/0-9/espacio. */
+    uint32_t spare = unpack_bits(hdr, &bp, 2);   /* bits 110..111, sin uso */
+    if (reserved != 0 || spare != 0) return -1;
+    if (dest[0] == ' ' || src[0] == ' ') return -1;
+    for (int i = 0; i < 6; i++)
+        if (dest[i] == '?' || src[i] == '?') return -1;
     return payload_len;
 }
 
@@ -449,7 +459,11 @@ static void rx_process_bit(il2p_rx_t *rx, uint8_t bit)
     case IL2P_SYNC:
         rx->sync_reg = ((rx->sync_reg << 1) | (bit & 1)) & 0xFFFFFF;
         if (rx->sync_reg == IL2P_SYNC_WORD) {
+            /* rx_start_header() pone bit_count a 0; salir aquí para que el
+             * bit_count++ de abajo no desalinee el primer byte de la
+             * cabecera 1 bit (la cabecera nunca decodificaba). */
             rx_start_header(rx);
+            break;
         }
         /* Timeout: fall back to HUNT if sync word not found after ~64 extra bytes */
         rx->bit_count++;

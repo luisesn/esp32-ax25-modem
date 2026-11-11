@@ -30,6 +30,8 @@ static uint8_t  gf8_log[256];          /* log_α(x), gf8_log[0] undefined       
 static uint8_t  rs8_gp[RS8_NROOTS];   /* generator poly coefficients (log)     */
 static bool     gf8_ready = false;
 
+static inline uint8_t gf8_mul(uint8_t a, uint8_t b);
+
 static void gf8_init(void)
 {
     uint16_t sr = 1;
@@ -51,12 +53,11 @@ static void gf8_init(void)
 
     for (int i = 0; i < RS8_NROOTS; i++) {
         uint8_t root = gf8_exp[RS8_FCR + i];
-        for (int j = i + 1; j > 0; j--) {
-            if (tmp[j - 1] != 0)
-                tmp[j] ^= gf8_exp[(gf8_log[tmp[j - 1]] + gf8_log[root]) % 255];
-            /* else: 0 * root = 0, no change to tmp[j] from this term */
-        }
-        tmp[0] = gf8_exp[(gf8_log[tmp[0]] + gf8_log[root]) % 255];
+        /* Multiplicar por (x + root): nuevo[j] = viejo[j-1] ^ viejo[j]*root.
+         * (B14 punto 1: antes se omitía el término viejo[j]*root.) */
+        for (int j = i + 1; j > 0; j--)
+            tmp[j] = tmp[j - 1] ^ gf8_mul(tmp[j], root);
+        tmp[0] = gf8_mul(tmp[0], root);
     }
     /* tmp[0..RS8_NROOTS]: coefficients, tmp[RS8_NROOTS] should be 1 */
     for (int j = 0; j < RS8_NROOTS; j++)
@@ -93,11 +94,9 @@ static void rsh_init(void)
 
     for (int i = 0; i < RSH_NROOTS; i++) {
         uint8_t root = gf8_exp[RSH_FCR + i];
-        for (int j = i + 1; j > 0; j--) {
-            if (tmp[j - 1] != 0)
-                tmp[j] ^= gf8_exp[(gf8_log[tmp[j - 1]] + gf8_log[root]) % 255];
-        }
-        tmp[0] = gf8_exp[(gf8_log[tmp[0]] + gf8_log[root]) % 255];
+        for (int j = i + 1; j > 0; j--)
+            tmp[j] = tmp[j - 1] ^ gf8_mul(tmp[j], root);
+        tmp[0] = gf8_mul(tmp[0], root);
     }
     for (int j = 0; j < RSH_NROOTS; j++)
         rsh_gp[j] = (tmp[j] != 0) ? gf8_log[tmp[j]] : 255;
@@ -124,8 +123,8 @@ void rs8_encode(const uint8_t *data, int dlen, uint8_t *parity)
         if (feedback != 0) {
             int fl = gf8_log[feedback];
             for (int j = 1; j < RS8_NROOTS; j++) {
-                if (rs8_gp[j] != 255)
-                    parity[j] ^= gf8_exp[fl + rs8_gp[j]];
+                if (rs8_gp[RS8_NROOTS - j] != 255)
+                    parity[j] ^= gf8_exp[fl + rs8_gp[RS8_NROOTS - j]];
             }
             memmove(parity, parity + 1, RS8_NROOTS - 1);
             parity[RS8_NROOTS - 1] = (rs8_gp[0] != 255) ? gf8_exp[fl + rs8_gp[0]] : 0;
@@ -224,7 +223,7 @@ int rs8_decode(uint8_t *block, int dlen)
     uint8_t omega[RS8_NROOTS];
     for (int i = 0; i < RS8_NROOTS; i++) {
         uint8_t v = 0;
-        for (int m = 0; m <= i && m <= L; m++)
+        for (int m = 0; m <= i; m++)
             v ^= gf8_mul(s[m], lambda[i - m]);
         omega[i] = v;
     }
@@ -251,10 +250,9 @@ int rs8_decode(uint8_t *block, int dlen)
             omega_val = gf8_mul(omega_val, xi_inv) ^ omega[j];
 
         if (sigma_prime == 0) return -1;
-        /* X_k^{FCR} = α^{xi_log * FCR} */
-        int xk_fcr_log = (int)(((uint32_t)xi_log % 255) * RS8_FCR % 255);
-        uint8_t xk_fcr = (xk_fcr_log == 0 && xi_log == 0) ? 1 : gf8_exp[xk_fcr_log];
-        uint8_t err = gf8_mul(xk_fcr, gf8_mul(omega_val, gf8_inv(sigma_prime)));
+        /* Con FCR=1 el factor X_k^(1-FCR) vale 1 (B14 punto 5: antes se
+         * multiplicaba por X_k^FCR de más). */
+        uint8_t err = gf8_mul(omega_val, gf8_inv(sigma_prime));
         if (err != 0) {
             block[pos[k]] ^= err;
             nerr++;
@@ -284,8 +282,8 @@ void rsh_encode(const uint8_t *data, int dlen, uint8_t *parity)
         if (feedback != 0) {
             int fl = gf8_log[feedback];
             for (int j = 1; j < RSH_NROOTS; j++) {
-                if (rsh_gp[j] != 255)
-                    parity[j] ^= gf8_exp[fl + rsh_gp[j]];
+                if (rsh_gp[RSH_NROOTS - j] != 255)
+                    parity[j] ^= gf8_exp[fl + rsh_gp[RSH_NROOTS - j]];
             }
             memmove(parity, parity + 1, RSH_NROOTS - 1);
             parity[RSH_NROOTS - 1] = (rsh_gp[0] != 255) ? gf8_exp[fl + rsh_gp[0]] : 0;
@@ -298,7 +296,7 @@ void rsh_encode(const uint8_t *data, int dlen, uint8_t *parity)
 
 /* ── Header shortened-RS decode (GF(2^8), 2 roots, corrects ≤1 error) ────── *
  * For a single error at symbol X with magnitude e (FCR=1, roots α^1,α^2):
- *   S0 = e·X, S1 = e·X^2  ⇒  X = S1/S0  and  e = S0.
+ *   S0 = e·X, S1 = e·X^2  ⇒  X = S1/S0  and  e = S0/X.
  * This is the standard closed-form Forney result for the 2-root/t=1 case —
  * no Berlekamp-Massey or Chien search needed. */
 int rsh_decode(uint8_t *block, int dlen)
@@ -326,7 +324,7 @@ int rsh_decode(uint8_t *block, int dlen)
     int pos    = RS8_N - 1 - xi_log - pad;
     if (pos < 0 || pos >= block_len) return -1;
 
-    uint8_t err = s[0];
+    uint8_t err = gf8_mul(s[0], gf8_inv(X));   /* S0 = e·X ⇒ e = S0/X */
     block[pos] ^= err;
 
     /* Verify */
