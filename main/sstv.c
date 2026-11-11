@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_http_server.h"
+#include "esp_spiffs.h"
 #include "cJSON.h"
 #include "rom/tjpgd.h"
 #include <stdio.h>
@@ -766,6 +767,41 @@ typedef enum {
     MP_ERROR
 } MpState;
 
+/* Espacio libre que se deja en SPIFFS al subir (metadatos y fragmentación). */
+#define SSTV_FS_MARGIN  (8 * 1024)
+
+/* true si quedan al menos n bytes libres en SPIFFS más el margen.
+ * Si no se puede consultar, devuelve true y deja que fwrite decida. */
+static bool sstv_room_for(size_t n) {
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info(NULL, &total, &used) != ESP_OK) return true;
+    size_t freeb = total > used ? total - used : 0;
+    return freeb >= n + SSTV_FS_MARGIN;
+}
+
+/* true si los 'avail' bytes de p son el inicio, aún incompleto, de pat:
+ * hay que leer más antes de decidir. */
+static bool mp_partial_match(const uint8_t *p, int avail, const char *pat, int patlen) {
+    return avail > 0 && avail < patlen && memcmp(p, pat, (size_t)avail) == 0;
+}
+
+/* Escribe n bytes en out comprobando antes el espacio libre de SPIFFS. */
+static bool mp_write(FILE *out, const uint8_t *p, size_t n, int *out_bytes, bool *no_space) {
+    if (n == 0) return true;
+    if (!sstv_room_for(n)) { *no_space = true; return false; }
+    if (fwrite(p, 1, n, out) != n) return false;
+    *out_bytes += (int)n;
+    return true;
+}
+
+/* IDF no define HTTPD_507: respuesta 507 manual. */
+static void send_507(httpd_req_t *req, const char *msg)
+{
+    httpd_resp_set_status(req, "507 Insufficient Storage");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, msg);
+}
+
 static esp_err_t sstv_upload_handler(httpd_req_t *req) {
     if ((int)req->content_len > SSTV_MAX_SIZE) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -819,36 +855,51 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
         }
     }
 
+    /* Espacio: content_len es cota superior de la imagen (incluye el multipart). */
+    if (!sstv_room_for((size_t)req->content_len)) {
+        send_507(req, "Not enough free space in SPIFFS for this image");
+        return ESP_FAIL;
+    }
+
     /* --- Streaming parse --- */
     static uint8_t rbuf[512 + MP_CARRY];  /* chunk + carry overlap */
     char img_name[SSTV_NAME_LEN] = {0};
     FILE *out = NULL;
+    bool opened   = false;  /* esta subida creó el fichero de salida */
+    bool no_space = false;  /* SPIFFS se quedó sin espacio durante la escritura */
     int  out_bytes = 0;
     MpState state = MP_FIRST_HDR;
     int carry = 0;   /* bytes carried over from previous chunk in rbuf[0..carry-1] */
     int total_left = (int)req->content_len;
-    bool done = false;
-    bool ok   = true;
 
-    while (!done && total_left > 0 && state != MP_ERROR && state != MP_DONE) {
-        int to_recv = (int)sizeof(rbuf) - carry;
-        if (to_recv > total_left) to_recv = total_left;
-        int got = httpd_req_recv(req, (char *)(rbuf + carry), to_recv);
-        if (got <= 0) { state = MP_ERROR; break; }
-        total_left -= got;
-        int buf_len = carry + got;
+    /* Cada vuelta procesa rbuf[0..buf_len-1]. Un trozo final que podría ser el
+     * inicio de un delimitador (need) se arrastra al principio de rbuf y se
+     * completa con la siguiente lectura. Si el cuerpo ya se agotó, se sale. */
+    while (state != MP_ERROR && state != MP_DONE) {
+        int buf_len = carry;
+        if (total_left > 0) {
+            int to_recv = (int)sizeof(rbuf) - carry;
+            if (to_recv > total_left) to_recv = total_left;
+            int got = httpd_req_recv(req, (char *)(rbuf + carry), to_recv);
+            if (got <= 0) { state = MP_ERROR; break; }
+            total_left -= got;
+            buf_len = carry + got;
+        } else if (carry == 0) {
+            break;  /* cuerpo agotado y nada pendiente */
+        }
         int i = 0;
+        bool need = false;  /* faltan bytes para decidir: arrastrar y leer más */
 
         /* Process the window rbuf[0..buf_len-1] */
-        while (i < buf_len && state != MP_DONE && state != MP_ERROR) {
+        while (i < buf_len && !need && state != MP_DONE && state != MP_ERROR) {
             switch (state) {
             case MP_FIRST_HDR: {
-                /* Scan for \r\n\r\n */
-                if (i + 3 < buf_len &&
-                    rbuf[i]=='\r' && rbuf[i+1]=='\n' &&
-                    rbuf[i+2]=='\r' && rbuf[i+3]=='\n') {
+                /* Scan for \r\n\r\n (puede quedar partido entre dos lecturas) */
+                if (i + 4 <= buf_len && memcmp(rbuf + i, "\r\n\r\n", 4) == 0) {
                     i += 4;
                     state = MP_NAME_VAL;
+                } else if (mp_partial_match(rbuf + i, buf_len - i, "\r\n\r\n", 4)) {
+                    need = true;
                 } else {
                     i++;
                 }
@@ -863,6 +914,8 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                      * collected byte-by-byte below. */
                     i += end_mark_len;
                     state = MP_SECOND_HDR;
+                } else if (mp_partial_match(rbuf + i, buf_len - i, end_mark, end_mark_len)) {
+                    need = true;  /* delimitador partido: leer más antes de decidir */
                 } else {
                     /* Accumulate name chars, stop at CR/LF */
                     if (rbuf[i] != '\r' && rbuf[i] != '\n') {
@@ -875,10 +928,8 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                 break;
             }
             case MP_SECOND_HDR: {
-                /* Scan for \r\n\r\n (end of second part headers) */
-                if (i + 3 < buf_len &&
-                    rbuf[i]=='\r' && rbuf[i+1]=='\n' &&
-                    rbuf[i+2]=='\r' && rbuf[i+3]=='\n') {
+                /* Scan for \r\n\r\n (end of second part headers; puede estar partido) */
+                if (i + 4 <= buf_len && memcmp(rbuf + i, "\r\n\r\n", 4) == 0) {
                     i += 4;
                     /* Sanitize image name */
                     for (char *p = img_name; *p; p++) {
@@ -906,7 +957,10 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                     snprintf(fpath, sizeof(fpath), "%s/%s", SSTV_DIR, img_name);
                     out = fopen(fpath, "wb");
                     if (!out) { state = MP_ERROR; break; }
+                    opened = true;
                     state = MP_IMAGE_DATA;
+                } else if (mp_partial_match(rbuf + i, buf_len - i, "\r\n\r\n", 4)) {
+                    need = true;
                 } else {
                     i++;
                 }
@@ -926,28 +980,20 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
                         }
                     }
                     if (found >= 0) {
-                        if (found > i && out) {
-                            size_t want = (size_t)(found - i);
-                            if (fwrite(rbuf + i, 1, want, out) != want)
-                                { ok = false; done = true; }
-                            else
-                                out_bytes += (int)want;
-                        }
-                        state = MP_DONE;
-                        done = true;
+                        if (!mp_write(out, rbuf + i, (size_t)(found - i), &out_bytes, &no_space))
+                            state = MP_ERROR;
+                        else
+                            state = MP_DONE;
                         i = buf_len; /* consume rest */
                     } else {
-                        if (out) {
-                            if (fwrite(rbuf + i, 1, (size_t)safe, out) != (size_t)safe)
-                                { ok = false; done = true; }
-                            else
-                                out_bytes += safe;
-                        }
+                        if (!mp_write(out, rbuf + i, (size_t)safe, &out_bytes, &no_space))
+                            state = MP_ERROR;
                         i += safe;
                     }
                 } else {
-                    /* Not enough data to safely check; carry remainder. */
-                    i = buf_len; /* force chunk reload with carry */
+                    /* Quedan menos de end_mark_len bytes: no basta para comprobar
+                     * el delimitador. Se arrastran (<= end_mark_len < MP_CARRY). */
+                    need = true;
                 }
                 break;
             }
@@ -957,27 +1003,36 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
             }
         }
 
-        /* Carry unprocessed tail into next iteration. */
+        /* Carry unprocessed tail into next iteration (need: <= end_mark_len bytes). */
         if (i < buf_len && state != MP_DONE && state != MP_ERROR) {
             carry = buf_len - i;
-            if (carry > MP_CARRY) carry = MP_CARRY;
-            memmove(rbuf, rbuf + (buf_len - carry), carry);
+            memmove(rbuf, rbuf + i, carry);
         } else {
             carry = 0;
         }
+        if (need && total_left == 0) break;  /* el cuerpo acabó sin delimitador */
     }
 
     if (out) fclose(out);
 
-    if (!ok || state == MP_ERROR || out_bytes == 0) {
-        /* Remove partial file */
-        if (img_name[0]) {
+    if (state != MP_DONE || out_bytes == 0) {
+        /* Remove partial file, but only if this upload created it */
+        if (opened) {
             char fpath[80];
             snprintf(fpath, sizeof(fpath), "%s/%s", SSTV_DIR, img_name);
             unlink(fpath);
         }
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                            "Upload parse error");
+        if (no_space) {
+            send_507(req, "SPIFFS full while writing the image");
+        } else if (state == MP_DONE) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty image");
+        } else if (state == MP_ERROR) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                "Upload parse error");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "Incomplete upload: closing boundary not found");
+        }
         return ESP_FAIL;
     }
 
