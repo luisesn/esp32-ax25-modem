@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Trazas en el mapa (v1.13.0)
+- ✅ `heard.c`: historial de posiciones (150 puntos, dedup por movimiento) y `GET /api/heard?track=<min>`; selector de traza en la pestaña MAPA. Test unitario. Sin probar en HW.
+
 ## 2026-11-11 — Pestaña MAPA (v1.12.0) y correcciones v1.11.2/v1.11.3
 - ✅ v1.11.2 `ax25ip.c`: valida cabecera IPv4 (IHL, longitud, checksum); los APRS con `@` (PID 0xF0) ya no se registran como `IP RX`.
 - ✅ v1.11.3 `remote_cmd.c`: un mensaje cuyo primer campo no es `tx|rx|sys` se ignora (chat con comas ya no provoca `ERR:unknown cmd`; evita ERR cruzados).

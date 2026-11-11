@@ -907,8 +907,30 @@ static esp_err_t survey_mark_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-// GET /api/heard: últimas estaciones oídas
+// GET /api/heard: últimas estaciones oídas.
+// GET /api/heard?track=<min>: historial de posiciones (trazas) de los últimos <min> minutos (0 = todo),
+// {"track":[{"call":"X-1","age":s,"lat":..,"lon":..},...]} más antiguo primero.
 static esp_err_t heard_handler(httpd_req_t *req) {
+    char q[24], v[12];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "track", v, sizeof(v)) == ESP_OK) {
+        uint32_t mins = (uint32_t)strtoul(v, NULL, 10);
+        heard_pt_t *pts = malloc(sizeof(heard_pt_t) * HEARD_TRACK_MAX);
+        if (!pts) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sin memoria"); return ESP_FAIL; }
+        int n = heard_track(pts, HEARD_TRACK_MAX, mins * 60u);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr_chunk(req, "{\"track\":[");
+        char line[96];
+        for (int i = 0; i < n; i++) {
+            snprintf(line, sizeof(line), "%s{\"call\":\"%s\",\"age\":%lu,\"lat\":%.5f,\"lon\":%.5f}",
+                     i ? "," : "", pts[i].call, (unsigned long)pts[i].age, (double)pts[i].lat, (double)pts[i].lon);
+            httpd_resp_sendstr_chunk(req, line);
+        }
+        httpd_resp_sendstr_chunk(req, "]}");
+        httpd_resp_sendstr_chunk(req, NULL);
+        free(pts);
+        return ESP_OK;
+    }
     char *buf = malloc(3072);
     if (!buf) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sin memoria"); return ESP_FAIL; }
     heard_json(buf, 3072);

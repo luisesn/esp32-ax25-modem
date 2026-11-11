@@ -15,6 +15,12 @@ void heard_init(void);
 // Si el info es una posición APRS (! = / @ sin comprimir o comprimida, o Mic-E ' `), guarda lat/lon.
 void heard_note(const uint8_t *ax25, size_t len, int q);
 
+// Historial de posiciones para trazas (hasta HEARD_TRACK_MAX puntos, más antiguo primero).
+// max_age_s = 0: todos. Devuelve nº de puntos copiados en out.
+#define HEARD_TRACK_MAX 150
+typedef struct { uint32_t age; float lat, lon; char call[10]; } heard_pt_t;
+int heard_track(heard_pt_t *out, int max, uint32_t max_age_s);
+
 // ¿Se oyó esa estación (base sin SSID + ssid) hace <= secs segundos?
 bool heard_seen_recent(const char *call, int ssid, uint32_t secs);
 

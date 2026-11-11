@@ -21,6 +21,14 @@ typedef struct {
     bool     used;
 } heard_t;
 
+// Historial de posiciones (anillo global): trazas del mapa. Sólo se guarda un punto
+// nuevo de una estación si se ha movido >~30 m respecto a su último punto.
+#define TRACK_MAX      150
+#define TRACK_MIN_MOVE 0.0003f   // grados (~33 m)
+typedef struct { uint32_t t; float lat, lon; char call[10]; } track_pt_t;
+static track_pt_t s_trk[TRACK_MAX];
+static int s_trk_head, s_trk_n;   // head = próximo hueco; n = puntos válidos
+
 static heard_t s_tab[HEARD_MAX];
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -28,6 +36,7 @@ void heard_init(void)
 {
     portENTER_CRITICAL(&s_mux);
     memset(s_tab, 0, sizeof(s_tab));
+    s_trk_head = s_trk_n = 0;
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -180,8 +189,46 @@ void heard_note(const uint8_t *ax25, size_t len, int q)
     e->last_s = t;
     e->count++;
     if (q > 0) { e->q_sum += (uint32_t)q; e->q_cnt++; }
-    if (pos_ok) { e->has_pos = true; e->lat = lat; e->lon = lon; }
+    if (pos_ok) {
+        e->has_pos = true; e->lat = lat; e->lon = lon;
+        // último punto de esta estación (del más nuevo al más viejo)
+        bool add = true;
+        for (int j = 0, idx = s_trk_head; j < s_trk_n; j++) {
+            idx = (idx + TRACK_MAX - 1) % TRACK_MAX;
+            if (strcmp(s_trk[idx].call, call) == 0) {
+                float dla = s_trk[idx].lat - lat, dlo = s_trk[idx].lon - lon;
+                if (dla < 0) dla = -dla;
+                if (dlo < 0) dlo = -dlo;
+                add = dla > TRACK_MIN_MOVE || dlo > TRACK_MIN_MOVE;
+                break;
+            }
+        }
+        if (add) {
+            track_pt_t *p = &s_trk[s_trk_head];
+            p->t = t; p->lat = lat; p->lon = lon;
+            memcpy(p->call, call, sizeof(p->call));
+            s_trk_head = (s_trk_head + 1) % TRACK_MAX;
+            if (s_trk_n < TRACK_MAX) s_trk_n++;
+        }
+    }
     portEXIT_CRITICAL(&s_mux);
+}
+
+int heard_track(heard_pt_t *out, int max, uint32_t max_age_s)
+{
+    uint32_t now = now_s();
+    int n = 0;
+    portENTER_CRITICAL(&s_mux);
+    for (int j = 0, idx = (s_trk_head + TRACK_MAX - s_trk_n) % TRACK_MAX; j < s_trk_n && n < max;
+         j++, idx = (idx + 1) % TRACK_MAX) {
+        uint32_t age = now - s_trk[idx].t;
+        if (max_age_s && age > max_age_s) continue;
+        out[n].age = age; out[n].lat = s_trk[idx].lat; out[n].lon = s_trk[idx].lon;
+        memcpy(out[n].call, s_trk[idx].call, sizeof(out[n].call));
+        n++;
+    }
+    portEXIT_CRITICAL(&s_mux);
+    return n;
 }
 
 // Copia ordenada (más reciente primero) fuera de la sección crítica.

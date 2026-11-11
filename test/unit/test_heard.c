@@ -205,6 +205,38 @@ TEST(mice_real_captured_frame)
     cJSON_Delete(r);
 }
 
+TEST(track_history_dedup_and_age_filter)
+{
+    heard_init();
+    test_time_set_us(1000LL * 1000000LL);
+    size_t n;
+    n = build_s(frame, "EA1TRK", 1, "!4321.67N/00426.72W>");     heard_note(frame, n, 0);
+    test_time_advance_us(60LL * 1000000LL);
+    n = build_s(frame, "EA1TRK", 1, "!4321.67N/00426.72W>");     heard_note(frame, n, 0);  // misma posición: no añade
+    test_time_advance_us(60LL * 1000000LL);
+    n = build_s(frame, "EA1TRK", 1, "!4322.67N/00426.72W>");     heard_note(frame, n, 0);  // ~1,8 km al norte
+    n = build_s(frame, "EA1OTH", 0, "!4300.00N/00500.00W>");     heard_note(frame, n, 0);
+    n = build_s(frame, "EA1TXT", 0, "hola sin posicion");        heard_note(frame, n, 0);  // sin posición: no entra
+    heard_pt_t pts[HEARD_TRACK_MAX];
+    int c = heard_track(pts, HEARD_TRACK_MAX, 0);
+    CHECK_EQ_INT(c, 3);
+    CHECK_STR(pts[0].call, "EA1TRK-1");
+    CHECK_EQ_INT((int)pts[0].age, 120);          // más antiguo primero
+    CHECK(fabsf(pts[1].lat - pts[0].lat) > 0.01f);
+    CHECK_STR(pts[2].call, "EA1OTH");
+    // filtro por edad: sólo lo de los últimos 30 s
+    CHECK_EQ_INT(heard_track(pts, HEARD_TRACK_MAX, 30), 2);
+    // anillo: 200 posiciones distintas -> se queda en HEARD_TRACK_MAX
+    for (int i = 0; i < 200; i++) {
+        char info[40]; snprintf(info, sizeof info, "!43%02d.00N/004%02d.00W>", i % 60, (i / 60) % 60 + 1);
+        n = build_s(frame, "EA1RNG", 0, info); heard_note(frame, n, 0);
+        test_time_advance_us(1000000LL);
+    }
+    CHECK_EQ_INT(heard_track(pts, HEARD_TRACK_MAX, 0), HEARD_TRACK_MAX);   // anillo lleno, sin desbordar
+    heard_init();
+    CHECK_EQ_INT(heard_track(pts, HEARD_TRACK_MAX, 0), 0);
+}
+
 TEST(mice_position_without_offset)
 {
     // Igual pero sin offset (dígito 5.ª = '5', no 'U'): 12°25.75'W.
@@ -486,6 +518,7 @@ int main(void)
     RUN(json_order_and_ages);
     RUN(json_buffer_sizes);
     RUN(list_console_and_buffers);
+    RUN(track_history_dedup_and_age_filter);
     RUN(init_clears_table);
     RUN(malformed_frames_no_crash);
     RUN(random_garbage_no_crash);
