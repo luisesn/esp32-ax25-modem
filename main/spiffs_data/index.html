@@ -349,7 +349,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
           <option value="-1">Sin traza</option><option value="15">Traza 15 min</option><option value="60">Traza 1 h</option>
           <option value="180">Traza 3 h</option><option value="360">Traza 6 h</option><option value="1440">Traza 24 h</option><option value="0">Traza: todas</option>
         </select>
-        <button class="map-btn" onclick="mapTrkClear()" title="Borra las posiciones acumuladas en este navegador">Limpiar trazas</button>
+        <button class="map-btn" onclick="mapTrkClear()" title="Borra las posiciones acumuladas en este navegador">Limpiar trazas locales</button>
         <span id="map-status" style="flex:1"></span>
       </div>
       <div id="map-wrap" style="flex:1;min-height:0;position:relative"><canvas id="map-cv" style="position:absolute;inset:0;width:100%;height:100%;touch-action:none;background:#070b10;border:1px solid #222;border-radius:3px"></canvas></div>
@@ -2413,7 +2413,7 @@ function mapTrkPoll(){
       mapTrk.push({call:p.call,lat:+p.lat,lon:+p.lon,t});add++;}
     if(add){mapTrk.sort((a,b)=>a.t-b.t);mapTrkSave();if(mapCv)mapDraw();}
   }).catch(()=>{});}
-function mapTrkClear(){if(!confirm('¿Limpiar las trazas guardadas en este navegador?'))return;mapTrk=[];mapTrkSave();mapDraw();}
+function mapTrkClear(){if(!confirm('¿Limpiar las trazas locales guardadas en este navegador?'))return;mapTrk=[];mapTrkSave();mapDraw();}
 function mapTrkChange(){
   mapTrkMin=+document.getElementById('map-trk').value;lsSet('maptrk',mapTrkMin);
   mapDraw();if(mapTrkMin>=0)mapTrkPoll();}
