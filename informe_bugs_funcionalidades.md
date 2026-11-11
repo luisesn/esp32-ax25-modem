@@ -107,7 +107,7 @@ Arreglo: aceptar alfanuméricos y cortar en `}`.
 
 > **Hecho 2026-11-11** — v1.7.0 (librería `76fb3c1`): `APRS_queue_msg` devuelve −1 si la cola está llena y `/api/aprs/send` responde 503 `cola TX llena`; la web muestra el error y no deja la burbuja «esperando ACK».
 
-**B9. `message_seq` sin sincronizar** — [LibAPRS.cpp](main/LibAPRS-esp32-i2s/src/LibAPRS.cpp) · **[Leído]**
+**B9. ✅ HECHO (v1.9.1) — `message_seq` sin sincronizar** — [LibAPRS.cpp](main/LibAPRS-esp32-i2s/src/LibAPRS.cpp) · **[Leído]**
 
 Contador global que incrementan varias tareas (httpd, `aprs_poll_task` vía `remote_cmd`, consola). Dos mensajes simultáneos pueden salir con el mismo ID. Probabilidad baja, arreglo trivial (atómico o sección crítica).
 
@@ -200,17 +200,17 @@ Arreglo del primer punto: decodificar la cabecera del JPEG y validar dimensiones
 - Un mensaje sin ACK queda indefinidamente "pendiente": no hay tiempo límite ni indicación de fallo (ver F1).
 - `parseAPRSPos` sólo entiende posiciones sin comprimir: Mic-E y comprimidas (la mayoría de los equipos portátiles y APRSdroid) no dan posición.
 
-**B20. Indicadores que siguen mostrando el demodulador v1** — [main/display.c](main/display.c), pestaña STATS de la web · **[Leído]**
+**B20. ✅ HECHO (v1.9.1) — Indicadores que siguen mostrando el demodulador v1** — [main/display.c](main/display.c), pestaña STATS de la web · **[Leído]**
 
 Con el v1 desactivado, la fila `APRS:` del display muestra `v1/v2` con el primer valor siempre a 0, y la pestaña STATS conserva la columna v1 vacía. Además, el contador `frames_err` del pie del LOG cuenta sobre todo CRC erróneos producidos por ruido en reposo (≈90 % según las capturas SURVEY), así que no indica calidad. Mostrar sólo v2 y, para los errores, el contador limitado a portadora (`er`).
 
-**B21. Consola RF** — [main/rf_console.c](main/rf_console.c) · **[Leído]**
+**B21. ✅ HECHO (v1.9.1) — Consola RF** — [main/rf_console.c](main/rf_console.c) · **[Leído]**
 
 - `config` vuelca el JSON completo por un enlace de 1200 bps (más de un minuto de canal). Limitarlo a un resumen o a una sección (`config aprs`).
 - Si `ax25ip` no está levantado al iniciar, la consola queda desactivada hasta el reinicio. `listen()` sin comprobar; lectura byte a byte.
 - Sólo cuatro comandos; ver F7.
 
-**B22. Diagnóstico de red** — [main/netdiag.c](main/netdiag.c) · **[Leído]**
+**B22. ✅ HECHO (v1.9.1) — Diagnóstico de red** — [main/netdiag.c](main/netdiag.c) · **[Leído]**
 
 - `POST /api/netdiag/stop` puede bloquear hasta 2 s la única tarea del servidor HTTP: en ese tiempo no se atiende ninguna otra petición.
 - `GET /api/netdiag` usa ~3,7 KB de pila (varios buffers locales) de los 8 KB de la tarea httpd. Sin margen medido; pasar los buffers a heap o `static`.
