@@ -313,7 +313,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV" aria-label="Descargar log como CSV">&#x2B07; CSV</button></div>
       <div id="log-cols"><span>HORA</span><span>ORIGEN</span><span>DESTINO</span><span>RUTA</span><span title="Calidad estimada de recepción">CALIDAD</span><span>CONTENIDO</span></div>
       <div id="log"></div>
-      <div id="log-foot"><span>En el log <b id="lf-n">0</b></span><span>CRC ok <b id="lf-ok">—</b></span><span title="Tramas con CRC erróneo: se descartan y no llegan al log">CRC erróneo <b id="lf-err">—</b></span><span style="margin-left:auto" title="Caída del ruido del canal (quieting) mientras se recibe la trama. Estimación relativa a esta radio y volumen; no es un S-meter.">Calidad = caída de ruido del canal</span></div>
+      <div id="log-foot"><span>En el log <b id="lf-n">0</b></span><span>CRC ok <b id="lf-ok">—</b></span><span title="CRC erróneos totales: ~90 % son ruido en reposo, no indican calidad. Se descartan y no llegan al log">CRC err (ruido) <b id="lf-err">—</b></span><span style="margin-left:auto" title="Caída del ruido del canal (quieting) mientras se recibe la trama. Estimación relativa a esta radio y volumen; no es un S-meter.">Calidad = caída de ruido del canal</span></div>
     </div>
     <div id="tab-chan" class="tab-pane" style="justify-content:flex-start">
       <div class="chan-cards">
@@ -409,7 +409,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         </thead>
         <tbody>
           <tr><td>Tramas CRC OK</td><td id="s-v1-ok">—</td><td id="s-v2-ok">—</td></tr>
-          <tr><td>Tramas CRC ERR</td><td id="s-v1-err">—</td><td id="s-v2-err">—</td></tr>
+          <tr><td>CRC ERR (ruido)</td><td id="s-v1-err">—</td><td id="s-v2-err">—</td></tr>
           <tr><td>Flags HDLC</td><td id="s-v1-flags">—</td><td id="s-v2-flags">—</td></tr>
           <tr><td>FIFO overflows</td><td id="s-v1-ov">—</td><td id="s-v2-ov">—</td></tr>
         </tbody>
@@ -1443,6 +1443,9 @@ function fmtAPRSLon(lon){
 let statsTimer=null;
 function loadStats(){
   api('/api/rx/stats').then(d=>{
+    const v1act=(d.v1.frames_ok+d.v1.frames_err+d.v1.hdlc_flags)>0;
+    document.querySelectorAll('.stats-v1,[id^="s-v1-"]').forEach(e=>{
+      const c=e.closest('td,th')||e;c.style.display=v1act?'':'none';});
     document.getElementById('s-v1-ok').textContent    = d.v1.frames_ok;
     document.getElementById('s-v1-err').textContent   = d.v1.frames_err;
     document.getElementById('s-v1-flags').textContent = d.v1.hdlc_flags;
