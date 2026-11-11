@@ -127,8 +127,10 @@ static bool ax25_frame_to_json(const uint8_t *buf, size_t len,
     // Repeater path
     static char path[96]; int plen = 0; path[0] = '\0';
     while (!is_last && (p + 7) <= end) {
-        char rpt[10];
+        char rpt[12];
+        bool h_bit = (p[6] & 0x80) != 0;   // H: ya repetido por este digipetidor
         p = ax25_decode_addr(p, rpt, &is_last);
+        if (h_bit) strcat(rpt, "*");
         if (plen > 0 && plen < (int)sizeof(path) - 1) path[plen++] = ',';
         int rem = (int)sizeof(path) - plen - 1;
         if (rem > 0) plen += snprintf(path + plen, rem, "%s", rpt);

@@ -1078,7 +1078,7 @@ function appendLog(src,dst,path,info,isDigi,qual,when,replay){
   d.innerHTML=`<span class="ts" title="${esc(dt.toLocaleString('es'))}">${esc(ts)}</span>`+
     `<span class="src" data-call="${esc(tp?tp.src:src)}" title="Copiar al destino">${esc(tp?tp.src:src)}</span>`+
     `<span class="dst">${esc(tp?tp.dst:dst)}</span>`+
-    `<span class="path">${tp?'vía '+esc(src):fmtHops(path)}</span>`+
+    `<span class="path">${tp?'GW '+esc(src)+(path?' · '+fmtHops(path):''):fmtHops(path)}</span>`+
     qh+
     `<span class="info">${badge}${tp?'<span class="third-badge" title="Tráfico de terceros: paquete reenviado, originado en otra estación">3RD</span>':''}${esc(dInfo)}${mapLink}</span>`;
   log.prepend(d);

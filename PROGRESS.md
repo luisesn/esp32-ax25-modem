@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Path con `*` y tráfico de terceros en el log (v1.15.1)
+- El bit H de los repetidores no se decodificaba (path sin `*`); corregido en `main.c`. En 3RD la web muestra `GW <estación>` + path externo en lugar de «vía <gateway>».
+
 ## 2026-11-11 — Enlace al pasar el ratón en el mapa (v1.15.0)
 - `/api/me` devuelve `lat`/`lon` con fix GPS; el mapa dibuja línea discontinua estación→yo (directa) o estación→digi→yo (según el path de la última trama en `logHist`). Sin probar en navegador real.
 
