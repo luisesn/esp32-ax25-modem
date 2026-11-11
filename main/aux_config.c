@@ -5,18 +5,34 @@
 #include <sys/stat.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "cJSON.h"
 #include "aux_config.h"
 #include "aux_file_management.h"
 
 static const char *TAG = "Config";
 static cJSON *root = NULL;
-// Protects `root` against config_reload() (POST /api/config, on an httpd
-// worker task) freeing/replacing it while another task is mid-cJSON_Duplicate
-// in config_get()/config_load(). cJSON_Duplicate is pure memory copying (no
-// I/O, bounded by config.json's size), so a short spinlock is appropriate —
-// unlike e.g. the repeater's TX playback, this never blocks while held.
-static portMUX_TYPE s_config_lock = portMUX_INITIALIZER_UNLOCKED;
+// Protege `root` frente a config_reload() (POST /api/config, tarea httpd) que
+// lo libera/reemplaza mientras otra tarea hace cJSON_Duplicate. Mutex FreeRTOS
+// (no sección crítica): la duplicación hace muchos malloc y no debe deshabilitar
+// interrupciones (B10). Creación perezosa y segura entre tareas.
+static portMUX_TYPE s_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_config_mutex = NULL;
+
+static SemaphoreHandle_t config_mutex(void)
+{
+    if (s_config_mutex == NULL) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        taskENTER_CRITICAL(&s_mutex_init_lock);
+        if (s_config_mutex == NULL) { s_config_mutex = m; m = NULL; }
+        taskEXIT_CRITICAL(&s_mutex_init_lock);
+        if (m) vSemaphoreDelete(m);
+    }
+    return s_config_mutex;
+}
+#define CONFIG_LOCK()   xSemaphoreTake(config_mutex(), portMAX_DELAY)
+#define CONFIG_UNLOCK() xSemaphoreGive(s_config_mutex)
 
 // Internal function to load config from file
 static cJSON *config_load_from_file() {
@@ -75,32 +91,32 @@ static cJSON *config_load_from_file() {
 // free out from under a caller still reading it. A lazy-init caller such as
 // aprs_poll_v2() in LibAPRS.cpp can run this arbitrarily long after boot.
 cJSON *config_get() {
-    taskENTER_CRITICAL(&s_config_lock);
+    CONFIG_LOCK();
     cJSON *dup = root ? cJSON_Duplicate(root, 1) : NULL;
-    taskEXIT_CRITICAL(&s_config_lock);
+    CONFIG_UNLOCK();
     return dup;
 }
 
 cJSON *config_load() {
-    taskENTER_CRITICAL(&s_config_lock);
+    CONFIG_LOCK();
     if (root != NULL) {
         ESP_LOGD(TAG, "Config already loaded, returning cached version");
         cJSON *dup = cJSON_Duplicate(root, 1); // Return a deep copy
-        taskEXIT_CRITICAL(&s_config_lock);
+        CONFIG_UNLOCK();
         return dup;
     }
-    taskEXIT_CRITICAL(&s_config_lock);
+    CONFIG_UNLOCK();
 
     // File I/O must happen outside the critical section.
     cJSON *loaded = config_load_from_file();
 
-    taskENTER_CRITICAL(&s_config_lock);
+    CONFIG_LOCK();
     if (root == NULL) {
         root = loaded;
         loaded = NULL;
     }
     cJSON *dup = root ? cJSON_Duplicate(root, 1) : NULL;
-    taskEXIT_CRITICAL(&s_config_lock);
+    CONFIG_UNLOCK();
 
     if (loaded != NULL) {
         // Lost the race to another concurrent config_load() — discard.
@@ -119,11 +135,11 @@ cJSON *config_reload() {
         return config_get();
     }
 
-    taskENTER_CRITICAL(&s_config_lock);
+    CONFIG_LOCK();
     cJSON *old = root;
     root = fresh;
     cJSON *dup = cJSON_Duplicate(root, 1);
-    taskEXIT_CRITICAL(&s_config_lock);
+    CONFIG_UNLOCK();
 
     if (old != NULL) {
         cJSON_Delete(old);
