@@ -303,6 +303,14 @@ void remote_cmd_handle(const char *src_call, int src_ssid, const char *text) {
     for (char *c = parts[0]; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
     for (char *c = parts[1]; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
 
+    // Texto de chat normal (p. ej. "hola, qué tal") o un ERR de otro equipo: si el primer
+    // campo no es un verbo conocido no es un comando; no responder (evita ERR cruzados).
+    if (strcmp(parts[0], "tx") != 0 && strcmp(parts[0], "rx") != 0 &&
+        strcmp(parts[0], "sys") != 0) {
+        ESP_LOGD(TAG, "ignorado (no es comando): %.20s", text);
+        return;
+    }
+
     if (!rate_allow(src_call, src_ssid)) {
         ESP_LOGW(TAG, "rate limit: ignoring cmd from %s-%d", src_call, src_ssid);
         return;
