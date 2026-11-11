@@ -81,8 +81,14 @@ static esp_err_t index_handler(httpd_req_t *req) {
 static esp_err_t me_handler(httpd_req_t *req) {
     char my_call[7]; int my_ssid;
     APRS_getCallsign(my_call, &my_ssid);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "{\"call\":\"%s\",\"ssid\":%d}", my_call, my_ssid);
+    char buf[112];
+    int n = snprintf(buf, sizeof(buf), "{\"call\":\"%s\",\"ssid\":%d", my_call, my_ssid);
+    gps_lock_pos();
+    GpsPosition gp = g_gps_pos;
+    gps_unlock_pos();
+    if (gp.valid)   // posición GPS en vivo (para el mapa de la web)
+        n += snprintf(buf + n, sizeof(buf) - n, ",\"lat\":%.5f,\"lon\":%.5f", gp.lat, gp.lon);
+    snprintf(buf + n, sizeof(buf) - n, "}");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, buf);
     return ESP_OK;

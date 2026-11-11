@@ -2361,6 +2361,17 @@ const MAP_K=Math.cos(43*Math.PI/180);
 let mapTrk=[],mapTrkMin=-1;
 let mapCv=null,mapCtx=null,mapW=0,mapH=0,mapC={lon:-3.5,lat:40.2},mapS=60,mapStations=[],mapMe=null,mapHover=null,mapTimer=null,mapDrag=null;
 function mapPx(lon,lat){return[mapW/2+(lon-mapC.lon)*MAP_K*mapS,mapH/2-(lat-mapC.lat)*mapS];}
+// Ruta de la última trama directa/vía digi de la estación h (según el historial del log local).
+function mapHoverRoute(h){
+  let r=null;for(let i=logHist.length-1;i>=0;i--){const x=logHist[i];if(x.k==='r'&&!x.dg&&x.src===h.call){r=x;break;}}
+  if(!r)return null;
+  const hops=(r.path||'').split(',').map(t=>t.trim()).filter(Boolean),used=hops.filter(t=>t.endsWith('*'));
+  if(!used.length)return [h,mapMe];
+  for(let i=used.length-1;i>=0;i--){
+    const d=used[i].replace(/\*$/,'');if(/^(WIDE|RELAY|TRACE|ECHO)/i.test(d))continue;
+    const s=mapStations.find(m=>m.call===d);return s?[h,s,mapMe]:null;}
+  return null;
+}
 function mapDraw(){
   if(!mapCtx)return;const c=mapCtx;c.clearRect(0,0,mapW,mapH);
   c.strokeStyle='#4a6a8a';c.lineWidth=1;c.lineJoin='round';
@@ -2378,6 +2389,11 @@ function mapDraw(){
   for(const s of mapStations){const p=mapPx(s.lon,s.lat);s._p=p;
     c.fillStyle=s.age<600?'#4caf50':'#8a8a3a';c.beginPath();c.arc(p[0],p[1],4,0,7);c.fill();
     c.fillStyle=(s===mapHover)?'#fff':'#aaa';c.fillText(s.call,p[0]+7,p[1]);}
+  if(mapHover&&mapMe){   // enlace de la estación señalada: directo → yo; vía digi con posición → digi → yo
+    const pts=mapHoverRoute(mapHover);
+    if(pts){c.save();c.strokeStyle='rgba(255,255,255,.55)';c.lineWidth=1.5;c.setLineDash([6,4]);c.beginPath();
+      pts.forEach((q,i)=>{const p=mapPx(q.lon,q.lat);i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);});c.stroke();c.restore();}
+  }
   if(mapMe){const p=mapPx(mapMe.lon,mapMe.lat);c.fillStyle='#ff5050';c.beginPath();
     for(let i=0;i<10;i++){const r=i%2?4:9,a=-Math.PI/2+i*Math.PI/5;c.lineTo(p[0]+r*Math.cos(a),p[1]+r*Math.sin(a));}c.closePath();c.fill();
     c.fillStyle='#ff9090';c.fillText(mapMe.call||'yo',p[0]+11,p[1]);}
@@ -2431,6 +2447,7 @@ function mapLoad(){
     st.style.color='#555';st.textContent=mapStations.length+' con posición · '+new Date().toLocaleTimeString('es');mapDraw();
   }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;});
   if(mapTrkMin>=0)mapTrkPoll();
+  api('/api/me').then(m=>{if(m&&m.lat!=null&&m.lon!=null){mapMe={lat:+m.lat,lon:+m.lon,call:myCall,gps:1};mapDraw();}}).catch(()=>{});
   if(!mapMe)api('/api/config').then(c=>{const g=c&&c.gps;
     if(g&&g.use_fixed&&g.fixed_lat!=null&&g.fixed_lon!=null){mapMe={lat:+g.fixed_lat,lon:+g.fixed_lon,call:myCall};mapDraw();}}).catch(()=>{});
 }

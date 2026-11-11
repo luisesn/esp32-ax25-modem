@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Enlace al pasar el ratón en el mapa (v1.15.0)
+- `/api/me` devuelve `lat`/`lon` con fix GPS; el mapa dibuja línea discontinua estación→yo (directa) o estación→digi→yo (según el path de la última trama en `logHist`). Sin probar en navegador real.
+
 ## 2026-11-11 — Historial del log en localStorage (v1.14.0)
 - ✅ El log se guarda en el navegador (≤1000 entradas / 14 días) y se repinta al abrir la web; botón «Borrar historial local»; seq del log persistida con detección de reinicio del equipo. Sin probar en navegador real.
 
