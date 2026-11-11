@@ -52,6 +52,21 @@ static bool         s_tun_mode = false;
 static char    s_call[7];
 static uint8_t s_ssid;
 
+// Valida la cabecera IPv4 (IHL, longitud total y checksum). Evita tratar como IP
+// tramas APRS con PID 0xF0 cuyo primer byte es 0x4X (p. ej. '@' = posición con hora).
+static bool ipv4_header_valid(const uint8_t *ip, size_t len)
+{
+    if (len < 20 || (ip[0] >> 4) != 4) return false;
+    size_t ihl = (size_t)(ip[0] & 0x0Fu) * 4u;
+    if (ihl < 20 || ihl > len) return false;
+    size_t tot = ((size_t)ip[2] << 8) | ip[3];
+    if (tot < ihl || tot > len) return false;
+    uint32_t sum = 0;
+    for (size_t i = 0; i < ihl; i += 2) sum += ((uint32_t)ip[i] << 8) | ip[i + 1];
+    while (sum >> 16) sum = (sum & 0xFFFFu) + (sum >> 16);
+    return (uint16_t)sum == 0xFFFFu;
+}
+
 // ── IP debug helper ───────────────────────────────────────────────────────────
 // Returns a static string: "PROTO src.ip:sport→dst.ip:dport" (or without ports
 // for ICMP/unknown). Not re-entrant; consumed immediately by ESP_LOG*.
@@ -405,6 +420,10 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     }
     if (ip_len < 20) {
         ESP_LOGW(TAG, "drop: IP payload too short (%u bytes)", (unsigned)ip_len);
+        return;
+    }
+    if (!ipv4_header_valid(p, ip_len)) {
+        ESP_LOGD(TAG, "skip: cabecera IPv4 no válida (¿APRS con PID 0x%02X?)", pid);
         return;
     }
 
