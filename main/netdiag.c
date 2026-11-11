@@ -47,6 +47,7 @@ static uint32_t   s_total;            // bytes escritos desde el inicio de la op
 static uint32_t   s_gen;
 static nd_mode_t  s_mode;             // protegido por s_mx
 static volatile bool s_abort;
+static bool       s_stopping;         // stop pedido, worker aún cerrándose (protegido por s_mx)
 static volatile bool s_connected;
 static bool       s_telnet;           // TCP con negociación IAC rechazada
 static volatile uint32_t s_rx_pkts, s_rx_bytes;   // recibidos en la operación actual
@@ -199,6 +200,7 @@ static void finish(uint32_t gen)
     if (s_fd >= 0) { close(s_fd); s_fd = -1; }
     s_connected = false;
     s_ping_task = NULL;
+    s_stopping = false;
     s_mode = ND_IDLE;
     xSemaphoreGive(s_mx);
 }
@@ -509,6 +511,7 @@ static bool begin_op(nd_mode_t mode, const char *host, uint16_t port)
     if (s_mode == ND_IDLE) {
         s_mode = mode;
         s_abort = false;
+        s_stopping = false;
         s_connected = false;
         s_rx_pkts = s_rx_bytes = 0;
         s_total = 0;
@@ -519,6 +522,16 @@ static bool begin_op(nd_mode_t mode, const char *host, uint16_t port)
     }
     xSemaphoreGive(s_mx);
     return ok;
+}
+
+// 409 distinguiendo "ocupado" de "parando" (stop pedido, worker aún cerrando).
+static esp_err_t busy_reply(httpd_req_t *req)
+{
+    xSemaphoreTake(s_mx, portMAX_DELAY);
+    bool stopping = s_stopping;
+    xSemaphoreGive(s_mx);
+    return reply(req, "409 Conflict", stopping ? "{\"error\":\"parando la operación anterior\",\"stopping\":true}"
+                                              : "{\"error\":\"hay otra operación en curso\"}");
 }
 
 static esp_err_t ping_handler(httpd_req_t *req)
@@ -532,12 +545,13 @@ static esp_err_t ping_handler(httpd_req_t *req)
     cJSON *jc = cJSON_GetObjectItem(j, "count"), *js = cJSON_GetObjectItem(j, "size");
     int count = cJSON_IsNumber(jc) ? (int)jc->valuedouble : 1;
     int size  = cJSON_IsNumber(js) ? (int)js->valuedouble : 32;
-    s_ping_count = count < 1 ? 1 : (count > 10 ? 10 : count);
-    s_ping_size  = size < 1 ? 1 : (size > 200 ? 200 : size);
     if (!begin_op(ND_PING, jh->valuestring, 0)) {
         cJSON_Delete(j);
-        return reply(req, "409 Conflict", "{\"error\":\"hay otra operación en curso\"}");
+        return busy_reply(req);
     }
+    // Tras begin_op: si se escribieran antes, un ping en curso vería parámetros ajenos.
+    s_ping_count = count < 1 ? 1 : (count > 10 ? 10 : count);
+    s_ping_size  = size < 1 ? 1 : (size > 200 ? 200 : size);
     cJSON_Delete(j);
     if (xTaskCreate(ping_task, "nd_ping", 4096, NULL, 3, &s_ping_task) != pdPASS) {
         buf_printf("Error creando la tarea\n");
@@ -562,7 +576,7 @@ static esp_err_t connect_handler(httpd_req_t *req)
     bool telnet = cJSON_IsString(jt) && strcmp(jt->valuestring, "telnet") == 0;
     if (!begin_op(udp ? ND_UDP : ND_TCP, jh->valuestring, (uint16_t)port)) {
         cJSON_Delete(j);
-        return reply(req, "409 Conflict", "{\"error\":\"hay otra operación en curso\"}");
+        return busy_reply(req);
     }
     s_telnet = telnet;   // el worker aún no ha arrancado
     cJSON_Delete(j);
@@ -622,20 +636,18 @@ static esp_err_t send_handler(httpd_req_t *req)
     return reply(req, NULL, "{\"ok\":true}");
 }
 
+// No espera: sólo activa la bandera. Los workers la comprueban cada 250 ms,
+// cierran el socket/sesión por sí mismos y llaman a finish() (que vuelve a IDLE).
+// Mientras tanto begin_op rechaza nuevas operaciones (s_mode != IDLE) y el
+// estado se publica como "stopping". No se fuerza el reinicio: un worker atascado
+// (p. ej. DNS) termina por su propio timeout y no queda ningún hilo huérfano
+// escribiendo en el estado de una operación nueva.
 static esp_err_t stop_handler(httpd_req_t *req)
 {
-    s_abort = true;
-    // Los workers comprueban s_abort cada 250 ms; si tras 2 s sigue ocupada
-    // (p. ej. atascado en DNS) se fuerza el reinicio del estado.
-    for (int i = 0; i < 20 && s_mode != ND_IDLE; i++) vTaskDelay(pdMS_TO_TICKS(100));
     xSemaphoreTake(s_mx, portMAX_DELAY);
     if (s_mode != ND_IDLE) {
-        ESP_LOGW(TAG, "stop: operacion atascada, forzando reinicio");
-        if (s_fd >= 0) { close(s_fd); s_fd = -1; }
-        s_connected = false;
-        s_mode = ND_IDLE;
-        s_gen++;
-        s_total = 0;
+        s_abort = true;
+        s_stopping = true;
     }
     xSemaphoreGive(s_mx);
     return reply(req, NULL, "{\"ok\":true}");
@@ -651,19 +663,25 @@ static esp_err_t status_handler(httpd_req_t *req)
         if (httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK) since = strtoul(v, NULL, 10);
     }
 
-    char head[320];
+    // Buffers en heap (~3,7 KB): la pila de httpd es de 8 KB y se comparte con el resto de handlers.
+    typedef struct { char head[360]; char chunk[256]; char esc[520]; char tail[1500]; tx_ev_t h[TX_HIST]; } st_bufs_t;
+    st_bufs_t *B = malloc(sizeof(*B));
+    if (!B) return reply(req, "503 Service Unavailable", "{\"error\":\"sin memoria\"}");
+    char *head = B->head, *chunk = B->chunk, *esc = B->esc, *tail = B->tail;
+    tx_ev_t *h = B->h;
     uint32_t total, from, gen;
     nd_mode_t mode;
+    bool stopping;
     xSemaphoreTake(s_mx, portMAX_DELAY);
-    total = s_total; gen = s_gen; mode = s_mode;
+    total = s_total; gen = s_gen; mode = s_mode; stopping = s_stopping;
     from = (gen_c == gen) ? since : 0;
     if (from > total) from = 0;
     if (total - from > BUF_SZ) from = total - BUF_SZ;
-    int hn = snprintf(head, sizeof(head),
-        "{\"mode\":\"%s\",\"telnet\":%s,\"connected\":%s,\"host\":\"%s\",\"port\":%u,"
+    int hn = snprintf(head, sizeof(B->head),
+        "{\"mode\":\"%s\",\"stopping\":%s,\"telnet\":%s,\"connected\":%s,\"host\":\"%s\",\"port\":%u,"
         "\"rx_pkts\":%lu,\"rx_bytes\":%lu,"
         "\"gen\":%lu,\"from\":%lu,\"total\":%lu,\"text\":\"",
-        MODE_NAME[mode], s_telnet ? "true" : "false",
+        MODE_NAME[mode], stopping ? "true" : "false", s_telnet ? "true" : "false",
         s_connected ? "true" : "false", s_host, s_port,
         (unsigned long)s_rx_pkts, (unsigned long)s_rx_bytes,
         (unsigned long)gen, (unsigned long)from, (unsigned long)total);
@@ -672,10 +690,9 @@ static esp_err_t status_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     esp_err_t se = httpd_resp_send_chunk(req, head, hn);
 
-    char chunk[256], esc[520];
     uint32_t pos = from;
     while (pos < total) {
-        size_t n = total - pos > sizeof(chunk) ? sizeof(chunk) : total - pos;
+        size_t n = total - pos > sizeof(B->chunk) ? sizeof(B->chunk) : total - pos;
         xSemaphoreTake(s_mx, portMAX_DELAY);
         for (size_t i = 0; i < n; i++) chunk[i] = s_buf[(pos + i) % BUF_SZ];
         xSemaphoreGive(s_mx);
@@ -691,30 +708,29 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
 
     // Panel de debug TX
-    tx_ev_t h[TX_HIST];
     uint32_t cnt, sent;
     portENTER_CRITICAL(&s_tx_mux);
-    memcpy(h, s_tx_hist, sizeof(h));
+    memcpy(h, s_tx_hist, sizeof(B->h));
     cnt = s_tx_count;
     sent = s_sent_count;
     portEXIT_CRITICAL(&s_tx_mux);
     int64_t now = esp_timer_get_time();
-    char tail[1500];
-    int t = snprintf(tail, sizeof(tail),
+    int t = snprintf(tail, sizeof(B->tail),
         "\",\"tx\":{\"pending\":%d,\"dropped\":%lu,\"sent\":%lu,\"post_rx_ms\":%lu,\"recent\":[",
         afsk_tx_queue_pending(), (unsigned long)afsk_tx_dropped_count(),
         (unsigned long)sent, (unsigned long)afsk_get_post_rx_tx_delay_ms());
     uint32_t shown = cnt < TX_HIST ? cnt : TX_HIST;
-    for (uint32_t i = 0; i < shown && t < (int)sizeof(tail) - 120; i++) {
+    for (uint32_t i = 0; i < shown && t < (int)sizeof(B->tail) - 120; i++) {
         const tx_ev_t *ev = &h[(cnt - 1 - i) % TX_HIST];
-        t += snprintf(tail + t, sizeof(tail) - t,
+        t += snprintf(tail + t, sizeof(B->tail) - t,
             "%s{\"age_s\":%lu,\"dir\":\"%c\",\"len\":%u,\"src\":\"%s\",\"dst\":\"%s\",\"info\":\"%s\",\"pid\":%d}",
             i ? "," : "", (unsigned long)((now - ev->t_us) / 1000000), ev->dir, ev->len,
             ev->src, ev->dst, ev->info, ev->pid);
     }
-    t += snprintf(tail + t, sizeof(tail) - t, "]}}");
+    t += snprintf(tail + t, sizeof(B->tail) - t, "]}}");
     if (se == ESP_OK) se = httpd_resp_send_chunk(req, tail, t);
     if (se == ESP_OK) se = httpd_resp_send_chunk(req, NULL, 0);
+    free(B);
     if (se != ESP_OK)
         ESP_LOGW(TAG, "status: envio fallido (%s), heap libre %u, minimo %u",
                  esp_err_to_name(se), (unsigned)esp_get_free_heap_size(),
