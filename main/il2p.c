@@ -566,6 +566,8 @@ static void il2p_tx(const uint8_t *data, size_t len, bool raw)
     if (AFSK_modem) AFSK_modem->il2p_tx = false;
 }
 
+bool il2p_is_enabled(void) { return s_enabled; }
+
 void il2p_tx_frame(const uint8_t *ax25_raw, size_t len) { il2p_tx(ax25_raw, len, false); }
 void il2p_tx_raw(const uint8_t *data, size_t len)       { il2p_tx(data, len, true); }
 

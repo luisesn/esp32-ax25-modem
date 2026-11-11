@@ -26,6 +26,7 @@ extern "C" {
 
 /* Initialize IL2P. Must be called after AFSK_init(). */
 void il2p_init(bool enabled, ax25_raw_callback_t cb);
+bool il2p_is_enabled(void);
 
 /* Feed one NRZI-decoded bit from each modem.
  * modem_id: 0 = v1 (AFSK_adc_isr), 1 = v2 (afsk_v2_process).

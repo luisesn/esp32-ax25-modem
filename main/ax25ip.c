@@ -1,4 +1,5 @@
 #include "ax25ip.h"
+#include "il2p.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,7 +24,6 @@
 #define TAG "ax25ip"
 
 // RFC 1226 / AX.25 UI constants
-#define AX25_CTRL_UI   0x03u
 #define AX25_PID_IP    0xCCu
 
 // Hard ceiling for the IP payload of one AX.25 frame, used to size the TX
@@ -168,7 +168,9 @@ static err_t ax25ip_output(struct netif *netif, struct pbuf *p,
         return ERR_MEM;
     }
 
-    if (s_tun_mode) {
+    // Con IL2P activo el IP va como trama AX.25 UI estándar (PID 0xCC, tipo 1 de IL2P),
+    // interoperable con Dire Wolf; sin IL2P, en modo TUN se mantiene el formato tncattach.
+    if (s_tun_mode && !il2p_is_enabled()) {
         // TUN mode: prepend Linux TUN PI header (flags=0x0000, proto=IPv4 0x0800).
         // tncattach reads this 4-byte header from the TUN fd before the IP packet.
         uint8_t frame[4 + AX25IP_MTU_MAX];
@@ -330,33 +332,29 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     // No AX.25 DST/SRC/CTRL/PID headers are present.
     if (s_tun_mode) {
         // Expect: 00 00 08 00 (PI: flags=0, proto=IPv4) + IPv4 header (≥20 bytes)
-        if (len < 8 || buf[0] != 0x00 || buf[1] != 0x00 ||
-            buf[2] != 0x08 || buf[3] != 0x00 || (buf[4] & 0xF0u) != 0x40u) {
-            // Tráfico normal: on_ax25_raw_frame() nos pasa TODA trama recibida por
-            // RF, y las APRS de terceros (dst "APxxxx" → hdr 82A0...) no llevan la
-            // cabecera PI de TUN. No es un error, así que va en DEBUG.
-            ESP_LOGD(TAG, "TUN: drop: not a TUN-IP frame (len=%u hdr=%02X%02X%02X%02X)",
-                     (unsigned)len, buf[0], buf[1], buf[2], buf[3]);
+        if (len >= 8 && buf[0] == 0x00 && buf[1] == 0x00 &&
+            buf[2] == 0x08 && buf[3] == 0x00 && (buf[4] & 0xF0u) == 0x40u) {
+            size_t ip_len = len - 4;
+            if (ip_len < 20) {
+                ESP_LOGW(TAG, "TUN: drop: IP payload too short (%u bytes)", (unsigned)ip_len);
+                return;
+            }
+            struct pbuf *q = pbuf_alloc(PBUF_RAW, (uint16_t)ip_len, PBUF_RAM);
+            if (!q) {
+                ESP_LOGW(TAG, "TUN: pbuf_alloc failed (%u bytes)", (unsigned)ip_len);
+                return;
+            }
+            memcpy(q->payload, buf + 4, ip_len);
+            ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP  %s", (unsigned)ip_len, ip_info(buf + 4, ip_len));
+            ws_log_ip("RX", buf + 4, ip_len);
+            if (s_netif.input(q, &s_netif) != ERR_OK) {
+                ESP_LOGW(TAG, "TUN: lwIP input rejected pbuf");
+                pbuf_free(q);
+            }
             return;
         }
-        size_t ip_len = len - 4;
-        if (ip_len < 20) {
-            ESP_LOGW(TAG, "TUN: drop: IP payload too short (%u bytes)", (unsigned)ip_len);
-            return;
-        }
-        struct pbuf *q = pbuf_alloc(PBUF_RAW, (uint16_t)ip_len, PBUF_RAM);
-        if (!q) {
-            ESP_LOGW(TAG, "TUN: pbuf_alloc failed (%u bytes)", (unsigned)ip_len);
-            return;
-        }
-        memcpy(q->payload, buf + 4, ip_len);
-        ESP_LOGI(TAG, "RX %u bytes TUN-IP←RF → lwIP  %s", (unsigned)ip_len, ip_info(buf + 4, ip_len));
-        ws_log_ip("RX", buf + 4, ip_len);
-        if (s_netif.input(q, &s_netif) != ERR_OK) {
-            ESP_LOGW(TAG, "TUN: lwIP input rejected pbuf");
-            pbuf_free(q);
-        }
-        return;
+        // Si no lleva cabecera PI, puede ser una trama AX.25 UI con IP (IL2P estándar):
+        // sigue por el analizador AX.25 (que sólo acepta UI con PID IP e IPv4 válido).
     }
 
     if (len < 18) {
@@ -390,17 +388,21 @@ void ax25ip_rx_frame(const uint8_t *buf, size_t len)
     uint8_t pid  = *p++;
 
     if (ctrl != AX25_CTRL_UI) {
-        ESP_LOGW(TAG, "drop: not UI frame (ctrl=0x%02X)", ctrl);
+        ESP_LOGD(TAG, "drop: not UI frame (ctrl=0x%02X)", ctrl);
         return;
     }
     // Accept both RFC 1226 IP PID (0xCC) and AX.25 no-layer-3 PID (0xF0).
     // tncattach (markqvist) uses 0xF0 by default; kissattach and some APRS TNCs use 0xCC.
     if (pid != AX25_PID_IP && pid != 0xF0u) {
-        ESP_LOGW(TAG, "skip: pid=0x%02X (not IP 0xCC or 0xF0)", pid);
+        ESP_LOGD(TAG, "skip: pid=0x%02X (not IP 0xCC or 0xF0)", pid);
         return;
     }
 
     size_t ip_len = (size_t)(end - p);
+    if (ip_len >= 1 && (p[0] & 0xF0u) != 0x40u) {
+        ESP_LOGD(TAG, "skip: payload is not IPv4 (pid=0x%02X)", pid);
+        return;
+    }
     if (ip_len < 20) {
         ESP_LOGW(TAG, "drop: IP payload too short (%u bytes)", (unsigned)ip_len);
         return;

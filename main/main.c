@@ -724,19 +724,6 @@ static void audio_sample_hook(int8_t sample) {
 // netdiag y delega en la función real (AX.25 o smart_tx_frame con IL2P).
 static void (*s_real_tx_fn)(const uint8_t *, size_t) = NULL;
 
-// Tramas del modo TUN de ax25ip.c: cabecera PI 00 00 08 00 + IPv4, sin
-// direcciones AX.25. Con IL2P van como bytes opacos (cabecera tipo 0, con FEC);
-// smart_tx_frame las interpretaría como AX.25 y las corrompería.
-static void smart_tx_or_tun(const uint8_t *data, size_t len)
-{
-    if (len >= 5 && data[0] == 0x00 && data[1] == 0x00 &&
-        data[2] == 0x08 && data[3] == 0x00 && (data[4] & 0xF0) == 0x40) {
-        il2p_tx_raw(data, len);
-        return;
-    }
-    smart_tx_frame(data, len);
-}
-
 static void tx_noted_frame(const uint8_t *data, size_t len)
 {
     netdiag_note_tx(data, len);
@@ -818,7 +805,7 @@ void app_main(void)
         }
         il2p_init(il2p_en, on_ax25_raw_frame);
         if (il2p_en)
-            s_real_tx_fn = smart_tx_or_tun;
+            s_real_tx_fn = smart_tx_frame;
         config_free_json(boot_cfg);
     }
 
