@@ -34,6 +34,13 @@
 #define RECONNECT_MAX_ROUNDS    5
 #define RECONNECT_BACKOFF_BASE_US (5LL * 1000000LL)
 #define RECONNECT_BACKOFF_MAX_US  (60LL * 1000000LL)
+// Desde el AP de respaldo se reintenta STA cada AP_RETRY_STA_US, solo si no hay
+// clientes asociados al AP (bajar el AP los echaría).
+#define AP_RETRY_STA_US     (5LL * 60LL * 1000000LL)
+// Escritura al cliente KISS desde el hook de RX: espera máxima por send() y
+// nº de descartes seguidos tras los que se da el cliente por colgado.
+#define KISS_SEND_TIMEOUT_MS   150
+#define KISS_SEND_MAX_DROPS    100
 #define ASSOC_RETRY_MS      1000                // reintento de asociación dentro del timeout
 
 static EventGroupHandle_t s_wifi_eg;
@@ -448,8 +455,10 @@ static void wifi_enter_fallback(void) {
         ESP_LOGW(TAG, "Ninguna red guardada disponible. Iniciando AP de respaldo...");
         snprintf(g_wifi_status.ssid, sizeof(g_wifi_status.ssid), "%s", s_ap_ssid);
         if (wifi_start_ap(s_ap_ssid, s_ap_pass)) {
-            // Estado terminal: se sale del hotspot reiniciando o reconfigurando.
+            // Cada AP_RETRY_STA_US la tarea de reconexión reintenta STA si no hay clientes.
             g_wifi_status.state = WIFI_STATUS_HOTSPOT;
+            // Reintento periódico de STA (ver wifi_reconnect_task).
+            if (s_net_count > 0) schedule_retry(AP_RETRY_STA_US);
             return;
         }
         ESP_LOGE(TAG, "El AP de respaldo no arrancó.");
@@ -558,6 +567,11 @@ static void server_task(void *arg) {
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
 
+        // Los envíos (hook de RX, aprs_poll_task) no deben bloquear: con el
+        // cliente sin leer, send() expira y la trama se descarta.
+        struct timeval snd_tv = { .tv_sec = 0, .tv_usec = KISS_SEND_TIMEOUT_MS * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
+
         s_client_fd = fd;
 
         uint8_t buf[256];
@@ -583,9 +597,25 @@ static void wifi_reconnect_task(void *arg) {
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // En hotspot no se reintenta: bajar el AP echaría a los clientes
-        // conectados (que es justo el modo en que se reconfigura el nodo).
-        if (g_wifi_status.state == WIFI_STATUS_HOTSPOT) continue;
+        // En hotspot solo se reintenta STA si no hay clientes asociados: bajar
+        // el AP los echaría (es el modo en que se reconfigura el nodo).
+        if (g_wifi_status.state == WIFI_STATUS_HOTSPOT) {
+            wifi_sta_list_t sl = {0};
+            if (esp_wifi_ap_get_sta_list(&sl) != ESP_OK || sl.num > 0) {
+                ESP_LOGI(TAG, "AP con clientes: no se reintenta STA ahora");
+                schedule_retry(AP_RETRY_STA_US);
+                continue;
+            }
+            ESP_LOGI(TAG, "AP sin clientes: reintentando las redes guardadas...");
+            if (wifi_try_saved_nets()) {
+                fail_rounds = 0;
+            } else {
+                // La radio quedó parada: volver al AP (reprograma el reintento).
+                fail_rounds = 0;
+                wifi_enter_fallback();
+            }
+            continue;
+        }
 
         esp_timer_stop(s_reconnect_timer);
         ESP_LOGI(TAG, "Reconexión: probando %d red(es) guardada(s)...", s_net_count);
@@ -622,10 +652,36 @@ static void wifi_transport_init(void) {
 
 static void wifi_transport_write(const uint8_t *buf, size_t len) {
     int fd = s_client_fd;
-    if (fd >= 0) {
-        if (send(fd, buf, len, 0) < 0) {
-            ESP_LOGD(TAG, "send() falló (%d), cliente probablemente desconectado", errno);
+    if (fd < 0) return;
+
+    // Único camino de envío al cliente: una trama KISS por llamada, con
+    // SO_SNDTIMEO del socket (150 ms) como tope de espera.
+    static int s_drops = 0;
+    size_t sent = 0;
+    int err = 0;
+    while (sent < len) {
+        int n = send(fd, buf + sent, len - sent, 0);
+        if (n > 0) { sent += (size_t)n; continue; }
+        err = errno;
+        break;
+    }
+    if (sent == len) { s_drops = 0; return; }
+
+    if (err == EAGAIN || err == EWOULDBLOCK) {
+        // Cliente que no lee. Con envío parcial el flujo KISS queda cortado a
+        // media trama: cerrar la conexión (server_task limpia al ver el recv).
+        if (sent > 0 || ++s_drops >= KISS_SEND_MAX_DROPS) {
+            ESP_LOGW(TAG, "Cliente KISS no lee (%u/%u B, %d descartes): cerrando",
+                     (unsigned)sent, (unsigned)len, s_drops);
+            s_drops = 0;
+            shutdown(fd, SHUT_RDWR);
+        } else if (s_drops == 1 || s_drops % 20 == 0) {
+            ESP_LOGW(TAG, "Cliente KISS lento: trama descartada (%d seguidas)", s_drops);
         }
+    } else {
+        // Error real (reset, EBADF...): el recv de server_task cerrará el socket.
+        ESP_LOGD(TAG, "send() falló (%d), cliente probablemente desconectado", err);
+        if (sent > 0) shutdown(fd, SHUT_RDWR);
     }
 }
 
