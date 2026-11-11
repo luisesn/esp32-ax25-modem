@@ -345,10 +345,11 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <button class="map-btn" onclick="mapView('fit')" title="Encuadra las estaciones con posición y la propia">AJUSTAR</button>
         <button class="map-btn" onclick="mapZoom(1.5)">+</button>
         <button class="map-btn" onclick="mapZoom(1/1.5)">−</button>
-        <select id="map-trk" class="map-btn" onchange="mapTrkChange()" title="Traza: historial de posiciones de cada estación (se pierde al reiniciar; máx. 150 puntos)">
+        <select id="map-trk" class="map-btn" onchange="mapTrkChange()" title="Traza: posiciones de cada estación. El navegador las acumula (localStorage, máx. 3000 puntos / 7 días) mientras la web está abierta">
           <option value="-1">Sin traza</option><option value="15">Traza 15 min</option><option value="60">Traza 1 h</option>
-          <option value="180">Traza 3 h</option><option value="360">Traza 6 h</option><option value="0">Traza: todas</option>
+          <option value="180">Traza 3 h</option><option value="360">Traza 6 h</option><option value="1440">Traza 24 h</option><option value="0">Traza: todas</option>
         </select>
+        <button class="map-btn" onclick="mapTrkClear()" title="Borra las posiciones acumuladas en este navegador">Limpiar trazas</button>
         <span id="map-status" style="flex:1"></span>
       </div>
       <div id="map-wrap" style="flex:1;min-height:0;position:relative"><canvas id="map-cv" style="position:absolute;inset:0;width:100%;height:100%;touch-action:none;background:#070b10;border:1px solid #222;border-radius:3px"></canvas></div>
@@ -2002,7 +2003,7 @@ function repRefresh(){
   }).catch(e=>console.warn('squelch status:',e.message));
 }
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
-window.addEventListener('load',()=>{connectWS();loadVersion();api('/api/me').then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;if(chatContact)openChat(chatContact.call,chatContact.ssid);}).catch(e=>console.warn('me:',e.message));repRefresh();});
+window.addEventListener('load',()=>{mapTrkLoad();mapTrkPoll();setInterval(mapTrkPoll,30000);connectWS();loadVersion();api('/api/me').then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;if(chatContact)openChat(chatContact.call,chatContact.ssid);}).catch(e=>console.warn('me:',e.message));repRefresh();});
 // ── Diagnóstico de red ───────────────────────────────────────────────────
 let netGen=-1,netSince=0,netTimer=null,netFormInit=false,netBusy=false;
 function netPost(path,body){
@@ -2327,7 +2328,7 @@ function mapDraw(){
   c.strokeStyle='#4a6a8a';c.lineWidth=1;c.lineJoin='round';
   for(const[lo,la]of MAP_LINES){c.beginPath();for(let i=0;i<lo.length;i++){const p=mapPx(lo[i],la[i]);i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);}c.stroke();}
   if(mapTrkMin>=0&&mapTrk.length){
-    const by={};for(const p of mapTrk)(by[p.call]=by[p.call]||[]).push(p);
+    const cut=mapTrkMin>0?Date.now()-mapTrkMin*60000:0,by={};for(const p of mapTrk)if(p.t>=cut)(by[p.call]=by[p.call]||[]).push(p);
     c.lineWidth=2;c.lineJoin='round';
     for(const k in by){const a=by[k];let h=0;for(let i=0;i<k.length;i++)h=(h*31+k.charCodeAt(i))%360;
       c.strokeStyle=c.fillStyle='hsl('+h+',70%,60%)';
@@ -2391,13 +2392,31 @@ function mapLoad(){
     mapStations=((d&&d.heard)||[]).filter(h=>h.lat!=null&&h.lon!=null).map(h=>({call:h.call,age:h.age,lat:+h.lat,lon:+h.lon}));
     st.style.color='#555';st.textContent=mapStations.length+' con posición · '+new Date().toLocaleTimeString('es');mapDraw();
   }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;});
-  if(mapTrkMin>=0)api('/api/heard?track='+mapTrkMin).then(d=>{mapTrk=(d&&d.track)||[];mapDraw();}).catch(()=>{});
+  if(mapTrkMin>=0)mapTrkPoll();
   if(!mapMe)api('/api/config').then(c=>{const g=c&&c.gps;
     if(g&&g.use_fixed&&g.fixed_lat!=null&&g.fixed_lon!=null){mapMe={lat:+g.fixed_lat,lon:+g.fixed_lon,call:myCall};mapDraw();}}).catch(()=>{});
 }
+// Acumulación local: el equipo guarda sólo 150 puntos y los pierde al reiniciar; el navegador los
+// convierte a hora absoluta (ahora − age) y los conserva en localStorage.
+const MAPTRK_MAX=3000,MAPTRK_MAXAGE=7*864e5;
+function mapTrkLoad(){try{const a=JSON.parse(lsGet('maptrk_pts')||'[]');
+  mapTrk=a.map(x=>({call:x[0],lat:x[1],lon:x[2],t:x[3]}));}catch(_){mapTrk=[];}}
+function mapTrkSave(){
+  const cut=Date.now()-MAPTRK_MAXAGE;mapTrk=mapTrk.filter(p=>p.t>=cut);
+  if(mapTrk.length>MAPTRK_MAX)mapTrk=mapTrk.slice(-MAPTRK_MAX);
+  lsSet('maptrk_pts',JSON.stringify(mapTrk.map(p=>[p.call,p.lat,p.lon,p.t])));}
+function mapTrkPoll(){
+  return api('/api/heard?track=0').then(d=>{
+    const now=Date.now();let add=0;
+    for(const p of ((d&&d.track)||[])){const t=now-p.age*1000;
+      if(mapTrk.some(q=>q.call===p.call&&Math.abs(q.lat-p.lat)<1e-5&&Math.abs(q.lon-p.lon)<1e-5&&Math.abs(q.t-t)<30000))continue;
+      mapTrk.push({call:p.call,lat:+p.lat,lon:+p.lon,t});add++;}
+    if(add){mapTrk.sort((a,b)=>a.t-b.t);mapTrkSave();if(mapCv)mapDraw();}
+  }).catch(()=>{});}
+function mapTrkClear(){if(!confirm('¿Limpiar las trazas guardadas en este navegador?'))return;mapTrk=[];mapTrkSave();mapDraw();}
 function mapTrkChange(){
   mapTrkMin=+document.getElementById('map-trk').value;lsSet('maptrk',mapTrkMin);
-  if(mapTrkMin<0){mapTrk=[];mapDraw();}else mapLoad();}
+  mapDraw();if(mapTrkMin>=0)mapTrkPoll();}
 function mapStart(){const v=lsGet('maptrk');if(v!=null&&mapTrkMin<0&&[...document.getElementById('map-trk').options].some(o=>o.value===v)){mapTrkMin=+v;document.getElementById('map-trk').value=v;}
   mapInit();mapResize();mapLoad();clearInterval(mapTimer);mapTimer=setInterval(mapLoad,10000);}
 function mapStop(){clearInterval(mapTimer);mapTimer=null;}
