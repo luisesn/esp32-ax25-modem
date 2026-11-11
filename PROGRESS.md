@@ -527,7 +527,7 @@ Resumen de lo incorporado desde la entrada de 2026-06-05 (según el código actu
 - **Tráfico de terceros** parseado y mostrado en el log APRS.
 - **Baliza GPS periódica** (`gps.use_for_beacon`, `gps.beacon_period_s`) y pines GPS documentados correctamente (RX=GPIO4, TX=GPIO16).
 - **Consola RF** por TCP y/o UDP (`console.tcp`, `console.udp`).
-- **LBT + inhibición post-RX** (`tx.lbt_enabled`, `tx.lbt_max_wait_ms`, `aprs.post_rx_tx_delay_ms`); LBT sólo efectivo con squelch HFNE activo.
+- **LBT + inhibición post-RX** (`tx.lbt_enabled`, `tx.lbt_max_wait_ms`, `aprs.post_rx_tx_delay_ms`); LBT sólo efectivo con squelch HFNE activo (obsoleto desde v1.4.x: usa `carrier_detect`).
 - **`APRS_poll()` en `aprs_poll_task`** (prio 9), desacoplado de `receive_audio_task`.
 - **`sdkconfig.defaults` completo**: `idf.py reconfigure` desde cero regenera un `sdkconfig` idéntico.
 - Dependencia `esp-dsp` eliminada de `idf_component.yml`; binario ≈ 928 KB (≈ 46 % libre).
@@ -595,5 +595,10 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 
 - ⬜ **Códec Reed-Solomon defectuoso** (`rs_codec.c`, B14): compilado en host, rechaza todos los bloques aunque no tengan errores → la RX IL2P no entrega tramas. Cinco correcciones identificadas y validadas en host (0–8 errores corregidos en 300/300 bloques); sin aplicar.
 - ⬜ **Subida SSTV** (`sstv_upload_handler`, B15): pierde ≈7 % de los bytes de cada imagen (simulación del bucle); sin aplicar.
-- ⬜ **Morse/SSTV/repetidor sin LBT ni inhibición post-RX** (B16); rutas de error de SSTV (B17); squelch HFNE envía WS desde `receive_audio_task` (B18); chat web (B19); indicadores del v1 (B20); consola RF (B21); `netdiag` (B22).
+- ✅ **Morse/SSTV con LBT, espera post-RX y CSMA** (B16, v1.5.0; el repetidor queda fuera a propósito); ⬜ rutas de error de SSTV (B17); squelch HFNE envía WS desde `receive_audio_task` (B18); chat web (B19); indicadores del v1 (B20); consola RF (B21); `netdiag` (B22).
 - ✅ Documentación alineada con el código: cola TX 6 (no 4), DAC 4 descriptores ≈170 ms (no 8/≈336 ms), espera de 5 ms en `switch_to_tx` (no 20), barrido TUNE 50–2000 ms, endpoints `/api/sys` y `/api/netdiag/*`, módulos `netdiag`/`carrier_detect`/`dedup`/`adpcm`/`server/` en la estructura, estado real de IL2P.
+
+## 2026-11-11 — LBT en morse/SSTV y CSMA p-persistente (v1.5.0, v1.6.0)
+- `AFSK.cpp`: `tx_gate_open()` (post-RX + LBT + CSMA) con estado independiente para la cola AFSK y para el hook; `afsk_tx_clear_to_send()` para transmisores del hook. Morse y SSTV la usan; el repetidor no (decisión documentada).
+- CSMA p-persistente: `tx.persist` (63) y `tx.slottime_ms` (100), sólo con LBT activo; comandos KISS P y SlotTime. TXDELAY/TXTAIL por KISS siguen ignorados.
+- Compila (binario ≈ 0xedf20 B, 43 % libre). **Sin verificar en hardware**: probar con la segunda radio que SSTV/morse esperan con portadora presente y comprobar la latencia añadida por P=63.

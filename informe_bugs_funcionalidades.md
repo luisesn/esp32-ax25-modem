@@ -30,9 +30,9 @@ Cada hallazgo lleva una etiqueta de confianza:
 | B7 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
 | B14 | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
 | B15 | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
-| B16 | SSTV y morse transmiten sin LBT ni espera post-RX | Pisan el canal aunque `tx.lbt_enabled` esté activo | Bajo |
+| ~~B16~~ | ✅ **HECHO (v1.5.0)** SSTV y morse transmitían sin LBT ni espera post-RX | Pisaban el canal aunque `tx.lbt_enabled` estuviera activo | Bajo |
 | F1 | Reintento de mensajes con seguimiento de ACK | Hoy un mensaje perdido se pierde sin aviso | Medio |
-| F2 | Acceso al canal CSMA p-persistente | Menos colisiones con LBT activo | Medio |
+| ~~F2~~ | ✅ **HECHO (v1.6.0)** Acceso al canal CSMA p-persistente | Menos colisiones con LBT activo | Medio |
 
 ## 1. Bugs
 
@@ -148,9 +148,11 @@ Comprobación en el dispositivo: comparar el `size` que devuelve la subida con e
 
 Arreglo: al quedarse sin bytes seguros, arrastrar el resto (`buf_len - i`) al principio del buffer en lugar de descartarlo. Otros fallos de la misma función: un `\r\n\r\n` partido entre dos lecturas no se detecta en los estados de cabecera; no se comprueba el espacio libre; si el último trozo llega corto y no aparece el delimitador final, se informa de éxito igualmente.
 
-**B16. SSTV, morse y repetidor transmiten sin LBT ni espera post-RX** — bucle de despacho en [AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) · **[Leído]**
+**B16. ✅ HECHO (v1.5.0) — SSTV, morse y repetidor transmiten sin LBT ni espera post-RX** — bucle de despacho en [AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) · **[Leído]**
 
 La inhibición post-RX y el LBT sólo condicionan el despacho de `s_tx_queue`. El `s_dispatch_hook()` (morse, SSTV, repetidor) se ejecuta con la única condición de no estar ya transmitiendo. Una baliza CW o una imagen SSTV salen aunque el canal esté ocupado o se acabe de recibir una trama. Arreglo: aplicar al hook la misma comprobación (con el mismo tiempo máximo de espera).
+
+**Resuelto el 2026-11-11 (v1.5.0, commits `748d048` y, en la librería, `8871690`)**: la comprobación se extrajo a `tx_gate_open()` (post-RX + LBT + espera máxima) y se expone como `afsk_tx_clear_to_send()`; `morse_check_and_dispatch()` y `sstv_dispatch_if_pending()` la llaman sólo cuando hay algo pendiente y arrancan únicamente si devuelve true (si no, reintentan en la siguiente iteración; la petición SSTV sigue en cola y el semáforo de morse queda tomado por la tarea de baliza, que espera hasta 60 s). La cola AFSK y el hook mantienen estados independientes. Además la puerta sólo se evalúa si hay una trama en cola (antes el temporizador LBT y su aviso corrían con la cola vacía). **El repetidor queda fuera a propósito**: retransmite una señal recién recibida, de modo que el canal está ocupado por su propia entrada y el LBT lo bloquearía siempre (documentado en README, CLAUDE.md y `repeater.c`). Compila; sin probar en hardware. Limitación: sólo se comprueba el canal antes de empezar; una imagen SSTV ya iniciada no se interrumpe.
 
 **B17. Rutas de error de SSTV** — [main/sstv.c](main/sstv.c) · **[Leído]**
 
@@ -202,7 +204,7 @@ Con el v1 desactivado, la fila `APRS:` del display muestra `v1/v2` con el primer
 - **`/api/sys`**: lista de tareas fija; faltan `httpd`, `iplog`, `cap_dns`, `ota_net`, `rx_survey`… Usar `uxTaskGetSystemState`.
 - **`/api/spiffs/upload`**: no comprueba espacio libre antes de escribir.
 - **`/api/aprs/send`**: no valida ni pasa a mayúsculas el destinatario.
-- **KISS** ([main/kiss.c](main/kiss.c)): sólo trata DATA en el puerto 0; TXDELAY, P, SlotTime y TXTAIL se ignoran (ver F2).
+- **KISS** ([main/kiss.c](main/kiss.c)): sólo trata DATA en el puerto 0 y, desde v1.6.0, P y SlotTime (F2); TXDELAY, TXTAIL y FullDuplex se siguen ignorando (el preámbulo sale de `aprs.*` en `config.json`).
 - **`ax25ip.c`**: `ip_info()` usa un buffer `static` desde dos tareas (sólo afecta al texto del log).
 - **WiFi**: no se llama a `esp_wifi_set_ps(WIFI_PS_NONE)`; el modem-sleep por defecto añade latencia a KISS y al audio. SNTP fijo a `pool.ntp.org` y sin zona horaria. Canal del AP fijo a 1.
 - **Respuestas de `remote_cmd`**: salen como mensaje con `{NNN}` nuevo y sin reintento; `tx,morse` no responde; los comandos desconocidos se ignoran en silencio.
@@ -237,7 +239,9 @@ Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran
 
 **F1. Reintento de mensajes con seguimiento de ACK** (backlog). Tabla pequeña de mensajes pendientes (destino, ID, texto, intentos, próximo envío), reintento con espera creciente (por ejemplo 30/60/120 s, 3–5 intentos), cancelación al recibir `ackNNN` y evento WS `msg_failed`. Sirve al chat de la web y a las respuestas de `remote_cmd`. Requiere B5 y B8.
 
-**F2. Acceso al canal CSMA p-persistente y parámetros KISS.** Hoy el TX sale en cuanto el canal queda libre: si dos estaciones esperan, colisionan siempre. Añadir slot aleatorio (`slottime` 100 ms, `persist` 63) al despacho de `s_tx_queue`, y aceptar los comandos KISS TXDELAY/P/SlotTime/TXTAIL para que APRSdroid, Xastir o Dire Wolf puedan ajustarlos. Tiene más valor cuando LBT esté activado.
+**F2. ✅ HECHO (v1.6.0) — Acceso al canal CSMA p-persistente y parámetros KISS.** Hoy el TX sale en cuanto el canal queda libre: si dos estaciones esperan, colisionan siempre. Añadir slot aleatorio (`slottime` 100 ms, `persist` 63) al despacho de `s_tx_queue`, y aceptar los comandos KISS TXDELAY/P/SlotTime/TXTAIL para que APRSdroid, Xastir o Dire Wolf puedan ajustarlos. Tiene más valor cuando LBT esté activado.
+
+**Implementado el 2026-11-11 (v1.6.0, commits `c83268c` y, en la librería, `8871690`)**: con LBT activo y el canal libre se transmite si `random(0..255) <= persist`; si no, se espera un slot y se vuelve a escuchar (un canal ocupado reinicia el proceso). Configuración `tx.persist` (63) y `tx.slottime_ms` (100); `persist` 255 o `slottime_ms` 0 lo desactivan. Se aplica a la cola AFSK, morse y SSTV, y no actúa con LBT desactivado. El host puede ajustarlo con los comandos KISS **P** y **SlotTime** (×10 ms). **No implementado**: TXDELAY y TXTAIL por KISS (siguen fijos en `aprs.*`; las unidades de preámbulo de la librería no coinciden con las KISS y habría que mapearlas). Efecto en latencia: con P=63 cada trama espera de media ≈3 slots (≈300 ms) cuando el canal está libre; subir `persist` si se prioriza latencia. Compila; sin probar en hardware.
 
 **F3. Path configurable.** `WIDE1-1,WIDE2-x` está fijo en la librería y se aplica también a los ACK. Hacerlo configurable (`aprs.path`), con opción de path vacío y un path distinto, normalmente más corto, para ACK y mensajes.
 
@@ -280,10 +284,10 @@ KISS por UART/USB/Bluetooth, AGWPE, RX de SSTV, CTCSS, PTT activo bajo configura
 ## 4. Orden de trabajo sugerido
 
 1. B1, B2, B3, B4, B5: cambios pequeños y localizados con efecto directo en el uso diario.
-2. B15 y B17 si se usa SSTV; B16 antes de activar LBT.
+2. B15 y B17 si se usa SSTV. (B16 hecho)
 3. B14 (códec RS, con su prueba en host) junto con B1 y B11 si se quiere IL2P entre equipos propios; si no, desactivar `il2p.enabled`, que hoy sólo resta.
 4. B7, B8, B9, B10, B18 y los comentarios pendientes de 1.4.
 5. F1 (reintentos) con F8 y B19; F3 (path).
 6. Captura de audio crudo y banco de pruebas del módem.
-7. B6 antes de activar el digipeater; F2 antes de activar LBT de forma permanente.
+7. B6 antes de activar el digipeater. (F2 hecho)
 8. Decisión sobre IL2P estándar (B14 bis).
