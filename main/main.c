@@ -26,6 +26,10 @@
 #include "msg_retry.h"
 #include "rf_console.h"
 #include "heard.h"
+#include "igate.h"
+#include "telemetry.h"
+#include "aprs_objects.h"
+#include "rx_capture.h"
 #include "ota.h"
 #include "ota_net.h"
 #include "delay_tune.h"
@@ -573,6 +577,8 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
         }
     }
     heard_note(buf, len, rq.have_q ? rq.q : 0);
+    igate_rx_frame(buf, len);
+    telemetry_note_rx();
     netdiag_note_rx(buf, len);
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
@@ -724,6 +730,7 @@ static void audio_sample_hook(int8_t sample) {
     squelch_sf_push_sample(sample);
     carrier_detect_push_sample(sample);
     rx_survey_push_sample(sample);   // no-op salvo con el modo SURVEY iniciado
+    rx_capture_push(&sample, 1);     // no-op salvo con una captura en curso
 }
 
 // Envoltorio de la función TX: anota la trama para el panel de debug de
@@ -733,6 +740,7 @@ static void (*s_real_tx_fn)(const uint8_t *, size_t) = NULL;
 static void tx_noted_frame(const uint8_t *data, size_t len)
 {
     netdiag_note_tx(data, len);
+    telemetry_note_tx();
     if (s_real_tx_fn) s_real_tx_fn(data, len);
 }
 
@@ -826,6 +834,9 @@ void app_main(void)
     remote_cmd_init(boot_cfg);
     msg_retry_init();
     heard_init();
+    igate_init(boot_cfg);
+    telemetry_init(boot_cfg);
+    aprs_objects_init(boot_cfg);
     rf_console_init(boot_cfg);
     config_free_json(boot_cfg);
 

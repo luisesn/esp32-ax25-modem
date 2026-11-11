@@ -136,6 +136,17 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 #pos-btn:hover{background:#254f80}#pos-btn:disabled{opacity:.4;cursor:default}
 #pos-sym{background:#111;color:#e0e0e0;border:1px solid #333;border-radius:3px;
   font-family:monospace;font-size:.7rem;padding:.3rem .4rem}
+#cfg-form{flex-shrink:0;border:1px solid #2a3a2a;border-radius:4px;background:#0c120c;font-size:.65rem;color:#9a9}
+#cfg-form>summary{cursor:pointer;padding:.35rem .6rem;color:#b0e0b0}
+#cfg-form-body{max-height:45vh;overflow-y:auto;padding:.3rem .6rem .6rem}
+#cfg-form fieldset{border:1px solid #1f2a1f;border-radius:3px;margin:.4rem 0 0;padding:.3rem .5rem;display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.3rem .8rem}
+#cfg-form legend{color:#7ecfff;font-size:.62rem;padding:0 .3rem}
+#cfg-form label{display:flex;flex-direction:column;gap:.1rem;color:#8a948a}
+#cfg-form label.chk{flex-direction:row;align-items:center;gap:.4rem}
+#cfg-form input[type=text],#cfg-form input[type=number],#cfg-form input[type=password]{background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.2rem .35rem;font-family:monospace;font-size:.7rem;min-width:0}
+.tbl-sm{width:100%;border-collapse:collapse;font-size:.68rem}
+.tbl-sm th{text-align:left;color:#7d8794;font-weight:normal;padding:.2rem .4rem;border-bottom:1px solid #23272e}
+.tbl-sm td{padding:.2rem .4rem;border-bottom:1px solid #1a1d22;color:#ccd}
 #cfg-editor{flex:1;min-height:8rem;background:#0a0a0a;color:#b0e0b0;border:1px solid #2a3a2a;
   border-radius:3px;font-family:monospace;font-size:.65rem;resize:vertical;padding:.5rem;
   line-height:1.5;white-space:pre;overflow:auto}
@@ -281,6 +292,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <button class="tab-btn active" onclick="showTab('log',this)">LOG<span id="nav-log-count" class="nav-count" hidden>0</span></button>
       <button id="tab-btn-msg" class="tab-btn" onclick="showTab('msg',this)">CHAT</button>
       <button class="tab-btn" onclick="showTab('pos',this)">POSICIÓN</button>
+      <button class="tab-btn" onclick="showTab('heard',this)">OÍDAS</button>
       <button class="tab-btn" onclick="showTab('sstv',this)">SSTV</button>
     </div>
     <div class="nav-grp">
@@ -314,6 +326,14 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div id="log-cols"><span>HORA</span><span>ORIGEN</span><span>DESTINO</span><span>RUTA</span><span title="Calidad estimada de recepción">CALIDAD</span><span>CONTENIDO</span></div>
       <div id="log"></div>
       <div id="log-foot"><span>En el log <b id="lf-n">0</b></span><span>CRC ok <b id="lf-ok">—</b></span><span title="CRC erróneos totales: ~90 % son ruido en reposo, no indican calidad. Se descartan y no llegan al log">CRC err (ruido) <b id="lf-err">—</b></span><span style="margin-left:auto" title="Caída del ruido del canal (quieting) mientras se recibe la trama. Estimación relativa a esta radio y volumen; no es un S-meter.">Calidad = caída de ruido del canal</span></div>
+    </div>
+    <div id="tab-heard" class="tab-pane" style="justify-content:flex-start;gap:.5rem;overflow-y:auto">
+      <div style="display:flex;gap:.5rem;align-items:center;font-size:.65rem;color:#888">
+        <span>Estaciones oídas (se refresca cada 10 s)</span>
+        <button onclick="loadHeard()" style="font-size:.65rem;font-family:monospace;padding:.3rem .8rem;border-radius:3px;cursor:pointer;background:#111;color:#888;border:1px solid #333">&#x21BA;</button>
+        <span id="heard-status" style="flex:1"></span>
+      </div>
+      <table class="tbl-sm"><thead><tr><th>Indicativo</th><th>Hace</th><th>Tramas</th><th>Cal.</th><th>Posición</th></tr></thead><tbody id="heard-tbody"></tbody></table>
     </div>
     <div id="tab-chan" class="tab-pane" style="justify-content:flex-start">
       <div class="chan-cards">
@@ -388,8 +408,32 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <button id="pos-btn" onclick="sendBeacon()">&#x1F4E1; Transmitir baliza</button>
         <span id="pos-status" style="font-size:.65rem;color:#888;margin-left:.5rem;flex:1"></span>
       </div>
+      <details id="obj-form" style="font-size:.65rem;color:#9a9;border:1px solid #23272e;border-radius:4px;padding:.3rem .5rem">
+        <summary style="cursor:pointer">Objeto / Boletín</summary>
+        <div class="send-row" style="margin-top:.4rem">
+          <label style="min-width:3.5rem">Objeto</label>
+          <input id="obj-name" aria-label="Nombre del objeto" maxlength="9" placeholder="NOMBRE (9 máx.)" style="flex:1;min-width:6rem">
+          <input id="obj-lat" aria-label="Latitud del objeto" type="number" step="any" min="-90" max="90" placeholder="Lat" style="width:5.5rem">
+          <input id="obj-lon" aria-label="Longitud del objeto" type="number" step="any" min="-180" max="180" placeholder="Lon" style="width:5.5rem">
+        </div>
+        <div class="send-row">
+          <input id="obj-tbl" aria-label="Tabla de símbolos" maxlength="1" value="/" style="width:2rem" title="Tabla de símbolos (/ o \)">
+          <input id="obj-sym" aria-label="Código de símbolo" maxlength="1" value="&gt;" style="width:2rem" title="Código de símbolo">
+          <input id="obj-comment" aria-label="Comentario del objeto" maxlength="43" placeholder="Comentario" style="flex:1">
+          <label style="display:flex;gap:.25rem;align-items:center"><input id="obj-kill" type="checkbox"> Borrar</label>
+          <button onclick="sendObject()" style="font-size:.65rem;font-family:monospace;padding:.3rem .8rem;border-radius:3px;cursor:pointer;background:#1a3a5c;color:#7ecfff;border:1px solid #7ecfff">Enviar objeto</button>
+        </div>
+        <div class="send-row">
+          <label style="min-width:3.5rem">Boletín</label>
+          <input id="bul-id" aria-label="Id del boletín" maxlength="1" placeholder="0-9" style="width:2.5rem" title="Identificador del boletín (0-9, A-Z)">
+          <input id="bul-text" aria-label="Texto del boletín" maxlength="67" placeholder="Texto" style="flex:1">
+          <button onclick="sendBulletin()" style="font-size:.65rem;font-family:monospace;padding:.3rem .8rem;border-radius:3px;cursor:pointer;background:#1a3a5c;color:#7ecfff;border:1px solid #7ecfff">Enviar boletín</button>
+        </div>
+        <div id="obj-status" style="font-size:.65rem;color:#888;margin-top:.2rem"></div>
+      </details>
     </div>
     <div id="tab-cfg" class="tab-pane" style="justify-content:flex-start">
+      <details id="cfg-form"><summary>Campos de configuración (editan el JSON de abajo)</summary><div id="cfg-form-body"></div></details>
       <textarea id="cfg-editor" aria-label="Editor de configuración JSON" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
       <div class="send-row" style="flex-shrink:0">
         <button id="cfg-save-btn" onclick="saveCfg()">&#x1F4BE; Guardar y aplicar</button>
@@ -422,6 +466,10 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div class="stats-badges">
         <span id="v2-badge" class="bdg bdg-off">V2 desactivado</span>
         <span id="squelch-badge" class="bdg bdg-off">Squelch cerrado</span>
+      </div>
+      <div id="igate-box" hidden style="border:1px solid #23272e;border-radius:4px;padding:.4rem .6rem;font-size:.68rem;color:#9ab">
+        <div style="color:#7d8794;font-size:.6rem;letter-spacing:.1em">IGATE</div>
+        <div id="igate-body"></div>
       </div>
       <div class="send-row">
         <button id="stats-ref-btn" onclick="loadStats()" style="font-size:.7rem;font-family:monospace;background:#111;color:#888;border:1px solid #333;border-radius:3px;padding:.3rem .7rem;cursor:pointer">&#x21BA; Actualizar</button>
@@ -587,7 +635,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <tbody id="tune-tbody"></tbody>
       </table>
     </div>
-    <div id="tab-survey" class="tab-pane" style="justify-content:flex-start;gap:.7rem">
+    <div id="tab-survey" class="tab-pane" style="justify-content:flex-start;gap:.7rem;overflow-y:auto">
       <div style="font-size:.65rem;color:#888">Medición del audio de RX para calibrar el indicador de nivel y la detección de canal ocupado. Solo consume recursos mientras está iniciado. Deja esta pestaña abierta durante la captura: las filas (una cada ~107&nbsp;ms) se guardan en el navegador y se descargan como CSV. Anota la condición (volumen de la radio, squelch, qué transmite la otra radio) antes de descargar.</div>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
         <button id="sv-start-btn" onclick="surveyStart()" style="padding:.3rem .9rem;font-size:.65rem;font-family:monospace;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a;border-radius:3px;cursor:pointer">&#x25B6; Iniciar</button>
@@ -600,11 +648,18 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <button id="sv-mk-1" onclick="surveyMark(1)" style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer">Canal libre</button>
         <button id="sv-mk-2" onclick="surveyMark(2)" style="padding:.25rem .6rem;font-size:.65rem;font-family:monospace;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer">Canal ocupado</button>
       </div>
+      <div id="sv-advice" style="padding:.4rem .6rem;border:1px solid #2a2a2a;border-radius:4px;font-size:.72rem;color:#888">Nivel RX: inicia la medición para obtener un consejo.</div>
+      <div id="sv-sat" hidden style="padding:.4rem .6rem;border:1px solid #7a2a2a;border-radius:4px;background:#2a0a0a;font-size:.68rem;color:#ff9a9a"></div>
       <pre id="sv-live" style="margin:0;padding:.4rem .6rem;border:1px solid #2a2a2a;border-radius:4px;background:#0d0d0d;font-size:.65rem;color:#9ad;white-space:pre-wrap">Sin datos</pre>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
         <input id="sv-cond" aria-label="Condición de la captura" placeholder="Condición (p. ej. vol 5, squelch off, otra radio TX)" style="background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.25rem .4rem;font-family:monospace;font-size:.7rem;flex:1;min-width:12rem">
         <button onclick="surveyDownloadCsv()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a1a2a;color:#9ab8ff;border:1px solid #2a2a5a;border-radius:3px;cursor:pointer">&#x2B07; CSV</button>
         <button onclick="surveyDownloadHist()" style="padding:.3rem .8rem;font-size:.65rem;font-family:monospace;background:#1a1a2a;color:#9ab8ff;border:1px solid #2a2a5a;border-radius:3px;cursor:pointer">&#x2B07; Histogramas JSON</button>
+      </div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;font-size:.65rem;color:#888">
+        <button id="cap-btn" onclick="captureRx()" style="font-size:.65rem;font-family:monospace;padding:.3rem .8rem;border-radius:3px;cursor:pointer;background:#1a2a1a;color:#80e880;border:1px solid #2a5a2a">&#x23FA; Capturar audio RX</button>
+        <label>segundos <input id="cap-secs" type="number" min="1" max="30" value="5" style="width:3.5rem;background:#111;color:#ddd;border:1px solid #333;border-radius:3px;padding:.2rem .3rem;font-family:monospace"></label>
+        <span id="cap-status" style="flex:1"></span>
       </div>
     </div>
     <div id="tab-net" class="tab-pane" style="justify-content:flex-start;gap:.6rem">
@@ -1337,6 +1392,7 @@ function connectWS(){
 // ── Pestaña oculta: pausa timers periódicos y reconecta al volver ──────────
 function pausePolling(){
   clearInterval(statsTimer);statsTimer=null;
+  heardStop();
   netStopPoll();
 }
 function resumePolling(){
@@ -1345,6 +1401,7 @@ function resumePolling(){
   const id=act?act.id:'';
   if(id==='tab-stats'&&!statsTimer){loadStats();statsTimer=setInterval(loadStats,5000);}
   if(id==='tab-net')netStart();
+  if(id==='tab-heard')heardStart();
 }
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){pausePolling();return;}
@@ -1503,6 +1560,7 @@ function loadStats(){
     sqb.className='bdg '+(d.v2_squelch_open?'bdg-ok':'bdg-off');
     const st=document.getElementById('stats-status');
     st.textContent=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    loadIgate();
   }).catch(e=>{
     const st=document.getElementById('stats-status');
     st.style.color='#c04040';st.textContent='Error: '+e.message;
@@ -1516,6 +1574,8 @@ function showTab(name,btn){
   lsSet('tab',name);
   if(name==='cfg') loadCfg();
   clearInterval(statsTimer);statsTimer=null;
+  heardStop();
+  if(name==='heard')heardStart();
   if(name==='stats'){loadStats();statsTimer=setInterval(loadStats,5000);}
   if(name==='sstv') loadSstvGallery();
   if(name==='net') netStart(); else netStopPoll();
@@ -1535,6 +1595,7 @@ function loadCfg(){
     ta.value=JSON.stringify(d,null,2);
     st.textContent='';
     cfgLoaded=true;
+    cfgFormFill();
   }).catch(e=>{st.style.color='#c04040';st.textContent='Error al cargar config: '+e.message;});
 }
 // Aviso "Reinicio necesario" tras guardar config (reboot_required=true en la respuesta)
@@ -2037,6 +2098,7 @@ function surveyOnRow(p){
     svLines.push([p.t,p.pk,p.rms,p.dc,p.clip,p.d12,p.d22,p.dm,p.hf,p.agc,p.fr,p.fl,p.fe,p.fb,p.mk,p.dr].join(','));
   }
   if(svT0===null)svT0=p.t;
+  svAdvice(p);
   if(svLines.length%3===1){
     const el=document.getElementById('sv-live');
     if(el)el.textContent='pico '+p.pk+'  rms '+p.rms+'  dc '+p.dc+'  sat '+p.clip+'  agc '+p.agc+
@@ -2142,13 +2204,216 @@ async function tuneStop(){
     tuneSetStatus('Deteniendo…','#888');
   }catch(e){tuneSetStatus('Error: '+e.message,'#e88080');}
 }
+
+// ── Formulario de CONFIG (edita el JSON del textarea) ───────────────────────
+// [ruta, etiqueta, tipo(n|t|b|p), min, max]
+const CFG_FORM=[
+  ['TX / acceso al canal',[
+    ['tx.lbt_enabled','LBT (escuchar antes de TX)','b'],['tx.lbt_max_wait_ms','LBT espera máx. (ms)','n',0,60000],
+    ['tx.persist','CSMA persistencia (0–255)','n',0,255],['tx.slottime_ms','CSMA slot (ms, 0–2000)','n',0,2000]]],
+  ['APRS',[['aprs.path','Path (p. ej. WIDE1-1)','t'],['aprs.ack_path','Path de ACK','t']]],
+  ['GPS / baliza',[
+    ['gps.altitude','Enviar altitud','b'],['gps.use_fixed','Usar posición fija','b'],
+    ['gps.fixed_lat','Latitud fija','n',-90,90],['gps.fixed_lon','Longitud fija','n',-180,180],
+    ['gps.smart_beacon.enabled','SmartBeaconing activo','b'],['gps.smart_beacon.slow_speed_kmh','Vel. lenta (km/h)','n',0,500],
+    ['gps.smart_beacon.fast_speed_kmh','Vel. rápida (km/h)','n',0,500],['gps.smart_beacon.slow_rate_s','Periodo lento (s)','n',0,86400],
+    ['gps.smart_beacon.fast_rate_s','Periodo rápido (s)','n',0,86400],['gps.smart_beacon.min_turn_deg','Giro mínimo (°)','n',0,180],
+    ['gps.smart_beacon.turn_slope','Pendiente de giro','n',0,1000],['gps.smart_beacon.min_turn_time_s','Tiempo mín. entre giros (s)','n',0,3600]]],
+  ['Telemetría',[['telemetry.enabled','Activa','b'],['telemetry.period_s','Periodo (s)','n',0,86400]]],
+  ['iGate',[
+    ['igate.enabled','Activo','b'],['igate.server','Servidor','t'],['igate.port','Puerto','n',1,65535],
+    ['igate.callsign','Indicativo','t'],['igate.passcode','Passcode','p'],['igate.filter','Filtro','t'],
+    ['igate.rf_gate','Gatear IS → RF','b']]],
+  ['Objetos',[['objects.enabled','Activos','b'],['objects.period_s','Periodo (s)','n',0,86400]]],
+  ['Comandos remotos',[['remote_cmd.allow_reboot','Permitir reinicio','b'],['remote_cmd.min_interval_s','Intervalo mín. entre comandos (s)','n',0,86400]]],
+  ['SSTV',[['sstv.cw_id','Identificación CW al final','b']]]
+];
+function cfgGetPath(o,path){for(const k of path.split('.')){if(o==null||typeof o!=='object')return undefined;o=o[k];}return o;}
+function cfgSetPath(o,path,v){
+  const ks=path.split('.');
+  for(let i=0;i<ks.length-1;i++){
+    if(o[ks[i]]==null||typeof o[ks[i]]!=='object')o[ks[i]]={};
+    o=o[ks[i]];
+  }
+  if(v===undefined)delete o[ks[ks.length-1]];else o[ks[ks.length-1]]=v;
+}
+function cfgFormBuild(){
+  const body=document.getElementById('cfg-form-body');
+  if(!body||body.firstChild)return;
+  CFG_FORM.forEach(([title,fields])=>{
+    const fs=document.createElement('fieldset');
+    const lg=document.createElement('legend');lg.textContent=title;fs.appendChild(lg);
+    fields.forEach(([path,label,type,min,max])=>{
+      const l=document.createElement('label');
+      const i=document.createElement('input');
+      i.dataset.path=path;i.dataset.type=type;
+      i.setAttribute('aria-label',label);
+      if(type==='b'){i.type='checkbox';l.className='chk';l.appendChild(i);l.appendChild(document.createTextNode(label));}
+      else{
+        i.type=type==='n'?'number':(type==='p'?'password':'text');
+        if(type==='n'){i.step='any';if(min!==undefined){i.min=min;i.max=max;}}
+        if(type==='p')i.autocomplete='off';
+        l.appendChild(document.createTextNode(label));l.appendChild(i);
+      }
+      i.addEventListener('change',()=>cfgFormEdit(i,min,max));
+      fs.appendChild(l);
+    });
+    body.appendChild(fs);
+  });
+  const ta=document.getElementById('cfg-editor');
+  ta.addEventListener('change',cfgFormFill);
+  const det=document.getElementById('cfg-form');
+  det.open=lsGet('cfgform')==='1';
+  det.addEventListener('toggle',()=>lsSet('cfgform',det.open?'1':'0'));
+}
+function cfgFormFill(){
+  cfgFormBuild();
+  let o;
+  try{o=JSON.parse(document.getElementById('cfg-editor').value);}catch(_){return;}
+  document.querySelectorAll('#cfg-form-body input[data-path]').forEach(i=>{
+    const v=cfgGetPath(o,i.dataset.path);
+    if(i.type==='checkbox')i.checked=!!v;else i.value=(v===undefined||v===null)?'':v;
+  });
+}
+function cfgFormEdit(i,min,max){
+  const ta=document.getElementById('cfg-editor');
+  const st=document.getElementById('cfg-status');
+  let o;
+  try{o=JSON.parse(ta.value);}catch(e){st.style.color='#c04040';st.textContent='JSON inválido: '+e.message;return;}
+  let v;
+  if(i.type==='checkbox')v=i.checked;
+  else if(i.dataset.type==='n'){
+    if(i.value.trim()==='')v=undefined;
+    else{
+      v=Number(i.value);
+      if(!isFinite(v)){st.style.color='#c04040';st.textContent='Número inválido';return;}
+      if(min!==undefined)v=Math.min(max,Math.max(min,v));
+      i.value=v;
+    }
+  }else v=i.value;
+  cfgSetPath(o,i.dataset.path,v);
+  ta.value=JSON.stringify(o,null,2);
+  st.style.color='#888';st.textContent='Modificado (pulsa Guardar y aplicar)';
+}
+// ── OÍDAS ───────────────────────────────────────────────────────────────────
+let heardTimer=null;
+function heardStart(){if(!heardTimer){loadHeard();heardTimer=setInterval(loadHeard,10000);}}
+function heardStop(){clearInterval(heardTimer);heardTimer=null;}
+function fmtAge(s){s=s|0;return s<60?s+' s':s<3600?Math.floor(s/60)+' min '+(s%60)+' s':Math.floor(s/3600)+' h '+Math.floor(s%3600/60)+' min';}
+function loadHeard(){
+  const st=document.getElementById('heard-status');
+  return api('/api/heard').then(d=>{
+    const tb=document.getElementById('heard-tbody');
+    const arr=(d&&d.heard)||[];
+    tb.innerHTML=arr.length?arr.map(h=>{
+      const pos=(h.lat!=null&&h.lon!=null)?
+        '<a href="https://www.openstreetmap.org/?mlat='+encodeURIComponent(h.lat)+'&mlon='+encodeURIComponent(h.lon)+'&zoom=12" target="_blank" rel="noopener">'+esc((+h.lat).toFixed(4))+', '+esc((+h.lon).toFixed(4))+'</a>':'—';
+      return '<tr><td>'+esc(h.call)+'</td><td>'+esc(fmtAge(h.age))+'</td><td>'+esc(h.n)+'</td><td>'+(h.q!=null?esc(h.q):'—')+'</td><td>'+pos+'</td></tr>';
+    }).join(''):'<tr><td colspan="5" style="color:#666">Sin estaciones oídas</td></tr>';
+    st.style.color='#555';st.textContent=arr.length+' estaciones · '+new Date().toLocaleTimeString('es');
+  }).catch(e=>{st.style.color='#c04040';st.textContent='Error: '+e.message;});
+}
+// ── iGate (STATS) ───────────────────────────────────────────────────────────
+function loadIgate(){
+  const box=document.getElementById('igate-box');
+  api('/api/igate').then(d=>{
+    if(!d){box.hidden=true;return;}
+    box.hidden=false;
+    const on=!!d.enabled,con=!!d.connected;
+    let h='<span class="bdg '+(on&&con?'bdg-ok':'bdg-off')+'">'+(!on?'desactivado':con?'conectado':'sin conexión')+'</span>';
+    const rest=Object.keys(d).filter(k=>k!=='enabled'&&k!=='connected')
+      .map(k=>esc(k)+': <b>'+esc(typeof d[k]==='object'?JSON.stringify(d[k]):d[k])+'</b>').join(' · ');
+    document.getElementById('igate-body').innerHTML=h+(rest?' <span style="margin-left:.5rem">'+rest+'</span>':'');
+  }).catch(e=>{box.hidden=true;});  // 404 u otro error: se oculta
+}
+// ── Objeto / Boletín ────────────────────────────────────────────────────────
+function objStatus(msg,color){const el=document.getElementById('obj-status');el.style.color=color||'#888';el.textContent=msg;}
+function sendObject(){
+  const name=document.getElementById('obj-name').value.trim();
+  const lat=parseFloat(document.getElementById('obj-lat').value);
+  const lon=parseFloat(document.getElementById('obj-lon').value);
+  if(!name||name.length>9)return objStatus('Nombre de 1 a 9 caracteres.','#c04040');
+  if(isNaN(lat)||lat<-90||lat>90)return objStatus('Latitud inválida.','#c04040');
+  if(isNaN(lon)||lon<-180||lon>180)return objStatus('Longitud inválida.','#c04040');
+  const body={name,lat,lon,
+    symbol_table:document.getElementById('obj-tbl').value||'/',
+    symbol_code:document.getElementById('obj-sym').value||'>',
+    comment:document.getElementById('obj-comment').value,
+    kill:document.getElementById('obj-kill').checked};
+  objStatus('Enviando…');
+  api('/api/aprs/object',{method:'POST',body}).then(d=>{
+    if(d&&d.ok===false)objStatus('Error: '+(d.error||'desconocido'),'#c04040');
+    else objStatus(body.kill?'Objeto borrado ✓':'Objeto TX ✓','#4ac84a');
+  }).catch(e=>objStatus('Error: '+e.message,'#c04040'));
+}
+function sendBulletin(){
+  const id=document.getElementById('bul-id').value.trim();
+  const text=document.getElementById('bul-text').value.trim();
+  if(!/^[0-9A-Za-z]$/.test(id))return objStatus('Id de boletín: un carácter (0-9, A-Z).','#c04040');
+  if(!text)return objStatus('Texto vacío.','#c04040');
+  objStatus('Enviando…');
+  api('/api/aprs/bulletin',{method:'POST',body:{id,text}}).then(d=>{
+    if(d&&d.ok===false)objStatus('Error: '+(d.error||'desconocido'),'#c04040');
+    else objStatus('Boletín TX ✓','#4ac84a');
+  }).catch(e=>objStatus('Error: '+e.message,'#c04040'));
+}
+// ── SURVEY: consejo de nivel y captura de audio ────────────────────────────
+// Ventana móvil de ~3 s (28 filas de ~107 ms). pk 0–127 (s8, 127 = saturado); agc en cuentas ADC (tope 512).
+// Calibración medida: volumen medio → pk≈52/rms≈21; volumen máximo → pk 127, agc 512.
+const SV_WIN=28;let svPk=[],svAgc=[],svClip=0;
+function svAdvice(p){
+  svPk.push(+p.pk||0);svAgc.push(+p.agc||0);
+  if(svPk.length>SV_WIN){svPk.shift();svAgc.shift();}
+  svClip=(p.clip|0);
+  if(svPk.length<SV_WIN/2)return;
+  const pk=Math.max(...svPk),agc=Math.max(...svAgc);
+  const sat=pk>=127||agc>=512||svClip>0;
+  const adv=document.getElementById('sv-advice'),w=document.getElementById('sv-sat');
+  let txt,col;
+  if(sat){txt='Baja el volumen';col='#ff7a6a';}
+  else if(pk<25||agc<20){txt='Sube el volumen';col='#ffb347';}
+  else if(pk>100){txt='Baja el volumen';col='#ffb347';}
+  else{txt='Nivel correcto';col='#4fc84f';}
+  adv.style.color=col;adv.style.borderColor=col;
+  adv.textContent=txt+'  (pico '+pk+'/127, AGC '+agc+'/512)';
+  w.hidden=!sat;
+  if(sat)w.textContent='Saturación: '+(pk>=127?'pico en 127 ':'')+(agc>=512?'AGC en tope 512 ':'')+(svClip>0?'muestras recortadas ':'')+'— la demodulación se degrada.';
+}
+let capBusy=false;
+async function captureRx(){
+  if(capBusy)return;
+  const st=document.getElementById('cap-status'),btn=document.getElementById('cap-btn');
+  let n=parseInt(document.getElementById('cap-secs').value,10);
+  if(isNaN(n)||n<1)n=1;if(n>30)n=30;
+  document.getElementById('cap-secs').value=n;
+  capBusy=true;btn.disabled=true;st.style.color='#c8a04a';
+  const t0=Date.now();
+  const tick=setInterval(()=>{st.textContent='Capturando… '+Math.min(n,Math.floor((Date.now()-t0)/1000))+'/'+n+' s';},250);
+  st.textContent='Capturando… 0/'+n+' s';
+  const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),(n+15)*1000);
+  try{
+    const r=await fetch('/api/rx/capture?secs='+n+'&rate=9600',{signal:ctl.signal});
+    if(!r.ok){
+      let t='';try{t=(await r.text()).trim();}catch(_){}
+      throw new Error(r.status===409?'ocupado: ya hay una captura en curso':(t||'HTTP '+r.status));
+    }
+    const blob=await r.blob();
+    if(!blob.size)throw new Error('captura vacía');
+    svDownload('rx_'+svStamp()+'.wav',blob,'audio/wav');
+    st.style.color='#4ac84a';st.textContent='✓ '+n+' s descargados ('+Math.round(blob.size/1024)+' KB)';
+  }catch(e){
+    st.style.color='#c04040';
+    st.textContent='Error: '+(e&&e.name==='AbortError'?'tiempo de espera agotado':e.message);
+  }finally{clearInterval(tick);clearTimeout(tm);capBusy=false;btn.disabled=false;}
+}
 // ── Restaurar estado guardado (contacto, destino, pestaña, formularios) ────
 (function restoreUI(){
   const $=id=>document.getElementById(id);
   // Campos de formulario: [id, clave]; se guardan al cambiar y se restauran si el valor existe
   const fields=[['send-to','dest'],['send-ssid','ssid'],['pos-lat','lat'],['pos-lon','lon'],
     ['pos-sym','sym'],['pos-comment','comment'],['sstv-test-mode','sstvtest'],
-    ['sstv-upload-mode','sstvup']];
+    ['sstv-upload-mode','sstvup'],['cap-secs','capsecs'],['obj-name','objname'],['obj-lat','objlat'],
+    ['obj-lon','objlon'],['obj-tbl','objtbl'],['obj-sym','objsym'],['obj-comment','objcomment'],['bul-id','bulid']];
   fields.forEach(([id,k])=>{
     const el=$(id);if(!el)return;
     const v=lsGet(k);

@@ -83,7 +83,9 @@
     "deemphasis_enabled": false
   },
   "remote_cmd": {
-    "enabled": true
+    "enabled": true,
+    "allow_reboot": false,
+    "min_interval_s": 10
   },
   "console": {
     "enabled": true,
@@ -106,5 +108,11 @@
     "lbt_max_wait_ms": 10000,
     "persist": 63,
     "slottime_ms": 100
-  }
+  },
+  "telemetry": { "enabled": false, "period_s": 900 },
+  "igate": {
+    "enabled": false, "server": "rotate.aprs2.net", "port": 14580,
+    "callsign": "", "passcode": "", "filter": "", "rf_gate": false
+  },
+  "objects": { "enabled": false, "period_s": 900, "items": [], "bulletins": [] }
 }

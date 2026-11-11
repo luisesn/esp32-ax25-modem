@@ -35,6 +35,11 @@
 #include "repeater.h"
 #include "gps.h"
 #include "heard.h"
+#include "igate.h"
+#include "telemetry.h"
+#include "aprs_objects.h"
+#include "rx_capture.h"
+#include "config_validate.h"
 
 #define TAG "api_rest"
 
@@ -408,6 +413,23 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_FAIL;
     }
+    {
+        char verr[160];
+        if (!config_validate(parsed, verr, sizeof(verr))) {
+            cJSON_Delete(parsed);
+            free(body);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddBoolToObject(e, "ok", false);
+            cJSON_AddStringToObject(e, "error", verr);
+            char *t = cJSON_PrintUnformatted(e);
+            httpd_resp_sendstr(req, t ? t : "{\"ok\":false}");
+            if (t) cJSON_free(t);
+            cJSON_Delete(e);
+            return ESP_OK;
+        }
+    }
     cJSON_Delete(parsed);
 
     cJSON *old_cfg = config_get();   // copia de la config anterior (para reboot_required)
@@ -426,6 +448,8 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
         digi_init(new_cfg);
         morse_init(new_cfg);
         config_apply_hot(new_cfg);
+        telemetry_reload_config(new_cfg);
+        aprs_objects_reload(new_cfg);
         reboot_required = config_reboot_required(old_cfg, new_cfg);
         config_free_json(new_cfg);   // config_reload() devuelve una copia: liberarla
     }
@@ -894,8 +918,19 @@ static esp_err_t heard_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// GET /api/igate
+static esp_err_t igate_handler(httpd_req_t *req) {
+    char buf[256];
+    igate_status_json(buf, sizeof(buf));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
 void api_rest_register(httpd_handle_t server)
 {
+    rx_capture_register(server);
+    aprs_objects_register(server);
     static const httpd_uri_t routes[] = {
         { .uri = "/", .method = HTTP_GET, .handler = index_handler },
         { .uri = "/api/aprs/send", .method = HTTP_POST, .handler = aprs_send_handler },
@@ -903,6 +938,7 @@ void api_rest_register(httpd_handle_t server)
         { .uri = "/api/sys", .method = HTTP_GET, .handler = sys_handler },
         { .uri = "/api/aprs/beacon", .method = HTTP_POST, .handler = aprs_beacon_handler },
         { .uri = "/api/heard", .method = HTTP_GET, .handler = heard_handler },
+        { .uri = "/api/igate", .method = HTTP_GET, .handler = igate_handler },
         { .uri = "/api/config", .method = HTTP_GET, .handler = config_get_handler },
         { .uri = "/api/config", .method = HTTP_POST, .handler = config_post_handler },
         { .uri = "/api/morse/trigger", .method = HTTP_POST, .handler = morse_trigger_handler },

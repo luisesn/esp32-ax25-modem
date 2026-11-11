@@ -808,7 +808,7 @@ void audio_stream_init(void) {
     cfg.stack_size       = 8192;
     cfg.max_open_sockets   = AUDIO_STREAM_MAX_CLIENT_FDS; // 2 WS clients + captive-portal burst (3-5) + margin
     cfg.lru_purge_enable   = true; // evict oldest idle socket when limit reached
-    cfg.max_uri_handlers   = 48;
+    cfg.max_uri_handlers   = 56;
     cfg.uri_match_fn       = httpd_uri_match_wildcard;  // para el OPTIONS "/*" (preflight CORS)
     // Por defecto son 5 s: un cliente que no drena su socket bloqueaba la tarea
     // emisora 5 s por intento. 1 s acota el peor caso de las rutas que sí
