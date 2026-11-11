@@ -67,6 +67,9 @@ línea base de RX y referencia para B25):
 |---|---|---|---|---|---|
 | `real_20261111_a.wav` | 164 s | 11 | 205 | 906 | 10 |
 | `real_20261111_b.wav` | 137 s | 15 | 152 | 760 | 13 |
+| `real_20261111_c.wav` | 52 s | 4 | 71 | 380 | 3 |
+| `real_20261111_d.wav` | 89 s | 6 | 121 | 526 | 5 |
+| `real_20261111_e.wav` | 52 s | 3 | 70 | 322 | 2 |
 
 `real_20261111_b` incluye una trama Mic-E real (`EA1IUX-9>TS2QVW`), usada en `test/unit/test_heard.c`.
 Con `DEMOD_HEX=1` el harness imprime las tramas completas en hexadecimal (si no, 24 bytes).
