@@ -4,7 +4,11 @@
 #include "morse.h"
 #include "gps.h"
 #include "LibAPRS-esp32-i2s/src/LibAPRS.h"
+#include "rx_stats.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <dirent.h>
@@ -15,6 +19,8 @@
 
 static const char *TAG = "remote_cmd";
 static bool s_enabled = false;
+static bool s_allow_reboot = false;     // remote_cmd.allow_reboot (por defecto false)
+static int  s_min_interval_s = 10;      // remote_cmd.min_interval_s (0 = sin límite)
 
 void remote_cmd_init(const cJSON *cfg) {
     if (!cfg) return;
@@ -22,6 +28,11 @@ void remote_cmd_init(const cJSON *cfg) {
     if (!rc) return;
     cJSON *en = cJSON_GetObjectItem(rc, "enabled");
     if (cJSON_IsBool(en)) s_enabled = cJSON_IsTrue(en);
+    cJSON *ar = cJSON_GetObjectItem(rc, "allow_reboot");
+    s_allow_reboot = cJSON_IsTrue(ar);
+    cJSON *mi = cJSON_GetObjectItem(rc, "min_interval_s");
+    if (cJSON_IsNumber(mi) && mi->valueint >= 0 && mi->valueint <= 3600)
+        s_min_interval_s = mi->valueint;
     if (s_enabled)
         ESP_LOGI(TAG, "enabled");
 }
@@ -180,6 +191,85 @@ static void cmd_rx_sstv_list(const char *src_call, int src_ssid) {
 }
 
 // ---------------------------------------------------------------------------
+// rx,stats / sys,status / sys,reboot
+// ---------------------------------------------------------------------------
+
+static void cmd_rx_stats(const char *src_call, int src_ssid) {
+    // Una línea (<=67 car.): ok/err/flags/overflows por demodulador
+    char r[128];
+    snprintf(r, sizeof(r), "RX ok/er/fl/ov v1 %lu/%lu/%lu/%lu v2 %lu/%lu/%lu/%lu",
+             (unsigned long)rx_stats_v1.frames_crc_ok, (unsigned long)rx_stats_v1.frames_crc_err,
+             (unsigned long)rx_stats_v1.hdlc_flags,    (unsigned long)rx_stats_v1.fifo_overflows,
+             (unsigned long)rx_stats_v2.frames_crc_ok, (unsigned long)rx_stats_v2.frames_crc_err,
+             (unsigned long)rx_stats_v2.hdlc_flags,    (unsigned long)rx_stats_v2.fifo_overflows);
+    APRS_queue_msg(src_call, src_ssid, r);
+}
+
+static void cmd_sys_status(const char *src_call, int src_ssid) {
+    unsigned long up = (unsigned long)(esp_timer_get_time() / 1000000LL);
+    char r[128];
+    snprintf(r, sizeof(r), "v%s up %lud%02luh%02lum heap %uK min %uK",
+             esp_app_get_description()->version,
+             up / 86400UL, (up / 3600UL) % 24UL, (up / 60UL) % 60UL,
+             (unsigned)(esp_get_free_heap_size() / 1024),
+             (unsigned)(esp_get_minimum_free_heap_size() / 1024));
+    APRS_queue_msg(src_call, src_ssid, r);
+}
+
+static void reboot_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(2000));   // deja salir la respuesta antes
+    esp_restart();
+}
+
+static void cmd_sys_reboot(const char *src_call, int src_ssid) {
+    if (!s_allow_reboot) {
+        APRS_queue_msg(src_call, src_ssid, "ERR:reboot disabled");
+        return;
+    }
+    if (xTaskCreate(reboot_task, "rc_reboot", 2048, NULL, 2, NULL) != pdPASS) {
+        APRS_queue_msg(src_call, src_ssid, "ERR:task alloc");
+        return;
+    }
+    APRS_queue_msg(src_call, src_ssid, "Rebooting in 2s");
+}
+
+static void cmd_unknown(const char *src_call, int src_ssid) {
+    APRS_queue_msg(src_call, src_ssid,
+                   "ERR:unknown cmd. tx,sstv|morse|aprs rx,stats|sstv sys,status");
+}
+
+// ---------------------------------------------------------------------------
+// Límite de frecuencia por origen (tabla de 4, reemplazo del más antiguo)
+// ---------------------------------------------------------------------------
+#define RATE_SLOTS 4
+static struct { char call[10]; int ssid; int64_t last_us; bool used; } s_rate[RATE_SLOTS];
+
+// true = permitido (y registra); false = ignorar sin responder
+static bool rate_allow(const char *call, int ssid) {
+    if (s_min_interval_s <= 0) return true;
+    int64_t now = esp_timer_get_time();
+    int64_t min_us = (int64_t)s_min_interval_s * 1000000LL;
+    int free_i = -1, oldest_i = 0;
+    for (int i = 0; i < RATE_SLOTS; i++) {
+        if (!s_rate[i].used) { if (free_i < 0) free_i = i; continue; }
+        if (s_rate[i].ssid == ssid && strncmp(s_rate[i].call, call, sizeof(s_rate[i].call) - 1) == 0) {
+            if (now - s_rate[i].last_us < min_us) return false;
+            s_rate[i].last_us = now;
+            return true;
+        }
+        if (s_rate[oldest_i].used == false || s_rate[i].last_us < s_rate[oldest_i].last_us) oldest_i = i;
+    }
+    int i = free_i >= 0 ? free_i : oldest_i;
+    memset(&s_rate[i], 0, sizeof(s_rate[i]));
+    strncpy(s_rate[i].call, call, sizeof(s_rate[i].call) - 1);
+    s_rate[i].ssid = ssid;
+    s_rate[i].last_us = now;
+    s_rate[i].used = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -213,6 +303,11 @@ void remote_cmd_handle(const char *src_call, int src_ssid, const char *text) {
     for (char *c = parts[0]; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
     for (char *c = parts[1]; *c; c++) if (*c >= 'A' && *c <= 'Z') *c += 32;
 
+    if (!rate_allow(src_call, src_ssid)) {
+        ESP_LOGW(TAG, "rate limit: ignoring cmd from %s-%d", src_call, src_ssid);
+        return;
+    }
+
     ESP_LOGI(TAG, "from %s-%d: %s,%s%s%s",
              src_call, src_ssid, parts[0], parts[1],
              n > 2 ? "," : "", n > 2 ? parts[2] : "");
@@ -227,16 +322,34 @@ void remote_cmd_handle(const char *src_call, int src_ssid, const char *text) {
             // tx,morse,beacon
             if (n < 3 || strcasecmp(parts[2], "beacon") == 0)
                 cmd_tx_morse(src_call, src_ssid);
+            else
+                cmd_unknown(src_call, src_ssid);
         } else if (strcmp(parts[1], "aprs") == 0) {
             // tx,aprs,position
             if (n > 2 && strcasecmp(parts[2], "position") == 0)
                 cmd_tx_aprs_position(src_call, src_ssid);
+            else
+                cmd_unknown(src_call, src_ssid);
+        } else {
+            cmd_unknown(src_call, src_ssid);
         }
     } else if (strcmp(parts[0], "rx") == 0) {
         if (strcmp(parts[1], "sstv") == 0) {
             // rx,sstv,list
             if (n > 2 && strcasecmp(parts[2], "list") == 0)
                 cmd_rx_sstv_list(src_call, src_ssid);
+            else
+                cmd_unknown(src_call, src_ssid);
+        } else if (strcmp(parts[1], "stats") == 0) {
+            cmd_rx_stats(src_call, src_ssid);
+        } else {
+            cmd_unknown(src_call, src_ssid);
         }
+    } else if (strcmp(parts[0], "sys") == 0) {
+        if (strcmp(parts[1], "status") == 0)      cmd_sys_status(src_call, src_ssid);
+        else if (strcmp(parts[1], "reboot") == 0) cmd_sys_reboot(src_call, src_ssid);
+        else                                      cmd_unknown(src_call, src_ssid);
+    } else {
+        cmd_unknown(src_call, src_ssid);
     }
 }

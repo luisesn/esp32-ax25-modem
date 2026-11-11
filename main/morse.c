@@ -67,21 +67,37 @@ extern void afsk_morse_tx_end(void);
 // Sample generation helpers
 // ---------------------------------------------------------------------------
 
-// Write `count` samples (tone or silence) into s_dac_buf, flushing a full
-// 2048-byte frame to the DAC every time the buffer fills up.
-static void write_samples(uint32_t count, bool tone) {
-    for (uint32_t i = 0; i < count; i++) {
-        if (tone) {
-            s_phase += s_phase_step;
-            s_dac_buf[s_buf_fill] = s_sine_lut[(s_phase >> 24) & 0xFF];
-        } else {
-            s_dac_buf[s_buf_fill] = 128; /* DC mid-rail = silence */
-        }
-        if (++s_buf_fill == MORSE_DAC_FRAME_SIZE) {
-            afsk_morse_tx_frame(s_dac_buf);
-            s_buf_fill = 0;
-        }
+// Rampa de 5 ms (48 kHz) al inicio y fin de cada elemento: evita clics.
+#define MORSE_RAMP_SAMPLES 240u
+
+static inline void put_sample(uint8_t v) {
+    s_dac_buf[s_buf_fill] = v;
+    if (++s_buf_fill == MORSE_DAC_FRAME_SIZE) {
+        afsk_morse_tx_frame(s_dac_buf);
+        s_buf_fill = 0;
     }
+}
+
+// Silencio: `count` muestras a nivel DC (128), vaciando el buffer cada 2048 B.
+static void write_silence(uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) put_sample(128);
+}
+
+// Tono de `count` muestras con envolvente lineal de MORSE_RAMP_SAMPLES en
+// ambos flancos (si el elemento es más corto que 2 rampas, el pico baja).
+static void write_tone(uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t k = i;
+        if (count - 1 - i < k) k = count - 1 - i;
+        if (k > MORSE_RAMP_SAMPLES) k = MORSE_RAMP_SAMPLES;
+        s_phase += s_phase_step;
+        int amp = (int)s_sine_lut[(s_phase >> 24) & 0xFF] - 128;
+        put_sample((uint8_t)(128 + (amp * (int)k) / (int)MORSE_RAMP_SAMPLES));
+    }
+}
+
+static void write_samples(uint32_t count, bool tone) {
+    if (tone) write_tone(count); else write_silence(count);
 }
 
 // Flush whatever is left in s_dac_buf (padded with silence) to the DAC.
@@ -109,13 +125,14 @@ static void send_morse_char(char c) {
         return;
     }
 
-    int idx = -1;
-    if      (c >= 'A' && c <= 'Z') idx = c - 'A';
-    else if (c >= 'a' && c <= 'z') idx = c - 'a';
-    else if (c >= '0' && c <= '9') idx = c - '0' + 26;
-    if (idx < 0 || idx >= 36) return;
+    const char *code = NULL;
+    if      (c >= 'A' && c <= 'Z') code = s_morse_table[c - 'A'];
+    else if (c >= 'a' && c <= 'z') code = s_morse_table[c - 'a'];
+    else if (c >= '0' && c <= '9') code = s_morse_table[c - '0' + 26];
+    else if (c == '/')             code = "-..-.";
+    else if (c == '-')             code = "-....-";   // separador de SSID
+    if (!code) return;
 
-    const char *code = s_morse_table[idx];
     while (*code) {
         uint32_t dur = (*code == '-') ? 3u : 1u;
         write_samples(dur * s_unit_samples, true);   /* element tone            */
@@ -177,6 +194,15 @@ bool morse_check_and_dispatch(void) {
     afsk_morse_tx_end();
 
     xSemaphoreGive(s_done_sem);
+    return true;
+}
+
+// Envía `text` en CW con el DAC y el PTT ya activos (p. ej. al final de SSTV).
+// No toca PTT ni conmuta el DAC; usa el buffer compartido de TX (seguro: se
+// llama secuencialmente desde receive_audio_task tras el flush del llamador).
+bool morse_send_text_in_tx(const char *text) {
+    if (!text || !text[0] || s_unit_samples == 0 || s_phase_step == 0) return false;
+    do_morse_tx(text);
     return true;
 }
 

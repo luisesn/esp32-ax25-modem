@@ -25,6 +25,11 @@ bool morse_check_and_dispatch(void);
 // receive_audio_task iteration.
 void morse_trigger_now(void);
 
+// Envía `text` en CW (A-Z, 0-9, '/') con el DAC en TX y el PTT YA activos; no
+// los toca. Bloqueante. Sólo desde receive_audio_task, con el buffer compartido
+// de TX vacío (tras flush). Devuelve false si morse no está inicializado.
+bool morse_send_text_in_tx(const char *text);
+
 #ifdef __cplusplus
 }
 #endif

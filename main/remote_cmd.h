@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Initialise remote command handler from config.json root object.
-// Reads remote_cmd.enabled.
+// Reads remote_cmd.enabled, remote_cmd.allow_reboot (false), remote_cmd.min_interval_s (10).
 void remote_cmd_init(const cJSON *cfg);
 
 // Called when an APRS message addressed to our callsign arrives.

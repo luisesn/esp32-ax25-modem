@@ -2,6 +2,8 @@
 #include "LibAPRS-esp32-i2s/src/AFSK.h"
 #include "config.h"
 #include "audio_stream.h"
+#include "morse.h"
+#include "aux_config.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "esp_http_server.h"
@@ -547,6 +549,35 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
 }
 
 // ---------------------------------------------------------------------------
+// Identificación CW al final de la transmisión (sstv.cw_id, por defecto false).
+// Se llama con el PTT activo y el buffer compartido ya vaciado (dac_flush).
+// No hay LBT aquí: el canal ya se comprobó antes de empezar la imagen.
+// ---------------------------------------------------------------------------
+static void sstv_send_cw_id(void) {
+    cJSON *cfg = config_get();
+    if (!cfg) return;
+    char id[16] = "";
+    bool want = false;
+    cJSON *sj = cJSON_GetObjectItem(cfg, "sstv");
+    cJSON *cw = sj ? cJSON_GetObjectItem(sj, "cw_id") : NULL;
+    if (cJSON_IsTrue(cw)) {
+        cJSON *aprs = cJSON_GetObjectItem(cfg, "aprs");
+        cJSON *cs   = aprs ? cJSON_GetObjectItem(aprs, "callsign") : NULL;
+        cJSON *ss   = aprs ? cJSON_GetObjectItem(aprs, "ssid") : NULL;
+        if (cJSON_IsString(cs) && cs->valuestring[0]) {
+            int n = (cJSON_IsNumber(ss) && ss->valueint > 0 && ss->valueint <= 15) ? ss->valueint : 0;
+            if (n) snprintf(id, sizeof(id), "%.9s-%d", cs->valuestring, n);
+            else   snprintf(id, sizeof(id), "%.9s", cs->valuestring);
+            want = true;
+        }
+    }
+    config_free_json(cfg);
+    if (!want || s_sstv_abort) return;
+    ESP_LOGI(TAG, "CW ID: %s", id);
+    morse_send_text_in_tx(id);
+}
+
+// ---------------------------------------------------------------------------
 // Main transmit function
 // ---------------------------------------------------------------------------
 void sstv_transmit(const SstvRequest *req) {
@@ -655,6 +686,7 @@ void sstv_transmit(const SstvRequest *req) {
 
     /* fin de la transmisión */
     dac_flush();  /* send any remaining samples before dropping PTT */
+    sstv_send_cw_id();  /* identificación CW opcional (sstv.cw_id), PTT aún activo */
     fclose(f);
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
