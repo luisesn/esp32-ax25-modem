@@ -439,7 +439,11 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 
     char msg_id[6]; size_t id_len = 0;
     const uint8_t *q = brace + 1;
-    while (q < end && id_len < 5 && *q >= '0' && *q <= '9')
+    // ID alfanumérico de 1-5 caracteres; se corta en '}' (reply-ack "{AB}CD")
+    // o en cualquier otro carácter no alfanumérico.
+    while (q < end && id_len < 5 &&
+           ((*q >= '0' && *q <= '9') || (*q >= 'A' && *q <= 'Z') ||
+            (*q >= 'a' && *q <= 'z')))
         msg_id[id_len++] = (char)*q++;
     msg_id[id_len] = '\0';
     if (id_len == 0) return;
@@ -702,6 +706,21 @@ static void audio_sample_hook(int8_t sample) {
 // Envoltorio de la función TX: anota la trama para el panel de debug de
 // netdiag y delega en la función real (AX.25 o smart_tx_frame con IL2P).
 static void (*s_real_tx_fn)(const uint8_t *, size_t) = NULL;
+
+// Tramas del modo TUN de ax25ip.c: cabecera PI 00 00 08 00 + IPv4, sin
+// direcciones AX.25. Siempre van por AX.25 normal: smart_tx_frame las
+// interpretaría como AX.25 y podría mandarlas corruptas por IL2P.
+// TODO: FEC IL2P para TUN pendiente de B14 (códec RS defectuoso).
+static void smart_tx_or_tun(const uint8_t *data, size_t len)
+{
+    if (len >= 5 && data[0] == 0x00 && data[1] == 0x00 &&
+        data[2] == 0x08 && data[3] == 0x00 && (data[4] & 0xF0) == 0x40) {
+        APRS_send_raw_frame(data, len);
+        return;
+    }
+    smart_tx_frame(data, len);
+}
+
 static void tx_noted_frame(const uint8_t *data, size_t len)
 {
     netdiag_note_tx(data, len);
@@ -779,7 +798,7 @@ void app_main(void)
         }
         il2p_init(il2p_en, on_ax25_raw_frame);
         if (il2p_en)
-            s_real_tx_fn = smart_tx_frame;
+            s_real_tx_fn = smart_tx_or_tun;
         config_free_json(boot_cfg);
     }
 
