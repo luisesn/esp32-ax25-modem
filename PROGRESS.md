@@ -606,3 +606,4 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 ## 2026-11-11 — Correcciones B1–B6 (v1.6.1–v1.6.4)
 - B1 (parcial) tramas TUN siempre por AX.25; B5 auto-ACK alfanumérico (v1.6.1). B2 timeout de envío KISS y B3 reintento STA desde el AP (v1.6.2). B4 formato de posición compartido (v1.6.3). B6 digipeater (v1.6.4).
 - Trabajo repartido en 4 agentes en paralelo por fichero; compilación conjunta OK (≈43 % libre). **Sin probar en hardware**; B6 verificado con test de host.
+- v1.6.5: B2 completo: la salida KISS pasa por un MessageBuffer y `kiss_writer_task`; el hook de RX ya no puede bloquearse con un cliente colgado.

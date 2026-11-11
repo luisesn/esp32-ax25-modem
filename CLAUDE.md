@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.6.4): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P (códec Reed-Solomon defectuoso: no usar, ver trampas), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.6.5): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P (códec Reed-Solomon defectuoso: no usar, ver trampas), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
 
 Se basa en una adaptación de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino). El fork propio vive en **https://github.com/luisesn/LibAPRS-esp32-i2s** y está clonado en `main/LibAPRS-esp32-i2s/` como **repo git anidado** (ver "Librería LibAPRS" más abajo). Reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -177,6 +177,9 @@ server_task (transport_wifi.c, cliente TCP KISS conectado; TCP keepalive + escri
   recibe bytes KISS → kiss_rx_byte() → on_kiss_frame → afsk_queue_tx_frame()
     (bloquea hasta KISS_TX_ENQUEUE_TIMEOUT_MS = 15 s si la cola está llena: contrapresión)
     ↑ NO llama APRS_send_raw_frame directamente (viola mutex ADC)
+
+Salida KISS hacia el host (v1.6.5): kiss_send_frame → transport_write → copia a MessageBuffer (3 KB, sin espera)
+  → kiss_writer_task (prio 6) hace el send() con SO_SNDTIMEO 150 ms. El hook de RX nunca toca el socket.
 
 TX (despachado por receive_audio_task desde s_tx_queue):
   s_tx_fn(data, len) = APRS_send_raw_frame (o smart_tx_frame: PID 0xCC → IL2P, resto AX.25)

@@ -55,9 +55,9 @@ Arreglo propuesto: que `ax25ip` marque sus tramas (o que `smart_tx_frame` recono
 
 Arreglo: `SO_SNDTIMEO` corto (100–200 ms) y descartar la trama si expira; mejor aún, una cola hacia una tarea de escritura para que el hook no toque nunca un socket.
 
-El mismo patrón, más acotado, existe con el WebSocket: `audio_stream_ws_send_text` puede esperar hasta 200 ms de mutex más 500 ms por cliente dentro del hook.
+~~El mismo patrón existe con el WebSocket~~: ya estaba resuelto en el código (ver la nota «Hecho» más abajo).
 
-> **Hecho 2026-11-11** — v1.6.2: `SO_SNDTIMEO` de 150 ms; si expira se descarta la trama, y tras un envío parcial o 100 descartes seguidos se cierra el cliente. El WebSocket (`audio_stream_ws_send_text`) sigue sin tratar.
+> **Hecho 2026-11-11** — v1.6.2: `SO_SNDTIMEO` de 150 ms y cierre del cliente tras un envío parcial o 100 descartes. **v1.6.5**: el hook de RX ya no toca nunca el socket: `wifi_transport_write` copia la trama a un `MessageBuffer` de 3 KB (sin espera) y la envía `kiss_writer_task` (stack 2,5 KB, prio 6); si el cliente no lee y el buffer se llena, se descartan tramas sin afectar a la recepción. Coste ≈6 KB de heap. El WebSocket ya estaba resuelto (`ws_try_send`: comprueba que el socket admita escritura, descarta y cierra tras `WS_STALL_LIMIT` fallos; sólo queda la espera acotada de `s_ws_tx_mutex`, ≤200 ms, y de `s_log_mutex`, que sólo protege copias de memoria de ≤250 entradas). La nota de este informe sobre «700 ms por cliente» describía una versión anterior. Sin probar en hardware.
 
 **B3. ✅ La caída a AP es terminal** — bucle de reconexión en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**
 
