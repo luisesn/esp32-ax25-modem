@@ -611,3 +611,10 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 ## 2026-11-11 — B14, B15, F1 y B8 (v1.6.6, v1.6.7, v1.7.0)
 - B15 subida SSTV sin pérdida de bytes (v1.6.6, test de host con el handler real). B14 códec RS + alineación de cabecera IL2P (v1.6.7, round-trip en host). F1 reintento de mensajes con ACK y B8 error de cola llena (v1.7.0; librería `76fb3c1`).
 - B7 descartado por requisitos (1 cliente web + 1 KISS). Compilación conjunta OK (≈43 % libre). **Sin probar en hardware.**
+
+## 2026-11-11 — v1.8.0: IL2P estándar
+
+- `rs_codec.c` reescrito (GF(2⁸) 0x11D, fcr=0, nroots genérico); `il2p.c` reescrito según Dire Wolf: cabecera 13+2 tipo 1 (UI/I/S/U) y tipo 0, scrambler por bloque, bloques pequeños/grandes, sync 0xF15E48, bits MSB primero (bitrev en TX), decodificación en `il2p_poll`.
+- ISR de TX: con `il2p_tx` no se escapa 0x1B (lib LibAPRS, `AFSK.cpp`).
+- TUN con FEC: `il2p_tx_raw()` (tipo 0 opaco). Opciones `il2p.max_fec` / `il2p.tx_all`.
+- Validado en host: scrambler, ejemplos 2 y 3 de la spec byte a byte, round-trips con errores. Sin probar en el aire. Detalle: `informe_bugs_funcionalidades.md` §2 bis.

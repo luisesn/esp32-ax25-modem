@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.7.0): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P (códec Reed-Solomon defectuoso: no usar, ver trampas), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.8.0): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P estándar (v1.8.0, validado en host con los vectores de la spec; sin probar en el aire), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
 
 Se basa en una adaptación de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino). El fork propio vive en **https://github.com/luisesn/LibAPRS-esp32-i2s** y está clonado en `main/LibAPRS-esp32-i2s/` como **repo git anidado** (ver "Librería LibAPRS" más abajo). Reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -239,7 +239,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **`aprs_poll_task` y el `raw_hook`**: `APRS_poll()` ya no corre en `receive_audio_task` sino en `aprs_poll_task` (prio 9), por lo que `on_ax25_raw_frame` se ejecuta en esa tarea. No bloquear en el hook (WS lento, mutex) o se llenan los FIFOs de RX. `FIFO.h` tiene variantes `_locked` (portMUX); el resto de `fifo_*` sin lock se usa en rutas de una sola tarea/ISR — auditar antes de tocar.
 
-- **IL2P**: `il2p.enabled` (por defecto false). Con IL2P activo `smart_tx_or_tun` (main.c) manda las tramas TUN siempre por AX.25 y `smart_tx_frame` enruta PID=0xCC por IL2P y el resto por AX.25; la RX acepta ambos en paralelo. `rs_codec.c` usa GF(2⁸) para RS(255,239) del payload y la cabecera (2 raíces). **Códec corregido en v1.6.7 (B14) y validado sólo en host** (round-trip TX→RX con errores); falta probar en hardware y **no es interoperable con Dire Wolf** (B14 bis: cabecera 14+2 propia, indicativos 6 bits, scrambler propio). El tráfico IP del modo TUN no recibe FEC IL2P (B1: haría falta un modo de payload opaco).
+- **IL2P** (v1.8.0): `il2p.enabled` (por defecto false), `il2p.max_fec` (true), `il2p.tx_all` (false: sólo PID 0xCC por IL2P). Formato estándar (Dire Wolf): cabecera 13+2 tipo 1 (UI/I/S/U) o tipo 0 (path con repetidores, otras tramas, **TUN opaco** vía `il2p_tx_raw`), sync 0xF15E48, RS GF(2⁸) fcr=0 (`rs_codec.c`), scrambler por bloque, bits MSB primero (el TX hace `bitrev8` porque AFSK envía LSB primero; el ISR no escapa 0x1B con `il2p_tx`). La decodificación RS corre en `il2p_poll`. Validado en host con los vectores de la spec; **sin probar sobre el aire ni en hardware**. Ver `informe_bugs_funcionalidades.md` §2 bis.
 
 - **Repetidor deshabilitado**: `REPEATER_ENABLED 0` en `config.h` (reservar ~15 KB contiguos de heap, pausa RX y detiene el servidor WAV). Con 0, ni `config.json` ni `/api/repeater/enable` pueden activarlo. Hay presión de heap: vigilar buffers `static` grandes y stacks de tareas.
 
@@ -319,9 +319,9 @@ Resumen rápido (2026-11-11):
 - Dedup de tramas RX por doble módem en `on_ax25_raw_frame()` ✅
 - Listen-Before-Talk + inhibición post-RX + autoajuste `post_rx_tx_delay_ms` (TUNE) ✅ (LBT usa `carrier_detect`, siempre activo; desactivado por defecto; cubre cola AFSK, morse y SSTV, no el repetidor; con CSMA p-persistente)
 - GPS + baliza de posición periódica; display SSD1306; digipeater WIDEn-N; baliza CW ✅
-- IL2P ⚠️ códec corregido (v1.6.7, validado en host), pendiente de HW; no interopera con Dire Wolf (B14 bis) y sin FEC para TUN (B1)
+- IL2P ⚠️ reescrito al estándar (v1.8.0): vectores de la spec OK en host, FEC también para TUN (tipo 0 opaco); pendiente de pruebas en el aire/HW
 - Subida de imágenes SSTV desde la web corregida (v1.6.6, B15; probada en host, falta HW) ✅
-- Reintento de mensajes con seguimiento de ACK (`msg_retry.c`, v1.7.0, F1) ✅
+- Reintento de mensajes con seguimiento de ACK (`msg_retry.c`, v1.8.0, F1) ✅
 - Diagnóstico de red en la web (`netdiag.c`: ping, miniconsola TCP/UDP) ✅
 - OTA por HTTP y por `espota.py`; WiFi multi-red con fallback AP ✅
 - Consola RF (TCP/UDP) ✅

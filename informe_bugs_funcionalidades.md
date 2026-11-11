@@ -28,7 +28,7 @@ Cada hallazgo lleva una etiqueta de confianza:
 | ~~B5~~ ✅ | Auto-ACK sólo con identificadores numéricos | Mensajes de clientes con ID alfanumérico nunca reciben ACK | Bajo |
 | ~~B6~~ ✅ | Digipeater: dedup sobre la trama completa y sin filtro de tramas propias | Repeticiones duplicadas en cuanto haya otro digi en cobertura | Medio |
 | ~~B7~~ 🚫 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
-| ~~B14~~ ✅ | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
+| ~~B14~~ ✅ | El códec Reed-Solomon no decodifica ni sus propios bloques (rehecho como IL2P estándar en v1.8.0, ver §2 bis) | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
 | ~~B15~~ ✅ | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
 | ~~B16~~ | ✅ **HECHO (v1.5.0)** SSTV y morse transmitían sin LBT ni espera post-RX | Pisaban el canal aunque `tx.lbt_enabled` estuviera activo | Bajo |
 | ~~F1~~ ✅ | Reintento de mensajes con seguimiento de ACK | Hoy un mensaje perdido se pierde sin aviso | Medio |
@@ -47,7 +47,7 @@ Cada hallazgo lleva una etiqueta de confianza:
 
 Arreglo propuesto: que `ax25ip` marque sus tramas (o que `smart_tx_frame` reconozca el prefijo TUN) y que IL2P tenga un modo "payload opaco" sin recodificar indicativos. Ver también B14.
 
-> **Hecho 2026-11-11** — parcial (v1.6.1): las tramas TUN (`00 00 08 00` + IPv4) van siempre por AX.25 (`smart_tx_or_tun` en `main.c`), lo que elimina la corrupción de ~1/256 paquetes. **Pendiente**: FEC IL2P para TUN (requiere modo payload opaco en `il2p.c` y arreglar B14).
+> **Hecho 2026-11-11** — parcial (v1.6.1): las tramas TUN (`00 00 08 00` + IPv4) van siempre por AX.25 (`smart_tx_or_tun` en `main.c`), lo que elimina la corrupción de ~1/256 paquetes. FEC IL2P para TUN resuelto en v1.8.0 (`il2p_tx_raw`, ver §2 bis, I9).
 
 **B2. ✅ Escritura bloqueante al cliente KISS desde la ruta de RX** — `wifi_transport_write` en [main/transport_wifi.c](main/transport_wifi.c) · **[Leído]**, impacto **[Hipótesis]**
 
@@ -152,11 +152,13 @@ Con las cinco correcciones, en la misma prueba: 0 a 8 errores por bloque corregi
 
 Falta comprobar que el polinomio y la primera raíz coinciden con los de la especificación IL2P; la prueba sólo demuestra que el códec es coherente consigo mismo.
 
-**B14 bis. IL2P no es interoperable aunque se arregle el códec** — [main/il2p.c](main/il2p.c) · **[Hipótesis]** (comparación hecha de memoria con la especificación)
+**B14 bis. ✅ IL2P no era interoperable aunque se arreglara el códec** — [main/il2p.c](main/il2p.c) · **[Hipótesis]** (comparación hecha de memoria con la especificación)
 
 La implementación difiere de IL2P estándar en varios puntos: tamaño de cabecera (14+2 frente a 13+2), codificación de indicativos, preámbulo 0x7E y exigencia de flags antes del sync, semilla del scrambler, reparto de bloques RS y uso de NRZI. Además descarta el path de digipeaters. Decidir si se quiere IL2P estándar (reescritura parcial contrastando con la especificación y con Dire Wolf) o un FEC propio documentado como tal.
 
-> **Hecho 2026-11-11** — v1.6.7: las 5 correcciones aplicadas a `rs_codec.c` (también en `rsh_encode`) y comprobación de cordura de la cabecera. Validado en host: RS8 0–8 errores 300/300 en 5 longitudes, 9 errores rechazados; cabecera 0/1 error 2000/2000 (2 errores: 5,5 % de falsas correcciones, límite del códec); round-trip `il2p_tx_frame`→`il2p_rx_bit`→`il2p_poll` de 11 tamaños, limpios y con 2 bytes corruptos: 22/22. **Bug adicional corregido**: en `rx_process_bit` (`IL2P_SYNC`) un `bit_count++` tras `rx_start_header()` desalineaba la cabecera 1 bit, así que ninguna cabecera se decodificaba. Pendiente: no interoperable con Dire Wolf (B14 bis), no probado en hardware ni con NRZI/módem real.
+> **Hecho 2026-11-11** — v1.6.7: las 5 correcciones aplicadas a `rs_codec.c` (también en `rsh_encode`) y comprobación de cordura de la cabecera. Validado en host: RS8 0–8 errores 300/300 en 5 longitudes, 9 errores rechazados; cabecera 0/1 error 2000/2000 (2 errores: 5,5 % de falsas correcciones, límite del códec); round-trip `il2p_tx_frame`→`il2p_rx_bit`→`il2p_poll` de 11 tamaños, limpios y con 2 bytes corruptos: 22/22. **Bug adicional corregido**: en `rx_process_bit` (`IL2P_SYNC`) un `bit_count++` tras `rx_start_header()` desalineaba la cabecera 1 bit, así que ninguna cabecera se decodificaba. Superado en v1.8.0 por la reescritura estándar (§2 bis).
+
+> **Hecho 2026-11-11** — v1.8.0: IL2P reescrito según Dire Wolf y los vectores de la especificación (ver §2 bis). Pendiente: pruebas sobre el aire.
 
 **B15. ✅ La subida de imágenes SSTV corrompe el fichero** — `sstv_upload_handler` en [main/sstv.c](main/sstv.c) · **[Calculado]** (port del bucle a Python) (prioridad alta si se usa SSTV)
 
@@ -295,6 +297,29 @@ Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran
 ### 2.3 Largo plazo o bajo retorno
 
 KISS por UART/USB/Bluetooth, AGWPE, RX de SSTV, CTCSS, PTT activo bajo configurable, registro de arranque en SPIFFS, páginas del display (todos en el backlog). No se ha encontrado motivo para adelantarlos.
+
+## 2 bis. IL2P: lo necesario para que funcione correctamente
+
+Comparación hecha con las fuentes de Dire Wolf (`il2p_*.c`, descargadas y leídas) y con los vectores de la especificación incluidos en su `il2p_test.c`. El B14 sólo arreglaba el códec; para funcionar de verdad hacía falta además:
+
+| # | Requisito | Estado previo | Estado (v1.8.0) |
+|---|---|---|---|
+| I1 | **RS estándar**: GF(2⁸) 0x11D, primera raíz α⁰ (fcr=0), 2/4/6/8/16 raíces | fcr=1 (no estándar) y sólo 2 y 16 raíces | ✅ `rs_codec.c` reescrito (BM + Chien + Forney, genérico en nroots) |
+| I2 | **Cabecera 13 B + 2 de paridad** con el reparto de bits de la spec (campos en los bits 6/7 de cada byte, SIXBIT = ASCII−32) | 14+2 propio, indicativos en 6 bits sin la tabla estándar | ✅ tipo 1 (UI, I, S, U mod-8) |
+| I3 | **Cabecera tipo 0** (encapsulado transparente) para lo que no cabe en tipo 1: repetidores en el path, indicativos con minúsculas, SABME… | el path se descartaba | ✅ la trama AX.25 completa va en la carga |
+| I4 | **Scrambler** x⁹+x⁴+1 con la semilla y el truco de 5 bits de la spec, **reiniciado por bloque** | semilla propia y un solo LFSR continuo | ✅ vectores de la spec |
+| I5 | **Bloques pequeños/grandes** y paridad automática (2/4/6/8) o máxima (16) | bloques de 239 fijos con 16 | ✅ (`il2p.max_fec`, por defecto true) |
+| I6 | **Sync 0xF15E48** sin exigir preámbulo 0x7E; preámbulo 0x55 en TX; tolerancia de 1 bit en el sync | exigía ≥4 flags 0x7E y sync exacto | ✅ |
+| I7 | **Orden de bits**: IL2P va MSB primero; el TX AFSK envía cada byte LSB primero | los bytes salían con los bits invertidos de orden | ✅ `bitrev8` antes de `AFSK_transmit` |
+| I8 | **0x1B en los datos**: el ISR de TX trataba 0x1B (`AX25_ESC`) como escape y se comía el byte | un byte 0x1B (≈1 de cada 256 por byte) corrompía la trama | ✅ el ISR no escapa con `il2p_tx` |
+| I9 | **Tráfico TUN con FEC (resto de B1)**: tramas `00 00 08 00` + IPv4 como bytes opacos | iban por AX.25 sin FEC | ✅ `il2p_tx_raw()`, cabecera tipo 0 (sólo lo entienden equipos con este firmware) |
+| I10 | **Decodificación fuera de la tarea de audio**: el RS se ejecuta en `il2p_poll` (`aprs_poll_task`) | en `receive_audio_task` | ✅ estado `RX_PENDING` |
+| I11 | **Validación temprana de la cabecera** (indicativos A-Z/0-9, longitud) para descartar falsos sync | comprobación parcial | ✅ |
+| I12 | Opciones `il2p.max_fec` y `il2p.tx_all` (todo por IL2P, no sólo PID 0xCC) | no existían | ✅ |
+
+**Validación en host** (`gcc` con stubs, sin hardware): el scrambler, la cabecera+paridad RS del ejemplo 2 (UI) y la trama completa del ejemplo 3 (I-frame con 9 B de info) coinciden **byte a byte** con los vectores de la especificación; decodificación de ambos ejemplos; round-trip TX→RX bit a bit de 4 tipos de trama (UI con PID F0, UI con PID CC, UI con un repetidor → tipo 0, TUN opaco) × 14 tamaños (0–1000 B) × FEC automático/máximo, limpios y con un símbolo corrupto en cabecera y otro en la carga: todo correcto.
+
+**Pendiente / no verificado**: (a) prueba con Dire Wolf o similar sobre el aire (los vectores prueban el formato, no el módem); (b) NRZI y polaridad con el módem real (el RX no prueba la polaridad invertida; con NRZI no debería hacer falta); (c) umbral de 1 bit de error en el sync, ajustar si hay falsos positivos con ruido; (d) las tramas TUN opacas no las entiende Dire Wolf (no es AX.25); (e) el IL2P de entrada no pasa por el control `rx_stats`.
 
 ## 3. Calidad y mantenimiento
 
