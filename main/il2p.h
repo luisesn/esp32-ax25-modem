@@ -5,12 +5,15 @@
  * Replaces AX.25/HDLC framing with Reed-Solomon FEC + LFSR scrambling.
  * Operates on the same Bell-202 AFSK modem (no RF changes).
  *
- * Config: { "il2p": { "enabled": false } }
+ * Config: { "il2p": { "enabled": false, "max_fec": true, "tx_all": false } }
+ * Formato estándar (compatible con Dire Wolf): cabecera 13+2 tipo 0/1, sync
+ * 0xF15E48, RS GF(2^8) fcr=0, scrambler por bloque, bits MSB primero.
  *
  * When enabled:
  *   RX: accepts IL2P frames in parallel with AX.25; delivers decoded frames
  *       to the same on_ax25_raw_frame callback as standard AX.25.
- *   TX: smart_tx_frame() routes by PID — PID=0xCC (IP) → IL2P, rest → AX.25.
+ *   TX: smart_tx_frame() routes by PID — PID=0xCC (IP) → IL2P, rest → AX.25
+ *       (con tx_all=true todo va por IL2P). Tramas TUN crudas: il2p_tx_raw().
  */
 
 #include <stdint.h>
@@ -36,6 +39,20 @@ void il2p_poll(void);
 /* TX: encode AX.25 raw frame into IL2P and transmit.
  * Uses AFSK_transmit() with bit-stuffing disabled. */
 void il2p_tx_frame(const uint8_t *ax25_raw, size_t len);
+
+/* TX de bytes opacos (tramas TUN 00 00 08 00 + IPv4) con cabecera tipo 0. */
+void il2p_tx_raw(const uint8_t *data, size_t len);
+
+/* Opciones de TX: max_fec = 16 símbolos de paridad por bloque; tx_all = todo
+ * el tráfico por IL2P (no sólo PID 0xCC). */
+void il2p_set_options(bool max_fec, bool tx_all);
+
+/* Codificación/decodificación de una trama completa sin sync (pruebas en host).
+ * out ≥ 1100 B en decode, ≥ 1100+80 en encode. Devuelven longitud o -1. */
+int il2p_encode_frame(const uint8_t *ax, size_t len, bool raw, bool max_fec, uint8_t *out);
+int il2p_decode_frame(const uint8_t *in, uint8_t *out);
+void il2p_scramble_block(const uint8_t *in, uint8_t *out, int len);
+void il2p_descramble_block(const uint8_t *in, uint8_t *out, int len);
 
 /* TX dispatcher: routes by PID byte in the AX.25 frame.
  *   PID == 0xCC (IP/RFC-1226) → il2p_tx_frame()

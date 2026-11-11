@@ -725,14 +725,13 @@ static void audio_sample_hook(int8_t sample) {
 static void (*s_real_tx_fn)(const uint8_t *, size_t) = NULL;
 
 // Tramas del modo TUN de ax25ip.c: cabecera PI 00 00 08 00 + IPv4, sin
-// direcciones AX.25. Siempre van por AX.25 normal: smart_tx_frame las
-// interpretaría como AX.25 y podría mandarlas corruptas por IL2P.
-// TODO: FEC IL2P para TUN pendiente de B14 (códec RS defectuoso).
+// direcciones AX.25. Con IL2P van como bytes opacos (cabecera tipo 0, con FEC);
+// smart_tx_frame las interpretaría como AX.25 y las corrompería.
 static void smart_tx_or_tun(const uint8_t *data, size_t len)
 {
     if (len >= 5 && data[0] == 0x00 && data[1] == 0x00 &&
         data[2] == 0x08 && data[3] == 0x00 && (data[4] & 0xF0) == 0x40) {
-        APRS_send_raw_frame(data, len);
+        il2p_tx_raw(data, len);
         return;
     }
     smart_tx_frame(data, len);
@@ -812,6 +811,10 @@ void app_main(void)
         if (il2p_cfg) {
             cJSON *en = cJSON_GetObjectItem(il2p_cfg, "enabled");
             if (cJSON_IsBool(en)) il2p_en = cJSON_IsTrue(en);
+            cJSON *mf = cJSON_GetObjectItem(il2p_cfg, "max_fec");
+            cJSON *ta = cJSON_GetObjectItem(il2p_cfg, "tx_all");
+            il2p_set_options(cJSON_IsBool(mf) ? cJSON_IsTrue(mf) : true,
+                             cJSON_IsBool(ta) && cJSON_IsTrue(ta));
         }
         il2p_init(il2p_en, on_ax25_raw_frame);
         if (il2p_en)

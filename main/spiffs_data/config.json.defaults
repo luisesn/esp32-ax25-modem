@@ -31,7 +31,9 @@
     }
   },
   "il2p": {
-    "enabled": false
+    "enabled": false,
+    "max_fec": true,
+    "tx_all": false
   },
   "digi": {
     "enabled": false,

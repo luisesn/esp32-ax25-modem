@@ -1,15 +1,21 @@
 /*
- * IL2P — Improved Layer 2 Protocol
+ * IL2P — Improved Layer 2 Protocol (compatible con Dire Wolf / spec TARPN).
  *
- * Frame structure (after NRZI decoding):
- *   N × 0x7E        preamble (not scrambled)
- *   0xF1 0x5E 0x48  sync word (24 bits, not scrambled)
- *   16 bytes        shortened-RS encoded header, 14 data + 2 parity (scrambled)
- *   K × 255 bytes   RS(255,239) payload blocks (scrambled, last block ≤255)
+ * Trama (bits MSB primero, tras NRZI):
+ *   preámbulo 0x55…, sync 0xF1 0x5E 0x48 (sin scrambler),
+ *   cabecera 13 B + 2 B paridad RS (scrambler + RS(2 raíces)),
+ *   carga útil en bloques "pequeños/grandes", cada uno scrambler + RS
+ *   (2/4/6/8 raíces automáticas, o 16 con max_fec).
  *
- * LFSR polynomial x^9 + x^4 + 1, initial state 0x1FF, reset per frame.
- * RS parity computed on UNSCRAMBLED data; data+parity scrambled on TX.
- * Receiver: descramble → RS decode.
+ * Cabecera tipo 1: direcciones en SIXBIT (' '..'_'), sólo 2 direcciones
+ *   (sin repetidores) y tramas AX.25 mod-8; la carga es el campo de info.
+ * Cabecera tipo 0: encapsulado transparente; la carga es la trama completa
+ *   (cualquier otra cosa, y las tramas TUN "crudas" 00 00 08 00 + IPv4 de
+ *   ax25ip, que sólo entienden equipos con este firmware).
+ *
+ * El RS usa GF(2^8) 0x11D, fcr=0 (rs_codec.c). Scrambler: LFSR x^9+x^4+1
+ * por bloque (reinicia en cada cabecera/bloque), con el truco de Dire Wolf
+ * de descartar 5 bits al inicio y añadir 5 al final.
  */
 
 #include "il2p.h"
@@ -19,480 +25,472 @@
 #include <string.h>
 #include <stdbool.h>
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #define TAG "il2p"
 
-/* ─── public knobs ────────────────────────────────────────────────────────── */
-static bool               s_enabled  = false;
-static ax25_raw_callback_t s_cb       = NULL;
+static bool                s_enabled = false;
+static bool                s_max_fec = true;
+static bool                s_tx_all  = false;
+static ax25_raw_callback_t s_cb      = NULL;
 
-/* ─── protocol constants ─────────────────────────────────────────────────── */
-#define IL2P_SYNC_WORD   0xF15E48UL   /* 24-bit, transmitted unscrambled      */
-#define IL2P_HEADER_BYTES 16          /* 14 data + 2 RS parity                */
-#define IL2P_HEADER_DATA  14          /* holds 110 packed bits (36+4+36+4+4+8+8+10), 2 bits unused */
-#define IL2P_RS_NROOTS    16          /* parity bytes per payload block       */
-#define IL2P_BLOCK_DATA   239
-#define IL2P_BLOCK_TOTAL  255
-#define IL2P_MAX_PAYLOAD  1023
-#define IL2P_PREAMBLE_MIN 4           /* minimum 0x7E bytes before sync       */
+#define IL2P_SYNC_WORD   0xF15E48UL
+#define IL2P_HDR_SIZE    13
+#define IL2P_HDR_PARITY  2
+#define IL2P_MAX_PAYLOAD 1023
+#define IL2P_MAX_BLOCKS  5
+#define IL2P_MAX_ENC     (IL2P_MAX_PAYLOAD + IL2P_MAX_BLOCKS * 16)
+#define IL2P_PREAMBLE_N  4
+#define IL2P_TX_MAX      (IL2P_PREAMBLE_N + 3 + IL2P_HDR_SIZE + IL2P_HDR_PARITY + IL2P_MAX_ENC)
+#define FRAME_BUF_MAX    (IL2P_MAX_PAYLOAD + 20)
 
-/* ─── LFSR scrambler ─────────────────────────────────────────────────────── */
-static inline uint8_t lfsr_step(uint16_t *st)
+void il2p_set_options(bool max_fec, bool tx_all)
 {
-    uint8_t out = (uint8_t)((*st >> 8) ^ (*st >> 3)) & 1;
-    *st = (uint16_t)(((*st << 1) | out) & 0x1FF);
+    s_max_fec = max_fec;
+    s_tx_all  = tx_all;
+}
+
+/* ─── Scrambler (Dire Wolf il2p_scramble.c) ─────────────────────────────── */
+
+#define INIT_TX_LFSR 0x00f
+#define INIT_RX_LFSR 0x1f0
+
+static inline int scramble_bit(int in, int *state)
+{
+    int out = ((*state >> 4) ^ *state) & 1;
+    *state = ((((in ^ *state) & 1) << 9) | (*state ^ ((*state & 1) << 4))) >> 1;
     return out;
 }
 
-static inline uint8_t il2p_descramble(uint16_t *st, uint8_t bit)
+static inline int descramble_bit(int in, int *state)
 {
-    return bit ^ lfsr_step(st);
+    int out = (in ^ *state) & 1;
+    *state = ((*state >> 1) | ((in & 1) << 8)) ^ ((in & 1) << 3);
+    return out;
 }
 
-/* ─── 6-bit callsign encoding (IL2P ↔ AX.25 ASCII) ─────────────────────── */
-static uint8_t char_to_6bit(uint8_t c)
+void il2p_scramble_block(const uint8_t *in, uint8_t *out, int len)
 {
-    if (c >= 'A' && c <= 'Z') return (uint8_t)(c - 'A' + 1);
-    if (c >= 'a' && c <= 'z') return (uint8_t)(c - 'a' + 1);
-    if (c >= '0' && c <= '9') return (uint8_t)(c - '0' + 27);
-    return 0; /* space / unknown */
-}
-
-static uint8_t char_from_6bit(uint8_t v)
-{
-    if (v == 0)       return ' ';
-    if (v <= 26)      return (uint8_t)('A' + v - 1);
-    if (v <= 36)      return (uint8_t)('0' + v - 27);
-    return '?';
-}
-
-/* ─── Bit I/O helpers ────────────────────────────────────────────────────── */
-static void pack_bits(uint8_t *buf, int *bit_pos, uint32_t val, int nbits)
-{
-    for (int i = nbits - 1; i >= 0; i--) {
-        int byte_idx = *bit_pos / 8;
-        int bit_idx  = 7 - (*bit_pos % 8);
-        if ((val >> i) & 1) buf[byte_idx] |= (1 << bit_idx);
-        else                buf[byte_idx] &= ~(1 << bit_idx);
-        (*bit_pos)++;
-    }
-}
-
-static uint32_t unpack_bits(const uint8_t *buf, int *bit_pos, int nbits)
-{
-    uint32_t val = 0;
-    for (int i = 0; i < nbits; i++) {
-        int byte_idx = *bit_pos / 8;
-        int bit_idx  = 7 - (*bit_pos % 8);
-        val = (val << 1) | ((buf[byte_idx] >> bit_idx) & 1);
-        (*bit_pos)++;
-    }
-    return val;
-}
-
-/* ─── IL2P header encode/decode ──────────────────────────────────────────── */
-
-/* Parse an AX.25 address field: returns pointer past end of addresses.
- * Fills dest_call/ssid, src_call/ssid (ASCII, NUL-terminated), and
- * *ctrl_offset (byte index of the control byte in frame). */
-static const uint8_t *ax25_parse_addrs(const uint8_t *frame, size_t flen,
-                                        char dest[7], int *dest_ssid,
-                                        char src[7],  int *src_ssid,
-                                        int *ctrl_offset)
-{
-    if (flen < 14) return NULL;
-
-    for (int i = 0; i < 6; i++) dest[i] = (char)(frame[i] >> 1);
-    dest[6]    = '\0';
-    *dest_ssid = (frame[6] >> 1) & 0x0F;
-
-    for (int i = 0; i < 6; i++) src[i] = (char)(frame[7 + i] >> 1);
-    src[6]    = '\0';
-    *src_ssid = (frame[13] >> 1) & 0x0F;
-
-    /* End-of-address indicated by bit 0 of SSID byte */
-    int offset = 14;
-    /* Skip repeater addresses if present */
-    while (offset >= 2 && !(frame[offset - 1] & 0x01) && (size_t)(offset + 6) < flen)
-        offset += 7;
-
-    *ctrl_offset = offset;
-    return frame + offset;
-}
-
-/* Build 13-byte IL2P header from raw AX.25 frame.
- * Returns payload length, or -1 on error. */
-static int il2p_encode_header(const uint8_t *ax25, size_t ax25_len,
-                               uint8_t hdr[IL2P_HEADER_DATA])
-{
-    char dest[7], src[7];
-    int dest_ssid, src_ssid, ctrl_off;
-
-    if (!ax25_parse_addrs(ax25, ax25_len, dest, &dest_ssid, src, &src_ssid, &ctrl_off))
-        return -1;
-    if ((int)ax25_len < ctrl_off + 2) return -1; /* need at least ctrl + pid */
-
-    uint8_t ctrl = ax25[ctrl_off];
-    uint8_t pid  = ax25[ctrl_off + 1];
-    int payload_len = (int)ax25_len - ctrl_off - 2;
-    if (payload_len < 0) payload_len = 0;
-    if (payload_len > IL2P_MAX_PAYLOAD) return -1;
-
-    memset(hdr, 0, IL2P_HEADER_DATA);
-    int bp = 0;
-
-    /* Destination callsign: 6 × 6 bits */
-    for (int i = 0; i < 6; i++)
-        pack_bits(hdr, &bp, char_to_6bit((uint8_t)dest[i]), 6);
-
-    /* Destination SSID: 4 bits */
-    pack_bits(hdr, &bp, (uint32_t)dest_ssid, 4);
-
-    /* Source callsign: 6 × 6 bits */
-    for (int i = 0; i < 6; i++)
-        pack_bits(hdr, &bp, char_to_6bit((uint8_t)src[i]), 6);
-
-    /* Source SSID: 4 bits */
-    pack_bits(hdr, &bp, (uint32_t)src_ssid, 4);
-
-    /* Reserved + frame type: 4 bits (0=UI) */
-    pack_bits(hdr, &bp, 0, 4);
-
-    /* PID: 8 bits */
-    pack_bits(hdr, &bp, pid, 8);
-
-    /* Control: 8 bits */
-    pack_bits(hdr, &bp, ctrl, 8);
-
-    /* Payload length: 10 bits */
-    pack_bits(hdr, &bp, (uint32_t)payload_len, 10);
-
-    /* bp is now 110; the remaining 2 bits of the 14-byte buffer stay 0
-     * from the memset above (no fields left to pack). */
-
-    return payload_len;
-}
-
-/* Decode 13-byte IL2P header into AX.25 components.
- * Returns payload_len, or -1 on error. */
-static int il2p_decode_header(const uint8_t hdr[IL2P_HEADER_DATA],
-                               char dest[7], int *dest_ssid,
-                               char src[7],  int *src_ssid,
-                               uint8_t *ctrl, uint8_t *pid)
-{
-    int bp = 0;
-
-    for (int i = 0; i < 6; i++) dest[i] = (char)char_from_6bit((uint8_t)unpack_bits(hdr, &bp, 6));
-    dest[6]    = '\0';
-    *dest_ssid = (int)unpack_bits(hdr, &bp, 4);
-
-    for (int i = 0; i < 6; i++) src[i] = (char)char_from_6bit((uint8_t)unpack_bits(hdr, &bp, 6));
-    src[6]    = '\0';
-    *src_ssid  = (int)unpack_bits(hdr, &bp, 4);
-
-    /* frame type (reserved, 4 bits): el emisor siempre escribe 0 */
-    uint32_t reserved = unpack_bits(hdr, &bp, 4);
-
-    *pid  = (uint8_t)unpack_bits(hdr, &bp, 8);
-    *ctrl = (uint8_t)unpack_bits(hdr, &bp, 8);
-
-    int payload_len = (int)unpack_bits(hdr, &bp, 10);
-
-    /* Comprobación de cordura (B14): con 2 errores el RS de 2 bytes de
-     * paridad "corrige" mal en ≈5,5 % de los casos. Rechazar cabeceras con
-     * campos imposibles: bits reservados o sobrantes distintos de 0,
-     * indicativos vacíos o con símbolos fuera de A-Z/0-9/espacio. */
-    uint32_t spare = unpack_bits(hdr, &bp, 2);   /* bits 110..111, sin uso */
-    if (reserved != 0 || spare != 0) return -1;
-    if (dest[0] == ' ' || src[0] == ' ') return -1;
-    for (int i = 0; i < 6; i++)
-        if (dest[i] == '?' || src[i] == '?') return -1;
-    return payload_len;
-}
-
-/* Reconstruct raw AX.25 frame (no CRC) from decoded header + payload.
- * Returns byte length of the AX.25 frame, or -1 if buf is too small. */
-static int il2p_build_ax25(char dest[7], int dest_ssid,
-                            char src[7],  int src_ssid,
-                            uint8_t ctrl, uint8_t pid,
-                            const uint8_t *payload, int payload_len,
-                            uint8_t *out, size_t out_cap)
-{
-    /* Trim trailing spaces in callsigns */
-    while (dest[0] && dest[strlen(dest)-1] == ' ')
-        dest[strlen(dest)-1] = '\0';
-    while (src[0]  && src[strlen(src)-1]  == ' ')
-        src[strlen(src)-1]  = '\0';
-
-    int total = 14 + 2 + payload_len; /* 2 addresses + ctrl + pid + info */
-    if (total < 0 || (size_t)total > out_cap) return -1;
-
-    /* Destination address */
-    char tmp[7] = "      ";
-    int clen = (int)strlen(dest);
-    memcpy(tmp, dest, (size_t)(clen > 6 ? 6 : clen));
-    for (int i = 0; i < 6; i++) out[i] = (uint8_t)((tmp[i] & 0x7F) << 1);
-    out[6] = (uint8_t)(0x60 | ((dest_ssid & 0x0F) << 1)); /* H bit = 0 */
-
-    /* Source address */
-    clen = (int)strlen(src);
-    memset(tmp, ' ', 6); tmp[6] = '\0';
-    memcpy(tmp, src, (size_t)(clen > 6 ? 6 : clen));
-    for (int i = 0; i < 6; i++) out[7 + i] = (uint8_t)((tmp[i] & 0x7F) << 1);
-    out[13] = (uint8_t)(0x61 | ((src_ssid & 0x0F) << 1)); /* H bit = 1 (last addr) */
-
-    out[14] = ctrl;
-    out[15] = pid;
-    if (payload_len > 0) memcpy(out + 16, payload, (size_t)payload_len);
-
-    return total;
-}
-
-/* ─── RX state machine ───────────────────────────────────────────────────── */
-
-typedef enum {
-    IL2P_HUNT,    /* looking for 0x7E preamble  */
-    IL2P_SYNC,    /* searching 24-bit sync word  */
-    IL2P_HEADER,  /* collecting 16 header bytes  */
-    IL2P_PAYLOAD, /* collecting payload RS blocks */
-} il2p_state_t;
-
-typedef struct {
-    il2p_state_t state;
-    uint32_t     sync_reg;       /* sliding 24-bit window              */
-    int          preamble_count; /* 0x7E bytes seen so far             */
-    uint16_t     lfsr;           /* 9-bit scrambler state              */
-
-    /* bit accumulator → bytes */
-    int          bit_count;
-    uint8_t      cur_byte;
-
-    /* header collection */
-    uint8_t      hdr_raw[IL2P_HEADER_BYTES]; /* 15 RS-encoded bytes     */
-    int          hdr_idx;
-
-    /* payload collection */
-    int          payload_len;    /* total payload bytes (from header)  */
-    int          blocks_total;   /* RS blocks needed                   */
-    int          block_idx;      /* current block (0-based)            */
-    int          block_byte_idx; /* byte within current RS block       */
-    int          block_data_len; /* data bytes in current block        */
-    uint8_t      block_buf[IL2P_BLOCK_TOTAL]; /* one RS block buffer    */
-    uint8_t      payload_buf[IL2P_MAX_PAYLOAD];
-    int          payload_written;
-
-    /* decoded frame staging */
-    uint8_t      ax25_frame[AX25_MAX_FRAME_LEN];
-    int          ax25_len;
-    bool         frame_ready;
-} il2p_rx_t;
-
-static il2p_rx_t s_rx[2]; /* index 0 = modem v1, index 1 = modem v2 */
-
-static void rx_reset(il2p_rx_t *rx)
-{
-    rx->state          = IL2P_HUNT;
-    rx->sync_reg       = 0;
-    rx->preamble_count = 0;
-    rx->bit_count      = 0;
-    rx->cur_byte       = 0;
-    rx->hdr_idx        = 0;
-    rx->frame_ready    = false;
-}
-
-static void rx_start_header(il2p_rx_t *rx)
-{
-    rx->state     = IL2P_HEADER;
-    rx->lfsr      = 0x1FF; /* reset scrambler */
-    rx->bit_count = 0;
-    rx->hdr_idx   = 0;
-}
-
-static void rx_start_payload(il2p_rx_t *rx, int payload_len)
-{
-    rx->state           = IL2P_PAYLOAD;
-    rx->payload_len     = payload_len;
-    rx->blocks_total    = (payload_len + IL2P_BLOCK_DATA - 1) / IL2P_BLOCK_DATA;
-    rx->block_idx       = 0;
-    rx->block_byte_idx  = 0;
-    rx->payload_written = 0;
-    rx->bit_count       = 0;
-
-    if (rx->blocks_total == 0) {
-        /* No payload — frame is already complete */
-        rx->frame_ready = true;
-        rx->state       = IL2P_HUNT;
-        return;
-    }
-
-    /* First block data length */
-    if (rx->blocks_total == 1)
-        rx->block_data_len = payload_len;
-    else
-        rx->block_data_len = IL2P_BLOCK_DATA;
-    memset(rx->block_buf, 0, sizeof(rx->block_buf));
-}
-
-/* Process one descrambled byte in HEADER phase */
-static void rx_header_byte(il2p_rx_t *rx, uint8_t b)
-{
-    rx->hdr_raw[rx->hdr_idx++] = b;
-    if (rx->hdr_idx < IL2P_HEADER_BYTES) return;
-
-    /* All header bytes received — RS decode */
-    uint8_t tmp[IL2P_HEADER_BYTES];
-    memcpy(tmp, rx->hdr_raw, IL2P_HEADER_BYTES);
-    int res = rsh_decode(tmp, IL2P_HEADER_DATA);
-    if (res < 0) {
-        ESP_LOGD(TAG, "Header RS decode fail");
-        rx_reset(rx);
-        return;
-    }
-
-    /* Decode header fields */
-    char dest[7], src[7];
-    int  dest_ssid, src_ssid, payload_len;
-    uint8_t ctrl, pid;
-    payload_len = il2p_decode_header(tmp, dest, &dest_ssid, src, &src_ssid, &ctrl, &pid);
-    if (payload_len < 0 || payload_len > IL2P_MAX_PAYLOAD) {
-        rx_reset(rx);
-        return;
-    }
-
-    /* Pre-build AX.25 frame header (addresses + ctrl + pid) */
-    int n = il2p_build_ax25(dest, dest_ssid, src, src_ssid,
-                             ctrl, pid, NULL, 0,
-                             rx->ax25_frame, sizeof(rx->ax25_frame));
-    if (n < 0) { rx_reset(rx); return; }
-    rx->ax25_len = n;
-
-    if (payload_len == 0) {
-        rx->frame_ready = true;
-        rx->state       = IL2P_HUNT;
-    } else {
-        rx_start_payload(rx, payload_len);
-    }
-}
-
-/* Process one descrambled byte in PAYLOAD phase */
-static void rx_payload_byte(il2p_rx_t *rx, uint8_t b)
-{
-    rx->block_buf[rx->block_byte_idx++] = b;
-
-    int block_total_bytes = rx->block_data_len + IL2P_RS_NROOTS;
-    if (rx->block_byte_idx < block_total_bytes) return;
-
-    /* Full RS block received — decode */
-    int res = rs8_decode(rx->block_buf, rx->block_data_len);
-    if (res < 0) {
-        ESP_LOGD(TAG, "Payload RS decode fail block %d", rx->block_idx);
-        rx_reset(rx);
-        return;
-    }
-
-    /* Append decoded data to payload buffer */
-    int avail = (int)sizeof(rx->payload_buf) - rx->payload_written;
-    int copy  = (rx->block_data_len < avail) ? rx->block_data_len : avail;
-    memcpy(rx->payload_buf + rx->payload_written, rx->block_buf, (size_t)copy);
-    rx->payload_written += copy;
-
-    rx->block_idx++;
-    if (rx->block_idx >= rx->blocks_total) {
-        /* All blocks decoded — append payload to AX.25 frame */
-        int remaining = (int)sizeof(rx->ax25_frame) - rx->ax25_len;
-        if (rx->payload_written > remaining) {
-            /* IL2P_MAX_PAYLOAD (1023) is larger than AX25_MAX_FRAME_LEN once
-             * the built header (addresses+ctrl+pid) is added in, so this is
-             * reachable with a large enough decoded payload_len. Silently
-             * copying only `remaining` bytes used to hand callers
-             * (kiss_send_frame / ax25ip_rx_frame) a truncated-but-otherwise-
-             * valid-looking frame; drop it instead. */
-            ESP_LOGW(TAG, "IL2P frame too large for AX25 buffer (hdr=%d + payload=%d > %d) — dropping",
-                     rx->ax25_len, rx->payload_written, (int)sizeof(rx->ax25_frame));
-            rx_reset(rx);
-            return;
-        }
-        memcpy(rx->ax25_frame + rx->ax25_len, rx->payload_buf, (size_t)rx->payload_written);
-        rx->ax25_len  += rx->payload_written;
-        rx->frame_ready = true;
-        rx->state       = IL2P_HUNT;
-        return;
-    }
-
-    /* Prepare next block */
-    rx->block_byte_idx = 0;
-    memset(rx->block_buf, 0, sizeof(rx->block_buf));
-    int remaining_data = rx->payload_len - rx->payload_written;
-    rx->block_data_len = (remaining_data < IL2P_BLOCK_DATA) ? remaining_data : IL2P_BLOCK_DATA;
-}
-
-/* Feed one NRZI-decoded bit to the RX state machine */
-static void rx_process_bit(il2p_rx_t *rx, uint8_t bit)
-{
-    switch (rx->state) {
-    case IL2P_HUNT:
-        /* Slide the 8-bit window one bit at a time and test it against
-         * 0x7E on every bit, like IL2P_SYNC below already does for its
-         * word. Gating the test to only every 8th incoming bit (as this
-         * used to) required the transmitted flag bytes to land on that
-         * arbitrary byte boundary by chance — right ~1/8 of the time —
-         * so most preambles were never recognized. bit_count here now
-         * just tracks bits-since-last-match, to require the flags be
-         * back-to-back (contiguous) before counting them as a streak. */
-        rx->sync_reg = ((rx->sync_reg << 1) | (bit & 1)) & 0xFF;
-        rx->bit_count++;
-        if (rx->sync_reg == 0x7E) {
-            rx->preamble_count = (rx->preamble_count > 0 && rx->bit_count == 8)
-                                      ? rx->preamble_count + 1
-                                      : 1;
-            rx->bit_count = 0;
-            /* Switch to SYNC search after ≥ IL2P_PREAMBLE_MIN flags */
-            if (rx->preamble_count >= IL2P_PREAMBLE_MIN) {
-                rx->state     = IL2P_SYNC;
-                rx->sync_reg  = 0;
-                rx->bit_count = 0;
+    int st = INIT_TX_LFSR;
+    memset(out, 0, (size_t)len);
+    int skipping = 1, ob = 0, om = 0x80;
+    for (int ib = 0; ib < len; ib++) {
+        for (int im = 0x80; im != 0; im >>= 1) {
+            int s = scramble_bit((in[ib] & im) != 0, &st);
+            if (ib == 0 && im == 0x04) skipping = 0;
+            if (!skipping) {
+                if (s) out[ob] |= (uint8_t)om;
+                om >>= 1;
+                if (om == 0) { om = 0x80; ob++; }
             }
         }
-        break;
-
-    case IL2P_SYNC:
-        rx->sync_reg = ((rx->sync_reg << 1) | (bit & 1)) & 0xFFFFFF;
-        if (rx->sync_reg == IL2P_SYNC_WORD) {
-            /* rx_start_header() pone bit_count a 0; salir aquí para que el
-             * bit_count++ de abajo no desalinee el primer byte de la
-             * cabecera 1 bit (la cabecera nunca decodificaba). */
-            rx_start_header(rx);
-            break;
-        }
-        /* Timeout: fall back to HUNT if sync word not found after ~64 extra bytes */
-        rx->bit_count++;
-        if (rx->bit_count > 512) {
-            rx_reset(rx);
-        }
-        break;
-
-    case IL2P_HEADER:
-    case IL2P_PAYLOAD: {
-        /* Descramble the bit */
-        uint8_t dbit = il2p_descramble(&rx->lfsr, bit);
-        /* Accumulate into byte */
-        rx->cur_byte = (uint8_t)((rx->cur_byte << 1) | dbit);
-        rx->bit_count++;
-        if (rx->bit_count < 8) break;
-        rx->bit_count = 0;
-        uint8_t byte = rx->cur_byte;
-        rx->cur_byte = 0;
-        if (rx->state == IL2P_HEADER)
-            rx_header_byte(rx, byte);
-        else
-            rx_payload_byte(rx, byte);
-        break;
     }
+    int x = st;
+    for (int n = 0; n < 5; n++) {
+        int s = scramble_bit(0, &x);
+        if (s) out[ob] |= (uint8_t)om;
+        om >>= 1;
+        if (om == 0) { om = 0x80; ob++; }
     }
 }
 
-/* ─── Deduplication ──────────────────────────────────────────────────────── */
+void il2p_descramble_block(const uint8_t *in, uint8_t *out, int len)
+{
+    int st = INIT_RX_LFSR;
+    memset(out, 0, (size_t)len);
+    for (int b = 0; b < len; b++)
+        for (int m = 0x80; m != 0; m >>= 1)
+            if (descramble_bit((in[b] & m) != 0, &st)) out[b] |= (uint8_t)m;
+}
+
+/* ─── Bloques de carga útil ─────────────────────────────────────────────── */
+
+typedef struct {
+    int count, small_size, large_size, small_count, large_count, parity;
+} payload_props_t;
+
+/* Devuelve nº de bytes codificados (0 sin carga), -1 si el tamaño es inválido. */
+static int payload_compute(payload_props_t *p, int size, int max_fec)
+{
+    memset(p, 0, sizeof(*p));
+    if (size < 0 || size > IL2P_MAX_PAYLOAD) return -1;
+    if (size == 0) return 0;
+    p->count = (size + (max_fec ? 238 : 246)) / (max_fec ? 239 : 247);
+    p->small_size  = size / p->count;
+    p->large_size  = p->small_size + 1;
+    p->large_count = size - p->count * p->small_size;
+    p->small_count = p->count - p->large_count;
+    if (max_fec)                       p->parity = 16;
+    else if (p->small_size <= 61)      p->parity = 2;
+    else if (p->small_size <= 123)     p->parity = 4;
+    else if (p->small_size <= 185)     p->parity = 6;
+    else if (p->small_size <= 247)     p->parity = 8;
+    else return -1;
+    return p->small_count * (p->small_size + p->parity) +
+           p->large_count * (p->large_size + p->parity);
+}
+
+static int encode_payload(const uint8_t *in, int size, int max_fec, uint8_t *out)
+{
+    payload_props_t p;
+    int e = payload_compute(&p, size, max_fec);
+    if (e <= 0) return e;
+    uint8_t scram[256];
+    int olen = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int cnt = pass == 0 ? p.large_count : p.small_count;
+        int sz  = pass == 0 ? p.large_size  : p.small_size;
+        for (int b = 0; b < cnt; b++) {
+            il2p_scramble_block(in, scram, sz);
+            memcpy(out + olen, scram, (size_t)sz);
+            il2p_rs_encode(scram, sz, p.parity, out + olen + sz);
+            in   += sz;
+            olen += sz + p.parity;
+        }
+    }
+    return olen;
+}
+
+/* Devuelve bytes decodificados o <0 si algún bloque no se recupera. */
+static int decode_payload(const uint8_t *enc, int size, int max_fec, uint8_t *out)
+{
+    payload_props_t p;
+    int e = payload_compute(&p, size, max_fec);
+    if (e <= 0) return e;
+    uint8_t blk[255];
+    int done = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int cnt = pass == 0 ? p.large_count : p.small_count;
+        int sz  = pass == 0 ? p.large_size  : p.small_size;
+        for (int b = 0; b < cnt; b++) {
+            memcpy(blk, enc, (size_t)(sz + p.parity));
+            if (il2p_rs_decode(blk, sz, p.parity) < 0) return -2;
+            il2p_descramble_block(blk, out + done, sz);
+            enc  += sz + p.parity;
+            done += sz;
+        }
+    }
+    return done;
+}
+
+/* ─── Cabecera ──────────────────────────────────────────────────────────── */
+
+static void set_field(uint8_t *h, int bit, int lsb_idx, int width, int val)
+{
+    while (width > 0 && val != 0) {
+        if (val & 1) h[lsb_idx] |= (uint8_t)(1 << bit);
+        val >>= 1; lsb_idx--; width--;
+    }
+}
+
+static int get_field(const uint8_t *h, int bit, int lsb_idx, int width)
+{
+    int r = 0;
+    lsb_idx -= width - 1;
+    while (width-- > 0) {
+        r <<= 1;
+        if (h[lsb_idx] & (1 << bit)) r |= 1;
+        lsb_idx++;
+    }
+    return r;
+}
+
+#define SET_UI(h, v)       set_field(h, 6, 0, 1, v)
+#define SET_PID(h, v)      set_field(h, 6, 4, 4, v)
+#define SET_CONTROL(h, v)  set_field(h, 6, 11, 7, v)
+#define SET_FEC(h, v)      set_field(h, 7, 0, 1, v)
+#define SET_TYPE(h, v)     set_field(h, 7, 1, 1, v)
+#define SET_COUNT(h, v)    set_field(h, 7, 11, 10, v)
+#define GET_UI(h)          get_field(h, 6, 0, 1)
+#define GET_PID(h)         get_field(h, 6, 4, 4)
+#define GET_CONTROL(h)     get_field(h, 6, 11, 7)
+#define GET_FEC(h)         get_field(h, 7, 0, 1)
+#define GET_TYPE(h)        get_field(h, 7, 1, 1)
+#define GET_COUNT(h)       get_field(h, 7, 11, 10)
+
+static int encode_pid(uint8_t pid)
+{
+    if ((pid & 0x30) == 0x20 || (pid & 0x30) == 0x10) return 0x2;
+    switch (pid) {
+    case 0x01: return 0x3;
+    case 0x06: return 0x4;
+    case 0x07: return 0x5;
+    case 0x08: return 0x6;
+    case 0xcc: return 0xb;
+    case 0xcd: return 0xc;
+    case 0xce: return 0xd;
+    case 0xcf: return 0xe;
+    case 0xf0: return 0xf;
+    }
+    return -1;
+}
+
+static uint8_t decode_pid(int p)
+{
+    static const uint8_t t[16] = {0xf0, 0xf0, 0x20, 0x01, 0x06, 0x07, 0x08, 0xf0,
+                                  0xf0, 0xf0, 0xf0, 0xcc, 0xcd, 0xce, 0xcf, 0xf0};
+    return t[p & 15];
+}
+
+/* Códigos de control U (control & 0xEF) en el orden de la tabla IL2P (0..7). */
+static const uint8_t U_CODES[8] = {0x2F, 0x43, 0x0F, 0x63, 0x87, 0x03, 0xAF, 0xE3};
+
+/* Intenta cabecera tipo 1. Devuelve longitud de info (≥0), -1 si hay que usar
+ * tipo 0, -2 si la info es demasiado grande. *info apunta dentro de ax. */
+static int type1_header(const uint8_t *ax, size_t len, int max_fec,
+                        uint8_t hdr[IL2P_HDR_SIZE], const uint8_t **info)
+{
+    memset(hdr, 0, IL2P_HDR_SIZE);
+    if (len < 15 || (ax[13] & 1) == 0) return -1;   /* con repetidores → tipo 0 */
+
+    for (int i = 0; i < 6; i++) {
+        uint8_t d = ax[i] >> 1, s = ax[7 + i] >> 1;
+        if (d < ' ' || d > '_' || s < ' ' || s > '_') return -1;
+        hdr[i]     = (uint8_t)(d - ' ');
+        hdr[6 + i] = (uint8_t)(s - ' ');
+    }
+    hdr[12] = (uint8_t)((((ax[6] >> 1) & 0xF) << 4) | ((ax[13] >> 1) & 0xF));
+
+    uint8_t c = ax[14];
+    int cmd = (ax[6] & 0x80) ? 1 : 0;
+    int pf = (c >> 4) & 1, off;
+
+    if ((c & 1) == 0) {                                   /* I */
+        if (len < 16) return -1;
+        int pid = encode_pid(ax[15]);
+        if (pid < 0) return -1;
+        SET_UI(hdr, 0);
+        SET_PID(hdr, pid);
+        SET_CONTROL(hdr, (pf << 6) | (((c >> 5) & 7) << 3) | ((c >> 1) & 7));
+        off = 16;
+    } else if ((c & 3) == 1) {                            /* S */
+        SET_UI(hdr, 0);
+        SET_PID(hdr, 0);
+        SET_CONTROL(hdr, (pf << 6) | (((c >> 5) & 7) << 3) | (cmd << 2) | ((c >> 2) & 3));
+        off = 15;
+    } else {                                              /* U */
+        int idx = -1;
+        for (int i = 0; i < 8; i++) if ((c & 0xEF) == U_CODES[i]) idx = i;
+        if (idx < 0) return -1;                           /* SABME, desconocidas */
+        if (idx == 5) {                                   /* UI */
+            if (len < 16) return -1;
+            int pid = encode_pid(ax[15]);
+            if (pid < 0) return -1;
+            SET_UI(hdr, 1);
+            SET_PID(hdr, pid);
+            off = 16;
+        } else {
+            SET_PID(hdr, 1);
+            off = 15;
+        }
+        SET_CONTROL(hdr, (pf << 6) | (cmd << 2) | (idx << 3));
+    }
+    SET_FEC(hdr, max_fec);
+    SET_TYPE(hdr, 1);
+    int ilen = (int)len - off;
+    if (ilen > IL2P_MAX_PAYLOAD) return -2;
+    SET_COUNT(hdr, ilen);
+    *info = ax + off;
+    return ilen;
+}
+
+static void type0_header(int frame_len, int max_fec, uint8_t hdr[IL2P_HDR_SIZE])
+{
+    memset(hdr, 0, IL2P_HDR_SIZE);
+    SET_FEC(hdr, max_fec);
+    SET_TYPE(hdr, 0);
+    SET_COUNT(hdr, frame_len);
+}
+
+/* Reconstruye el principio de la trama AX.25 (direcciones + control [+ pid])
+ * a partir de una cabecera tipo 1. Devuelve su longitud o -1 si no es válida. */
+static int type1_to_ax25(const uint8_t *hdr, uint8_t *out)
+{
+    for (int a = 0; a < 2; a++) {
+        const uint8_t *src = hdr + 6 * a;
+        int last = 5;
+        while (last >= 0 && (src[last] & 0x3f) == 0) last--;   /* quitar espacios finales */
+        if (last < 0) return -1;
+        for (int i = 0; i < 6; i++) {
+            int ch = (i <= last) ? ((src[i] & 0x3f) + ' ') : ' ';
+            if (i <= last && !((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')))
+                return -1;
+            out[7 * a + i] = (uint8_t)(ch << 1);
+        }
+    }
+    int dssid = (hdr[12] >> 4) & 0xF, sssid = hdr[12] & 0xF;
+    int pid = GET_PID(hdr), ui = GET_UI(hdr), ctl = GET_CONTROL(hdr);
+    int pf = (ctl >> 6) & 1, cmd, c, n;
+
+    if (pid == 0) {                                       /* S */
+        cmd = (ctl & 4) != 0;
+        c = (((ctl >> 3) & 7) << 5) | (pf << 4) | ((ctl & 3) << 2) | 1;
+        n = 15;
+    } else if (pid == 1) {                                /* U (no UI) */
+        cmd = (ctl & 4) != 0;
+        int idx = (ctl >> 3) & 7;
+        c = (pf << 4) | (U_CODES[idx] & 0xEF);
+        if (idx == 5) { out[15] = 0xF0; n = 16; } else n = 15;
+    } else if (ui) {                                      /* UI */
+        cmd = (ctl & 4) != 0;
+        c = (pf << 4) | 0x03;
+        out[15] = decode_pid(pid);
+        n = 16;
+    } else {                                              /* I */
+        cmd = 1;
+        c = (((ctl >> 3) & 7) << 5) | (pf << 4) | ((ctl & 7) << 1);
+        out[15] = decode_pid(pid);
+        n = 16;
+    }
+    out[6]  = (uint8_t)(0x60 | (dssid << 1) | (cmd ? 0x80 : 0));
+    out[13] = (uint8_t)(0x61 | (sssid << 1) | (cmd ? 0 : 0x80));
+    out[14] = (uint8_t)c;
+    return n;
+}
+
+/* ─── Codificación / decodificación de trama completa (sin sync) ────────── */
+
+/* Codifica una trama AX.25 (sin FCS) — o, con raw=true, unos bytes opacos con
+ * cabecera tipo 0 — a cabecera+paridad+bloques. Devuelve longitud o -1. */
+int il2p_encode_frame(const uint8_t *ax, size_t len, bool raw, bool max_fec, uint8_t *out)
+{
+    uint8_t hdr[IL2P_HDR_SIZE];
+    const uint8_t *pl = NULL;
+    int pl_len = 0;
+    int mf = max_fec ? 1 : 0;
+
+    int e = raw ? -1 : type1_header(ax, len, mf, hdr, &pl);
+    if (e >= 0) {
+        pl_len = e;
+    } else if (e == -1) {
+        if (len < (raw ? 1u : 14u) || len > IL2P_MAX_PAYLOAD) return -1;
+        type0_header((int)len, mf, hdr);
+        pl = ax; pl_len = (int)len;
+    } else {
+        return -1;
+    }
+
+    il2p_scramble_block(hdr, out, IL2P_HDR_SIZE);
+    il2p_rs_encode(out, IL2P_HDR_SIZE, IL2P_HDR_PARITY, out + IL2P_HDR_SIZE);
+    int olen = IL2P_HDR_SIZE + IL2P_HDR_PARITY;
+    if (pl_len > 0) {
+        int k = encode_payload(pl, pl_len, mf, out + olen);
+        if (k <= 0) return -1;
+        olen += k;
+    }
+    return olen;
+}
+
+/* Header recibido (15 B, sin descrambling) → uhdr[13]. Devuelve símbolos
+ * corregidos o -1. */
+static int clarify_header(const uint8_t *rec, uint8_t *uhdr)
+{
+    uint8_t blk[IL2P_HDR_SIZE + IL2P_HDR_PARITY];
+    memcpy(blk, rec, sizeof(blk));
+    int e = il2p_rs_decode(blk, IL2P_HDR_SIZE, IL2P_HDR_PARITY);
+    if (e < 0) return -1;
+    il2p_descramble_block(blk, uhdr, IL2P_HDR_SIZE);
+    return e;
+}
+
+/* Decodifica cabecera(uhdr) + carga codificada a trama AX.25 / bytes opacos.
+ * Devuelve longitud (≥5) o -1. out ≥ FRAME_BUF_MAX. */
+static int decode_frame(const uint8_t *uhdr, const uint8_t *epayload, uint8_t *out)
+{
+    int type = GET_TYPE(uhdr), mf = GET_FEC(uhdr), plen = GET_COUNT(uhdr);
+    static uint8_t pl[IL2P_MAX_PAYLOAD];
+
+    if (type == 1) {
+        int n = type1_to_ax25(uhdr, out);
+        if (n < 0) return -1;
+        if (plen > 0) {
+            if (decode_payload(epayload, plen, mf, pl) != plen) return -1;
+            memcpy(out + n, pl, (size_t)plen);
+        }
+        return n + plen;
+    }
+    if (plen < 5) return -1;
+    if (decode_payload(epayload, plen, mf, pl) != plen) return -1;
+    memcpy(out, pl, (size_t)plen);
+    return plen;
+}
+
+/* Para pruebas en host: trama completa sin sync → AX.25. */
+int il2p_decode_frame(const uint8_t *in, uint8_t *out)
+{
+    uint8_t uhdr[IL2P_HDR_SIZE];
+    if (clarify_header(in, uhdr) < 0) return -1;
+    return decode_frame(uhdr, in + IL2P_HDR_SIZE + IL2P_HDR_PARITY, out);
+}
+
+/* ─── RX ────────────────────────────────────────────────────────────────── */
+
+typedef enum { RX_SEARCH, RX_HEADER, RX_PAYLOAD, RX_PENDING } rx_state_t;
+
+typedef struct {
+    volatile rx_state_t state;
+    uint32_t acc;
+    int      bc;
+    uint8_t  shdr[IL2P_HDR_SIZE + IL2P_HDR_PARITY];
+    int      hc;
+    uint8_t  uhdr[IL2P_HDR_SIZE];
+    int      eplen, pc;
+    uint8_t  spayload[IL2P_MAX_ENC];
+} il2p_rx_t;
+
+static il2p_rx_t s_rx[2];   /* 0 = modem v1, 1 = modem v2 */
+
+static inline int popcount24(uint32_t v)
+{
+    int n = 0;
+    while (v) { n += v & 1; v >>= 1; }
+    return n;
+}
+
+static void rx_bit(il2p_rx_t *F, uint8_t bit)
+{
+    F->acc = ((F->acc << 1) | (bit & 1)) & 0xFFFFFF;
+    switch (F->state) {
+    case RX_SEARCH:
+        if (popcount24(F->acc ^ IL2P_SYNC_WORD) <= 1) {
+            F->state = RX_HEADER;
+            F->bc = 0;
+            F->hc = 0;
+        }
+        break;
+    case RX_HEADER:
+        if (++F->bc < 8) break;
+        F->bc = 0;
+        F->shdr[F->hc++] = (uint8_t)(F->acc & 0xFF);
+        if (F->hc < IL2P_HDR_SIZE + IL2P_HDR_PARITY) break;
+        if (clarify_header(F->shdr, F->uhdr) < 0) { F->state = RX_SEARCH; break; }
+        {
+            int type = GET_TYPE(F->uhdr), plen = GET_COUNT(F->uhdr);
+            payload_props_t pp;
+            int ep = payload_compute(&pp, plen, GET_FEC(F->uhdr));
+            uint8_t tmp[20];
+            /* Validación temprana: evita seguir con falsos sync */
+            if (ep < 0 || (type == 1 && type1_to_ax25(F->uhdr, tmp) < 0) ||
+                (type == 0 && plen < 5)) {
+                F->state = RX_SEARCH;
+                break;
+            }
+            F->eplen = ep;
+            F->pc = 0;
+            F->state = (ep == 0) ? RX_PENDING : RX_PAYLOAD;
+        }
+        break;
+    case RX_PAYLOAD:
+        if (++F->bc < 8) break;
+        F->bc = 0;
+        F->spayload[F->pc++] = (uint8_t)(F->acc & 0xFF);
+        if (F->pc >= F->eplen) F->state = RX_PENDING;
+        break;
+    case RX_PENDING:
+        break;   /* il2p_poll() decodifica y libera el contexto */
+    }
+}
+
+/* ─── Deduplicación ─────────────────────────────────────────────────────── */
 
 #define DEDUP_SLOTS 8
 #define DEDUP_WINDOW_MS 500
@@ -500,173 +498,89 @@ static void rx_process_bit(il2p_rx_t *rx, uint8_t bit)
 static dedup_entry_t s_dedup_entries[DEDUP_SLOTS];
 static dedup_t       s_dedup;
 
-static bool dedup_seen(const uint8_t *buf, size_t len)
-{
-    return dedup_check_and_add(&s_dedup, dedup_hash(buf, len));
-}
-
-/* ─── Public API ─────────────────────────────────────────────────────────── */
-
 void il2p_init(bool enabled, ax25_raw_callback_t cb)
 {
     s_enabled = enabled;
     s_cb      = cb;
-    memset(s_rx,    0, sizeof(s_rx));
+    memset(s_rx, 0, sizeof(s_rx));
     dedup_init(&s_dedup, s_dedup_entries, DEDUP_SLOTS, (int64_t)DEDUP_WINDOW_MS * 1000);
-    for (int i = 0; i < 2; i++) rx_reset(&s_rx[i]);
     if (enabled)
-        ESP_LOGI(TAG, "IL2P enabled — RX dual-modem, TX smart routing by PID");
+        ESP_LOGI(TAG, "IL2P activo (max_fec=%d, tx_all=%d)", s_max_fec, s_tx_all);
 }
 
 void il2p_rx_bit(uint8_t modem_id, uint8_t nrzi_bit)
 {
     if (!s_enabled || modem_id > 1) return;
-    rx_process_bit(&s_rx[modem_id], nrzi_bit & 1);
+    rx_bit(&s_rx[modem_id], nrzi_bit);
 }
 
 void il2p_poll(void)
 {
     if (!s_enabled || !s_cb) return;
+    static uint8_t frame[FRAME_BUF_MAX];
     for (int m = 0; m < 2; m++) {
-        il2p_rx_t *rx = &s_rx[m];
-        if (!rx->frame_ready) continue;
-        rx->frame_ready = false;
-        if (rx->ax25_len < 16) continue; /* too short */
-        if (!dedup_seen((const uint8_t *)rx->ax25_frame, (size_t)rx->ax25_len)) {
-            ESP_LOGD(TAG, "IL2P frame %d bytes (modem v%d)", rx->ax25_len, m + 1);
-            s_cb((const uint8_t *)rx->ax25_frame, (size_t)rx->ax25_len);
+        il2p_rx_t *F = &s_rx[m];
+        if (F->state != RX_PENDING) continue;
+        int n = decode_frame(F->uhdr, F->spayload, frame);
+        F->state = RX_SEARCH;
+        if (n < 5) {
+            ESP_LOGD(TAG, "IL2P: carga no recuperable");
+            continue;
+        }
+        if (!dedup_check_and_add(&s_dedup, dedup_hash(frame, (size_t)n))) {
+            ESP_LOGD(TAG, "IL2P trama %d bytes (modem v%d)", n, m + 1);
+            s_cb(frame, (size_t)n);
         }
     }
 }
 
-/* ─── TX ─────────────────────────────────────────────────────────────────── */
+/* ─── TX ────────────────────────────────────────────────────────────────── */
 
-/* Max IL2P frame: preamble(16) + sync(3) + header(16) + payload blocks.
- * IL2P_MAX_PAYLOAD=1023 needs ceil(1023/239)=5 blocks, not 4 — a payload_len
- * of 957-1023 used to silently lose its last block because this buffer was
- * one block short (masked today only because AX25_MAX_FRAME_LEN=600 keeps
- * actual payloads well under that threshold). */
-#define IL2P_TX_NBLOCKS ((IL2P_MAX_PAYLOAD + IL2P_BLOCK_DATA - 1) / IL2P_BLOCK_DATA)
-#define IL2P_TX_MAX (16 + 3 + IL2P_HEADER_BYTES + (IL2P_TX_NBLOCKS * IL2P_BLOCK_TOTAL) + 32)
+static inline uint8_t bitrev8(uint8_t b)
+{
+    b = (uint8_t)((b & 0xF0) >> 4 | (b & 0x0F) << 4);
+    b = (uint8_t)((b & 0xCC) >> 2 | (b & 0x33) << 2);
+    b = (uint8_t)((b & 0xAA) >> 1 | (b & 0x55) << 1);
+    return b;
+}
 
-void il2p_tx_frame(const uint8_t *ax25_raw, size_t len)
+static void il2p_tx(const uint8_t *data, size_t len, bool raw)
 {
     if (!s_enabled) return;
-
     static uint8_t outbuf[IL2P_TX_MAX];
-    int out_idx = 0;
-
-    /* 1. Preamble: 16 × 0x7E */
-    for (int i = 0; i < 16; i++) outbuf[out_idx++] = 0x7E;
-
-    /* 2. Sync word */
-    outbuf[out_idx++] = 0xF1;
-    outbuf[out_idx++] = 0x5E;
-    outbuf[out_idx++] = 0x48;
-
-    /* 3. Header */
-    uint8_t hdr_data[IL2P_HEADER_DATA];
-    int payload_len = il2p_encode_header(ax25_raw, len, hdr_data);
-    if (payload_len < 0) {
-        ESP_LOGW(TAG, "il2p_tx: header encode failed");
+    int n = 0;
+    for (int i = 0; i < IL2P_PREAMBLE_N; i++) outbuf[n++] = 0x55;
+    outbuf[n++] = 0xF1; outbuf[n++] = 0x5E; outbuf[n++] = 0x48;
+    int e = il2p_encode_frame(data, len, raw, s_max_fec, outbuf + n);
+    if (e < 0) {
+        ESP_LOGW(TAG, "il2p_tx: no se pudo codificar (len=%d)", (int)len);
         return;
     }
+    n += e;
+    /* El TX AFSK envía cada byte LSB primero; IL2P va MSB primero. */
+    for (int i = 0; i < n; i++) outbuf[i] = bitrev8(outbuf[i]);
 
-    uint8_t hdr_parity[2];
-    rsh_encode(hdr_data, IL2P_HEADER_DATA, hdr_parity);
-
-    /* Scramble header (data + parity) */
-    uint16_t lfsr = 0x1FF;
-    for (int i = 0; i < IL2P_HEADER_DATA; i++) {
-        uint8_t b = hdr_data[i], sb = 0;
-        for (int bit = 7; bit >= 0; bit--)
-            sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-        outbuf[out_idx++] = sb;
-    }
-    for (int i = 0; i < 2; i++) {
-        uint8_t b = hdr_parity[i], sb = 0;
-        for (int bit = 7; bit >= 0; bit--)
-            sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-        outbuf[out_idx++] = sb;
-    }
-
-    /* 4. Payload blocks */
-    /* Extract payload from AX.25 frame: skip 2 address fields (14 bytes) + ctrl + pid */
-    char dest[7], src[7];
-    int  dest_ssid, src_ssid, ctrl_off;
-    if (!ax25_parse_addrs(ax25_raw, len, dest, &dest_ssid, src, &src_ssid, &ctrl_off)) {
-        ESP_LOGW(TAG, "il2p_tx: bad AX.25 addresses");
-        return;
-    }
-    const uint8_t *payload_ptr = ax25_raw + ctrl_off + 2;
-    int            payload_left = payload_len;
-
-    while (payload_left > 0) {
-        int block_data = (payload_left < IL2P_BLOCK_DATA) ? payload_left : IL2P_BLOCK_DATA;
-        uint8_t parity[IL2P_RS_NROOTS];
-        rs8_encode(payload_ptr, block_data, parity);
-
-        /* IL2P_TX_MAX is sized for the worst case (IL2P_TX_NBLOCKS blocks), so
-         * this should never trip; bail loudly instead of silently truncating
-         * the frame if it ever does (e.g. AX25_MAX_FRAME_LEN raised later
-         * without revisiting this sizing). */
-        if (out_idx + block_data + IL2P_RS_NROOTS > IL2P_TX_MAX) {
-            ESP_LOGE(TAG, "il2p_tx: outbuf too small (idx=%d, need %d, max=%d) — aborting",
-                     out_idx, block_data + IL2P_RS_NROOTS, IL2P_TX_MAX);
-            return;
-        }
-
-        /* Scramble data bytes */
-        for (int i = 0; i < block_data; i++) {
-            uint8_t b = payload_ptr[i], sb = 0;
-            for (int bit = 7; bit >= 0; bit--)
-                sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-            outbuf[out_idx++] = sb;
-        }
-        /* Scramble parity bytes */
-        for (int i = 0; i < IL2P_RS_NROOTS; i++) {
-            uint8_t b = parity[i], sb = 0;
-            for (int bit = 7; bit >= 0; bit--)
-                sb |= (uint8_t)(il2p_descramble(&lfsr, (b >> bit) & 1) << bit);
-            outbuf[out_idx++] = sb;
-        }
-
-        payload_ptr  += block_data;
-        payload_left -= block_data;
-    }
-
-    /* 5. Transmit — bit-stuffing must be disabled */
     extern Afsk *AFSK_modem;
     if (AFSK_modem) AFSK_modem->il2p_tx = true;
-    AFSK_transmit((char *)outbuf, (size_t)out_idx);
+    AFSK_transmit((char *)outbuf, (size_t)n);
     if (AFSK_modem) AFSK_modem->il2p_tx = false;
 }
 
+void il2p_tx_frame(const uint8_t *ax25_raw, size_t len) { il2p_tx(ax25_raw, len, false); }
+void il2p_tx_raw(const uint8_t *data, size_t len)       { il2p_tx(data, len, true); }
+
 void smart_tx_frame(const uint8_t *ax25_raw, size_t len)
 {
-    if (!s_enabled) {
-        /* Fallback: should not be called when disabled, but be safe */
-        extern void APRS_send_raw_frame(const uint8_t *buf, size_t len);
-        APRS_send_raw_frame(ax25_raw, len);
-        return;
-    }
+    extern void APRS_send_raw_frame(const uint8_t *buf, size_t len);
+    if (!s_enabled) { APRS_send_raw_frame(ax25_raw, len); return; }
 
-    /* Find PID byte: skip 2 address fields (14 bytes min) + optional repeaters + control */
-    char dest[7], src[7];
-    int  dest_ssid, src_ssid, ctrl_off;
-    if (!ax25_parse_addrs(ax25_raw, len, dest, &dest_ssid, src, &src_ssid, &ctrl_off) ||
-        (int)len < ctrl_off + 2) {
-        /* Malformed frame — fall back to AX.25 */
-        extern void APRS_send_raw_frame(const uint8_t *buf, size_t len);
-        APRS_send_raw_frame(ax25_raw, len);
-        return;
-    }
+    if (s_tx_all) { il2p_tx_frame(ax25_raw, len); return; }
 
-    uint8_t pid = ax25_raw[ctrl_off + 1];
-    if (pid == 0xCC) {
+    /* Sólo PID 0xCC (IP) por IL2P; el resto (APRS) sigue por AX.25 */
+    int off = 14;
+    while (off < (int)len && !(ax25_raw[off - 1] & 1) && off + 7 <= (int)len) off += 7;
+    if ((int)len >= off + 2 && ax25_raw[off + 1] == 0xCC)
         il2p_tx_frame(ax25_raw, len);
-    } else {
-        extern void APRS_send_raw_frame(const uint8_t *buf, size_t len);
+    else
         APRS_send_raw_frame(ax25_raw, len);
-    }
 }
