@@ -7,6 +7,10 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — DPLL proporcional en el demodulador v2 (v1.16.0)
+- `afsk_v2_process`: la fase del reloj de bit pasa a resolución 1/32 de muestra y en cada transición se corrige una fracción de su error (0,7; 0,5 en los 4 primeros flags), como Dire Wolf, en vez de ±1/64 de bit fijo. Cierra B25 en deriva de reloj: en `test/demod` los escenarios de ±1 % pasan de 3–6 a 36 de 40 tramas y ±2 % de 0 a 36–38. El corpus real sigue igual (39 tramas CRC OK, estaba saturado). `currentPhase` pasa a `int16_t`.
+- Pendiente: probar en el aire (sin HW). SNR ≤9 dB sigue siendo límite (B25 parcial).
+
 ## 2026-11-11 — Tráfico de terceros en el mapa (v1.15.3)
 - `heard.c` extrae la posición de la estación interna de los paquetes `}`; el gateway se anota aparte.
 
@@ -34,7 +38,7 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 - Nuevo `test/` (CMake sin ESP-IDF, ASan/UBSan, `ctest`): unit de kiss, RS/IL2P, dedup, config_validate, digipeater, heard y regresión del demodulador v2 (audio sintético + corpus WAV).
 - ✅ B23 `kiss.c`: FEND tras FESC cierra la trama. ✅ B24 `digipeater.c`: alias `WIDEn-N` acepta `WIDEn-1..N`. v1.11.1 (compila, 41 % libre).
-- ⬜ B25: el demodulador v2 pierde tramas con deriva de reloj ≥0,5 % y con SNR ≤9 dB (medido en host; falta validar con capturas reales).
+- ✅ B25 (deriva de reloj resuelta en v1.16.0 con DPLL proporcional; SNR ≤9 dB sigue siendo límite): el demodulador v2 perdía tramas con deriva ≥0,5 % y con SNR ≤9 dB (medido en host; falta validar con capturas reales).
 
 ---
 
