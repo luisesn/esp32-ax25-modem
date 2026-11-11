@@ -114,6 +114,7 @@ void kiss_ctx_rx_byte(kiss_ctx_t *c, uint8_t b) {
 
     case S_ESC:
         c->state = S_DATA;
+        if (b == KISS_FEND) { kiss_ctx_rx_byte(c, b); break; }  // FEND tras FESC: cierra la trama (B23)
         if      (b == KISS_TFEND) kiss_put(c, KISS_FEND);
         else if (b == KISS_TFESC) kiss_put(c, KISS_FESC);
         // cualquier otro byte tras escape: descartar (error de protocolo)

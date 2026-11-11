@@ -271,8 +271,13 @@ bool digi_process_frame(const uint8_t *buf, size_t len) {
             int  ai_match = -1;
             if (!explicit_me) {
                 for (int ai = 0; ai < cfg_count; ai++) {
-                    if (call_eq(rpt_call, cfg_aliases[ai].call) &&
-                        rpt_ssid == cfg_aliases[ai].ssid) { ai_match = ai; break; }
+                    // B24: alias con SSID N (p. ej. WIDE2-2) acepta WIDE2-1..N (salto restante);
+                    // alias sin SSID (RELAY) sólo casa sin SSID.
+                    if (!call_eq(rpt_call, cfg_aliases[ai].call)) continue;
+                    int as = cfg_aliases[ai].ssid;
+                    if ((as == 0 && rpt_ssid == 0) || (as > 0 && rpt_ssid >= 1 && rpt_ssid <= as)) {
+                        ai_match = ai; break;
+                    }
                 }
                 if (ai_match < 0) goto out;
                 if (rpt_ssid > DIGI_MAX_N) goto out;     // WIDE7-7 etc.

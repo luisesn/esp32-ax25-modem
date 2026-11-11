@@ -130,10 +130,11 @@ TEST(wide2_1_second_hop)
     fresh();
     digi_setup(true);
     size_t len = build_frame(frame, "APRS", "EA1AAA", 0, "WIDE2-1", "wide2-1");
-    // BUG: con alias WIDE2-2 la trama WIDE2-1 se ignora (alias exacto); esperado RPT1*,WIDE2*
+    
     bool ok = digi_process_frame(frame, len);
     size_t el = build_frame(expect, "APRS", "EA1AAA", 0, "RPT1*,WIDE2*", "wide2-1");
-    KNOWN_BUG(ok && stub_tx_len == el, "digipeater.c: alias por SSID exacto");
+    CHECK(ok);
+    CHECK_EQ_INT(stub_tx_len, el);
 }
 
 

@@ -11,7 +11,6 @@ ctest --test-dir build-test --output-on-failure
 - `stubs/`: sustitutos de esp_log, esp_timer (reloj falso), FreeRTOS y driver/gpio.
 - `demod/`: regresión del demodulador RX v2 (`#include "AFSK.cpp"` con stubs) con audio sintético y corpus de WAV reales; ver `demod/README.md`.
 
-## Fallos conocidos (código de producción, sin corregir)
-- `kiss.c`: un FEND justo después de FESC se descarta en vez de cerrar la trama.
-- `digipeater.c`: el alias casa por SSID exacto; con `WIDE2-2` no se repite `WIDE2-1`.
-- Demodulador v2: poca tolerancia a deriva de reloj (±0,5 % ya pierde tramas) y cae a 0 con SNR 9 dB (ver `demod/README.md`).
+## Fallos conocidos
+- Demodulador v2: poca tolerancia a deriva de reloj (±0,5 % ya pierde tramas) y cae a 0 con SNR 9 dB (B25 abierto; ver `demod/README.md`).
+- Los bugs B23 (kiss FEND tras FESC) y B24 (digipeater WIDE2-1) hallados por este banco están corregidos en v1.11.1.

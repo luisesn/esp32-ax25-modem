@@ -349,9 +349,10 @@ TEST(fend_after_fesc_terminates_frame)
     kiss_ctx_t *c = kiss_ctx_new();
     const uint8_t p[] = {FEND, 0x00, 0xAA, FESC, FEND, 0x00, 0xBB, FEND};
     feed(c, p, sizeof(p));
-    // BUG: FEND tras FESC se traga y las tramas {AA} y {BB} se fusionan en una sola
+    
     // trama {AA,00,BB}. Esperado: rec_n==2 con {AA} y {BB}.
-    KNOWN_BUG(rec_n == 2 && rec_len[0] == 1, "kiss.c: FEND tras FESC");
+    CHECK_EQ_INT(rec_n, 2);
+    if (rec_n >= 1) CHECK_EQ_INT(rec_len[0], 1);
     kiss_ctx_free(c);
 }
 
