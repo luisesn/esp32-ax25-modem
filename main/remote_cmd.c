@@ -100,18 +100,9 @@ static void cmd_tx_aprs_position(const char *src_call, int src_ssid) {
         return;
     }
 
-    // Posición APRS sin comprimir: !DDMM.mmN/DDDMM.mmW>
-    // Se trabaja en centésimas de minuto enteras: redondear los minutos como
-    // double podía dar 60.00 (p. ej. 59,999) y una posición inválida.
-    long clat = lround(fabs(lat) * 6000.0);   // 60 min * 100
-    long clon = lround(fabs(lon) * 6000.0);
-    int  dlat = (int)(clat / 6000), mlat = (int)(clat % 6000);
-    int  dlon = (int)(clon / 6000), mlon = (int)(clon % 6000);
-
-    char info[32];
-    snprintf(info, sizeof(info), "!%02d%02d.%02d%c/%03d%02d.%02d%c>",
-             dlat, mlat / 100, mlat % 100, lat >= 0.0 ? 'N' : 'S',
-             dlon, mlon / 100, mlon % 100, lon >= 0.0 ? 'E' : 'W');
+    // Posición APRS sin comprimir compartida con gps.c y la API
+    char info[APRS_POS_BUF_LEN];
+    aprs_format_position(info, sizeof(info), lat, lon, '>');
     APRS_queue_beacon(info);
     {
         char ev[80];

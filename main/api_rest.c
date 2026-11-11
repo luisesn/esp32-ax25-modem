@@ -32,6 +32,7 @@
 #include "rx_survey.h"
 #include "carrier_detect.h"
 #include "repeater.h"
+#include "gps.h"
 
 #define TAG "api_rest"
 
@@ -228,33 +229,16 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // APRS 1.01 §8 uncompressed position: DDMM.HHN (lat) DDDMM.HHW (lon)
-    // Use double throughout to avoid float precision loss (~7 sig. digits).
-    // Clamp minutes to 59.99 to prevent %05.2f producing "60.00" on rounding edge.
-    int    lat_d = (int)fabs(lat);
-    double lat_m = (fabs(lat) - lat_d) * 60.0;
-    if (lat_m >= 60.0) { lat_d++; lat_m = 0.0; }
-    char lat_str[9];  // DDMM.HHN\0  (2+5+1+1 = 9)
-    snprintf(lat_str, sizeof(lat_str), "%02d%05.2f%c",
-             lat_d, lat_m, lat >= 0.0 ? 'N' : 'S');
+    // APRS info field: =DDMM.mmN/DDDMM.mmE sym [cse/spd] comment
+    // (tabla de símbolos '/', formato compartido en aprs_format_position)
+    char pos[APRS_POS_BUF_LEN];
+    aprs_format_position(pos, sizeof(pos), lat, lon, sym);
 
-    int    lon_d = (int)fabs(lon);
-    double lon_m = (fabs(lon) - lon_d) * 60.0;
-    if (lon_m >= 60.0) { lon_d++; lon_m = 0.0; }
-    char lon_str[10]; // DDDMM.HHE\0 (3+5+1+1 = 10)
-    snprintf(lon_str, sizeof(lon_str), "%03d%05.2f%c",
-             lon_d, lon_m, lon >= 0.0 ? 'E' : 'W');
-
-    // APRS info field: =lat/lon_sym_comment  (symbol table = '/', primary)
-    // '=' means "position without timestamp, APRS messaging enabled".
-    // Functionally identical to '!' but some radios (e.g. Yaesu) treat it
-    // differently in their station list display.
     char info[120];
     if (has_cse)
-        snprintf(info, sizeof(info), "=%s/%s%c%03d/%03d%s",
-                 lat_str, lon_str, sym, cse, spd, comment);
+        snprintf(info, sizeof(info), "%s%03d/%03d%s", pos, cse, spd, comment);
     else
-        snprintf(info, sizeof(info), "=%s/%s%c%s", lat_str, lon_str, sym, comment);
+        snprintf(info, sizeof(info), "%s%s", pos, comment);
 
     ESP_LOGI(TAG, "APRS beacon TX: %s", info);
     APRS_queue_beacon(info);

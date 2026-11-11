@@ -214,6 +214,22 @@ static void gps_task(void *arg) {
     }
 }
 
+// Posición APRS sin comprimir (ver gps.h). Trabaja en centésimas de minuto
+// enteras (1/6000 de grado): el redondeo se hace una sola vez sobre el total,
+// así los minutos nunca salen como 60.00 y el acarreo a grados es automático.
+void aprs_format_position(char *out, size_t out_len, double lat, double lon, char symbol) {
+    long clat = lround(fabs(lat) * 6000.0);
+    long clon = lround(fabs(lon) * 6000.0);
+    if (clat > 90L * 6000L)  clat = 90L * 6000L;    // límite físico de latitud
+    if (clon > 180L * 6000L) clon = 180L * 6000L;   // límite físico de longitud
+    // Evita "S"/"W" en un valor redondeado a 0 (p. ej. -0,00001)
+    char ns = (lat < 0.0 && clat > 0) ? 'S' : 'N';
+    char ew = (lon < 0.0 && clon > 0) ? 'W' : 'E';
+    snprintf(out, out_len, "=%02ld%02ld.%02ld%c/%03ld%02ld.%02ld%c%c",
+             clat / 6000, (clat % 6000) / 100, clat % 100, ns,
+             clon / 6000, (clon % 6000) / 100, clon % 100, ew, symbol);
+}
+
 // Periodic APRS position beacon. Only queues a frame (APRS_queue_beacon is
 // non-blocking); the actual TX happens in receive_audio_task.
 static void gps_beacon_task(void *arg) {
@@ -233,18 +249,12 @@ static void gps_beacon_task(void *arg) {
             continue;
         }
 
-        double abs_lat = fabs(lat);
-        int    dlat    = (int)abs_lat;
-        double mlat    = (abs_lat - dlat) * 60.0;
-        double abs_lon = fabs(lon);
-        int    dlon    = (int)abs_lon;
-        double mlon    = (abs_lon - dlon) * 60.0;
+        char pos[APRS_POS_BUF_LEN];
+        aprs_format_position(pos, sizeof(pos), lat, lon, '>');
 
         char info[48];
-        snprintf(info, sizeof(info), "!%02d%05.2f%c/%03d%05.2f%c>%03.0f/%03.0f",
-                 dlat, mlat, lat >= 0.0 ? 'N' : 'S',
-                 dlon, mlon, lon >= 0.0 ? 'E' : 'W',
-                 (double)course, (double)speed);
+        snprintf(info, sizeof(info), "%s%03.0f/%03.0f",
+                 pos, (double)course, (double)speed);
         APRS_queue_beacon(info);
         ESP_LOGI(TAG, "beacon sent: %s", info);
         {   // aviso a la web (el log solo mostraba lo enviado desde la propia UI)
