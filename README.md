@@ -105,6 +105,11 @@ esp32-aprs-modem/
 │   ├── rf_console.h / rf_console.c     consola TCP line-based sobre la IP RF (ax25ip); comandos
 │   │                                  help, status, config [sección], stats, heard, beacon, reboot, quit; un cliente simultáneo; port 23
 │   ├── rx_stats.h / rx_stats.c        estadísticas de recepción por demodulador; /api/rx/stats
+│   ├── igate.h / .c                   iGate APRS-IS (opcional, igate.enabled)
+│   ├── telemetry.h / .c               telemetría APRS periódica (opcional)
+│   ├── aprs_objects.h / .c            objetos y boletines APRS
+│   ├── rx_capture.h / .c              captura de audio RX a WAV (/api/rx/capture)
+│   ├── config_validate.h / .c         validación de config en POST /api/config
 │   ├── carrier_detect.h / .c          detector de portadora ajena (canal ocupado para LBT, calidad
 │   │                                  por trama); REST: /api/carrier; WS: {"type":"channel",...}
 │   ├── rx_survey.h / rx_survey.c      modo SURVEY: medidas del audio de RX; REST: /api/survey/*

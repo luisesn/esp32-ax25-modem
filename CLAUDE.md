@@ -52,6 +52,11 @@ esp32-aprs-modem/
 │   ├── rx_stats.{h,c}          # Contadores por demodulador (v1/v2): CRC ok/err, flags, overflows
 │   ├── carrier_detect.{h,c}    # Detector de portadora ajena (caída de ruido HF + RMS): canal ocupado para LBT, calidad por trama, /api/carrier
 │   ├── netdiag.{h,c}           # Diagnóstico de red desde la web: ping ICMP y miniconsola TCP/UDP/telnet (/api/netdiag*); anota tramas IP RX/TX
+│   ├── igate.{h,c}             # iGate APRS-IS (RF→IS, IS→RF opcional); sólo si igate.enabled; /api/igate
+│   ├── telemetry.{h,c}         # Telemetría APRS periódica (T#, PARM/UNIT/EQNS/BITS); sólo si telemetry.enabled
+│   ├── aprs_objects.{h,c}      # Objetos y boletines APRS; /api/aprs/object|bulletin
+│   ├── rx_capture.{h,c}        # Captura de audio RX a WAV (/api/rx/capture), buffer sólo durante la captura
+│   ├── config_validate.{h,c}   # Validación de config.json en POST /api/config
 │   ├── dedup.{h,c} / adpcm.{h,c} # Dedup compartido (FNV-1a con TTL) / códec IMA ADPCM
 │   ├── il2p.{h,c} / rs_codec.{h,c} # IL2P (FEC Reed-Solomon + scrambler); RS(255,239) y cabecera sobre GF(2⁸)
 │   ├── squelch_sf.{h,c}        # Squelch HFNE (Goertzel 3150–4350 Hz); sólo con monitor/repetidor activos
@@ -160,7 +165,7 @@ audio_stream_task (audio_stream.c, prio 3):
   → envía frame binario por WebSocket a todos los clientes /ws conectados
   wav_server_task (prio 3): WAV TCP en port 8080 para ffplay/VLC
 
-HTTP server (audio_stream.c, port 80): 40 URIs registradas, ver tabla en README.md
+HTTP server (audio_stream.c, port 80): hasta 56 URIs (`max_uri_handlers`), ver tabla en README.md
   (aprs/send, aprs/beacon, me, config, log, rx/stats, reboot, spiffs/upload, morse, sstv/*,
    ota/upload, repeater/*, squelch/*, tune/*, sys, carrier, survey/*, netdiag/*)
 
