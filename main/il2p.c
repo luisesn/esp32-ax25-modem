@@ -518,11 +518,24 @@ void il2p_poll(void)
 {
     if (!s_enabled || !s_cb) return;
     static uint8_t frame[FRAME_BUF_MAX];
+    static uint8_t uhdr[IL2P_HDR_SIZE];
+    static uint8_t spayload[IL2P_MAX_ENC];
     for (int m = 0; m < 2; m++) {
         il2p_rx_t *F = &s_rx[m];
         if (F->state != RX_PENDING) continue;
-        int n = decode_frame(F->uhdr, F->spayload, frame);
+        /* Barrera: el estado PENDING (escrito desde receive_audio_task, otro
+         * núcleo) debe verse después de los datos de cabecera/carga. */
+        __sync_synchronize();
+        /* Copia local y libera el contexto enseguida: el RX puede empezar a
+         * buscar la siguiente trama mientras se decodifica la RS (B11). La
+         * entrega (s_cb) usa el buffer local, que sólo toca esta tarea. */
+        memcpy(uhdr, F->uhdr, sizeof(uhdr));
+        int cplen = F->eplen;
+        if (cplen > (int)sizeof(spayload)) cplen = (int)sizeof(spayload);
+        if (cplen > 0) memcpy(spayload, F->spayload, (size_t)cplen);
+        __sync_synchronize();
         F->state = RX_SEARCH;
+        int n = decode_frame(uhdr, spayload, frame);
         if (n < 5) {
             ESP_LOGD(TAG, "IL2P: carga no recuperable");
             continue;
