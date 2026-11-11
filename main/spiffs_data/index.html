@@ -2366,15 +2366,16 @@ function mapHoverRoute(h){
   let r=null;for(let i=logHist.length-1;i>=0;i--){const x=logHist[i];if(x.k==='r'&&!x.dg&&x.src===h.call){r=x;break;}}
   if(!r)return null;
   const hops=(r.path||'').split(',').map(t=>t.trim()).filter(Boolean),used=hops.filter(t=>t.endsWith('*'));
-  if(!used.length)return [h,mapMe];
+  if(!used.length)return {pts:[h,mapMe]};   // directa: línea continua
   for(let i=used.length-1;i>=0;i--){
     const d=used[i].replace(/\*$/,'');if(/^(WIDE|RELAY|TRACE|ECHO)/i.test(d))continue;
-    const s=mapStations.find(m=>m.call===d);return s?[h,s,mapMe]:null;}
-  return null;
+    const s=mapStations.find(m=>m.call===d);
+    return s?{pts:[h,s,mapMe]}:{pts:[h,mapMe],dash:1};}   // digi sin posición: discontinua directa a yo
+  return {pts:[h,mapMe],dash:1};
 }
 function mapDraw(){
   if(!mapCtx)return;const c=mapCtx;c.clearRect(0,0,mapW,mapH);
-  c.strokeStyle='#4a6a8a';c.lineWidth=1;c.lineJoin='round';
+  c.strokeStyle='#4f6b3a';c.lineWidth=1;c.lineJoin='round';
   for(const[lo,la]of MAP_LINES){c.beginPath();for(let i=0;i<lo.length;i++){const p=mapPx(lo[i],la[i]);i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);}c.stroke();}
   if(mapTrkMin>=0&&mapTrk.length){
     const cut=mapTrkMin>0?Date.now()-mapTrkMin*60000:0,by={};for(const p of mapTrk)if(p.t>=cut)(by[p.call]=by[p.call]||[]).push(p);
@@ -2390,13 +2391,13 @@ function mapDraw(){
     c.fillStyle=s.age<600?'#4caf50':'#8a8a3a';c.beginPath();c.arc(p[0],p[1],4,0,7);c.fill();
     c.fillStyle=(s===mapHover)?'#fff':'#aaa';c.fillText(s.call,p[0]+7,p[1]);}
   if(mapHover&&mapMe){   // enlace de la estación señalada: directo → yo; vía digi con posición → digi → yo
-    const pts=mapHoverRoute(mapHover);
-    if(pts){c.save();c.strokeStyle='rgba(255,255,255,.55)';c.lineWidth=1.5;c.setLineDash([6,4]);c.beginPath();
+    const rt=mapHoverRoute(mapHover),pts=rt&&rt.pts;
+    if(pts){c.save();c.strokeStyle='rgba(255,255,255,.55)';c.lineWidth=1.5;c.setLineDash(rt.dash?[6,4]:[]);c.beginPath();
       pts.forEach((q,i)=>{const p=mapPx(q.lon,q.lat);i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);});c.stroke();c.restore();}
   }
-  if(mapMe){const p=mapPx(mapMe.lon,mapMe.lat);c.fillStyle='#ff5050';c.beginPath();
-    for(let i=0;i<10;i++){const r=i%2?4:9,a=-Math.PI/2+i*Math.PI/5;c.lineTo(p[0]+r*Math.cos(a),p[1]+r*Math.sin(a));}c.closePath();c.fill();
-    c.fillStyle='#ff9090';c.fillText(mapMe.call||'yo',p[0]+11,p[1]);}
+  if(mapMe){const p=mapPx(mapMe.lon,mapMe.lat);c.fillStyle='#4caf50';c.beginPath();
+    c.moveTo(p[0],p[1]-8);c.lineTo(p[0]+7,p[1]+5);c.lineTo(p[0]-7,p[1]+5);c.closePath();c.fill();
+    c.fillStyle='#aaa';c.fillText(mapMe.call||'yo',p[0]+11,p[1]);}
   if(mapHover){const h=mapHover;const t=h.call+' · hace '+fmtAge(h.age)+' · '+h.lat.toFixed(4)+', '+h.lon.toFixed(4);
     const w=c.measureText(t).width+10,x=Math.min(Math.max(h._p[0]+10,2),mapW-w-2),y=Math.max(h._p[1]-22,2);
     c.fillStyle='#000c';c.fillRect(x,y,w,16);c.fillStyle='#fff';c.fillText(t,x+5,y+8);}

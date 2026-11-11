@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Ajustes del mapa (v1.15.2)
+- Línea continua (directo o digi con posición) / discontinua (digi sin posición); marcador propio triángulo verde; contorno verde ejército.
+
 ## 2026-11-11 — Path con `*` y tráfico de terceros en el log (v1.15.1)
 - El bit H de los repetidores no se decodificaba (path sin `*`); corregido en `main.c`. En 3RD la web muestra `GW <estación>` + path externo en lugar de «vía <gateway>».
 
