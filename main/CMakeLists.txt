@@ -24,6 +24,7 @@ idf_component_register(
         "display.c"
         "remote_cmd.c"
         "rf_console.c"
+        "heard.c"
         "ota.c"
         "ota_net.c"
         "delay_tune.c"

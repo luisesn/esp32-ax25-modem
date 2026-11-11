@@ -34,6 +34,7 @@
 #include "carrier_detect.h"
 #include "repeater.h"
 #include "gps.h"
+#include "heard.h"
 
 #define TAG "api_rest"
 
@@ -224,8 +225,6 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
 
     double lat = j_lat->valuedouble;
     double lon = j_lon->valuedouble;
-    char  sym = (j_symbol && cJSON_IsString(j_symbol) && j_symbol->valuestring[0])
-                    ? j_symbol->valuestring[0] : '>';
     const char *comment = (j_comment && cJSON_IsString(j_comment))
                               ? j_comment->valuestring : "";
 
@@ -241,16 +240,12 @@ static esp_err_t aprs_beacon_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    // APRS info field: =DDMM.mmN/DDDMM.mmE sym [cse/spd] comment
-    // (tabla de símbolos '/', formato compartido en aprs_format_position)
-    char pos[APRS_POS_BUF_LEN];
-    aprs_format_position(pos, sizeof(pos), lat, lon, sym);
-
+    // Formato común con la baliza GPS (símbolo/comentario/altitud de gps.*);
+    // el cuerpo puede sobrescribir símbolo (código) y comentario.
     char info[120];
-    if (has_cse)
-        snprintf(info, sizeof(info), "%s%03d/%03d%s", pos, cse, spd, comment);
-    else
-        snprintf(info, sizeof(info), "%s%s", pos, comment);
+    gps_build_beacon_info_at(info, sizeof(info), lat, lon, has_cse, cse, spd,
+                             (j_symbol && cJSON_IsString(j_symbol)) ? j_symbol->valuestring[0] : 0,
+                             (j_comment && cJSON_IsString(j_comment)) ? comment : NULL);
 
     ESP_LOGI(TAG, "APRS beacon TX: %s", info);
     APRS_queue_beacon(info);
@@ -310,10 +305,11 @@ static bool section_differs_ignoring(const cJSON *a, const cJSON *b, const char 
 
 // true si cambió alguna sección que no se reaplica en caliente (B12).
 static bool config_reboot_required(const cJSON *old_cfg, const cJSON *new_cfg) {
-    static const char *const hot_aprs[] = { "callsign", "ssid", "post_rx_tx_delay_ms", NULL };
+    static const char *const hot_aprs[] = { "callsign", "ssid", "post_rx_tx_delay_ms", "path", "ack_path", NULL };
     static const char *const hot_tx[]   = { "lbt_enabled", "lbt_max_wait_ms", "persist", "slottime_ms", NULL };
     static const char *const hot_gps[]  = { "beacon_period_s", "symbol_table", "symbol_code",
-                                            "comment", "course_speed", NULL };
+                                            "comment", "course_speed", "altitude", "use_fixed",
+                                            "fixed_lat", "fixed_lon", "smart_beacon", NULL };
     static const char *const no_hot[]   = { NULL };
     if (!old_cfg) return true;
     // Secciones de la config nueva
@@ -349,6 +345,10 @@ static void config_apply_hot(cJSON *cfg) {
         it = cJSON_GetObjectItem(aprs, "post_rx_tx_delay_ms");
         if (cJSON_IsNumber(it) && it->valueint > 0)
             afsk_set_post_rx_tx_delay_ms((uint32_t)it->valueint);
+        it = cJSON_GetObjectItem(aprs, "path");
+        if (cJSON_IsString(it)) APRS_set_path(it->valuestring);
+        it = cJSON_GetObjectItem(aprs, "ack_path");
+        if (cJSON_IsString(it)) APRS_set_ack_path(it->valuestring);
     }
     cJSON *tx = cJSON_GetObjectItem(cfg, "tx");
     {
@@ -883,6 +883,17 @@ static esp_err_t survey_mark_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// GET /api/heard: últimas estaciones oídas
+static esp_err_t heard_handler(httpd_req_t *req) {
+    char *buf = malloc(3072);
+    if (!buf) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "sin memoria"); return ESP_FAIL; }
+    heard_json(buf, 3072);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
 void api_rest_register(httpd_handle_t server)
 {
     static const httpd_uri_t routes[] = {
@@ -891,6 +902,7 @@ void api_rest_register(httpd_handle_t server)
         { .uri = "/api/me", .method = HTTP_GET, .handler = me_handler },
         { .uri = "/api/sys", .method = HTTP_GET, .handler = sys_handler },
         { .uri = "/api/aprs/beacon", .method = HTTP_POST, .handler = aprs_beacon_handler },
+        { .uri = "/api/heard", .method = HTTP_GET, .handler = heard_handler },
         { .uri = "/api/config", .method = HTTP_GET, .handler = config_get_handler },
         { .uri = "/api/config", .method = HTTP_POST, .handler = config_post_handler },
         { .uri = "/api/morse/trigger", .method = HTTP_POST, .handler = morse_trigger_handler },

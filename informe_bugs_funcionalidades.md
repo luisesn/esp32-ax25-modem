@@ -267,17 +267,17 @@ Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran
 
 **Implementado el 2026-11-11 (v1.6.0, commits `c83268c` y, en la librería, `8871690`)**: con LBT activo y el canal libre se transmite si `random(0..255) <= persist`; si no, se espera un slot y se vuelve a escuchar (un canal ocupado reinicia el proceso). Configuración `tx.persist` (63) y `tx.slottime_ms` (100); `persist` 255 o `slottime_ms` 0 lo desactivan. Se aplica a la cola AFSK, morse y SSTV, y no actúa con LBT desactivado. El host puede ajustarlo con los comandos KISS **P** y **SlotTime** (×10 ms). **No implementado**: TXDELAY y TXTAIL por KISS (siguen fijos en `aprs.*`; las unidades de preámbulo de la librería no coinciden con las KISS y habría que mapearlas). Efecto en latencia: con P=63 cada trama espera de media ≈3 slots (≈300 ms) cuando el canal está libre; subir `persist` si se prioriza latencia. Compila; sin probar en hardware.
 
-**F3. Path configurable.** `WIDE1-1,WIDE2-x` está fijo en la librería y se aplica también a los ACK. Hacerlo configurable (`aprs.path`), con opción de path vacío y un path distinto, normalmente más corto, para ACK y mensajes.
+**F3. Path configurable.** `WIDE1-1,WIDE2-x` está fijo en la librería y se aplica también a los ACK. Hacerlo configurable (`aprs.path`), con opción de path vacío y un path distinto, normalmente más corto, para ACK y mensajes. ✅ Hecho (v1.10.0): `aprs.path` y `aprs.ack_path` (hasta 2 repetidores, vacío = sin path), recargables en caliente.
 
-**F4. Baliza: al arrancar, con comentario y símbolo configurables, y SmartBeaconing** (backlog en parte). Enviar la primera baliza al obtener fix; `gps.symbol`, `gps.comment`, altitud opcional; posición fija configurable para nodos sin GPS; SmartBeaconing si el equipo se usa en móvil.
+**F4. Baliza: al arrancar, con comentario y símbolo configurables, y SmartBeaconing** (backlog en parte). Enviar la primera baliza al obtener fix; `gps.symbol`, `gps.comment`, altitud opcional; posición fija configurable para nodos sin GPS; SmartBeaconing si el equipo se usa en móvil. ✅ Hecho (v1.10.0): formato común (`gps_build_beacon_info`), altitud, posición fija y SmartBeaconing (`gps.smart_beacon`).
 
-**F5. Varios clientes KISS simultáneos** (backlog). Hoy `listen(fd, 1)` y un solo cliente. Con 2–3 se puede tener a la vez un cliente APRS y un monitor. Hacerlo junto con B2 (cola de escritura por cliente).
+**F5. Varios clientes KISS simultáneos** (backlog). Hoy `listen(fd, 1)` y un solo cliente. Con 2–3 se puede tener a la vez un cliente APRS y un monitor. Hacerlo junto con B2 (cola de escritura por cliente). ✅ Hecho (v1.10.0): 2 clientes simultáneos, decodificador KISS reentrante y cola de escritura por cliente (~+13 KB de heap; sin probar en HW).
 
-**F6. Reconexión desde AP** (es B3) y `reboot_required` en la config (es B12).
+**F6. Reconexión desde AP** (es B3) y `reboot_required` en la config (es B12). ✅ Cubierto por B3 y B12.
 
-**F7. Consola RF útil.** Añadir `stats` (tramas RX/TX, CRC), `heard`, `beacon`, `reboot` y `config <sección>`; son las órdenes que se necesitan cuando el nodo sólo es alcanzable por radio.
+**F7. Consola RF útil.** Añadir `stats` (tramas RX/TX, CRC), `heard`, `beacon`, `reboot` y `config <sección>`; son las órdenes que se necesitan cuando el nodo sólo es alcanzable por radio. ✅ Hecho (v1.10.0): `heard`, `beacon`, `config <sección>`, `stats`, `reboot`; además `GET /api/heard`.
 
-**F8. Chat persistente.** Guardar los mensajes enviados en el log del firmware (tipo `sent`, con `msg_id` y estado) para que sobrevivan a una recarga y se vean desde otro navegador. Encaja con F1.
+**F8. Chat persistente.** Guardar los mensajes enviados en el log del firmware (tipo `sent`, con `msg_id` y estado) para que sobrevivan a una recarga y se vean desde otro navegador. Encaja con F1. ✅ Hecho (v1.10.0): entradas `sent` en `/api/log` con estados pending/acked/rejected/failed.
 
 ### 2.2 Medio plazo
 

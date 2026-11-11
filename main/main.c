@@ -25,6 +25,7 @@
 #include "remote_cmd.h"
 #include "msg_retry.h"
 #include "rf_console.h"
+#include "heard.h"
 #include "ota.h"
 #include "ota_net.h"
 #include "delay_tune.h"
@@ -416,9 +417,12 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
     // Es para nosotros. Si el texto ya empieza por "ack" → no ACKear.
     const uint8_t *txt = p + 11;
     size_t tlen = info_len - 11;
-    if (tlen >= 3 &&
-        (txt[0]=='a'||txt[0]=='A') && (txt[1]=='c'||txt[1]=='C') &&
-        (txt[2]=='k'||txt[2]=='K')) {
+    bool is_rej = tlen >= 3 &&
+        (txt[0]=='r'||txt[0]=='R') && (txt[1]=='e'||txt[1]=='E') &&
+        (txt[2]=='j'||txt[2]=='J');
+    if (tlen >= 3 && (is_rej ||
+        ((txt[0]=='a'||txt[0]=='A') && (txt[1]=='c'||txt[1]=='C') &&
+         (txt[2]=='k'||txt[2]=='K')))) {
         // ACK recibido: cancela el reintento del mensaje pendiente (F1).
         char ack_id[6]; size_t n = 0;
         for (const uint8_t *a = txt + 3; a < txt + tlen && n < 5 &&
@@ -432,7 +436,8 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
         size_t bl = dsh ? (size_t)(dsh - src_call) : strlen(src_call);
         if (bl > 6) bl = 6;
         memcpy(ack_base, src_call, bl); ack_base[bl] = '\0';
-        msg_retry_on_ack(ack_base, ack_ssid, ack_id);
+        if (is_rej) msg_retry_on_rej(ack_base, ack_ssid, ack_id);
+        else        msg_retry_on_ack(ack_base, ack_ssid, ack_id);
         return;
     }
 
@@ -567,6 +572,7 @@ static void on_ax25_raw_frame(const uint8_t *buf, size_t len) {
             rq.q = q;
         }
     }
+    heard_note(buf, len, rq.have_q ? rq.q : 0);
     netdiag_note_rx(buf, len);
     // Log every decoded frame: src, dst, ctrl, pid — visible at default log level.
     // If nothing appears here, the modem is not decoding (audio/RF issue).
@@ -781,6 +787,11 @@ void app_main(void)
                 cJSON *delay_j = cJSON_GetObjectItem(aprs_obj, "post_rx_tx_delay_ms");
                 if (cJSON_IsNumber(delay_j) && delay_j->valueint > 0)
                     afsk_set_post_rx_tx_delay_ms((uint32_t)delay_j->valueint);
+                // F3: path configurable ("" = sin path; ausente = valor por defecto de la librería)
+                cJSON *path_j = cJSON_GetObjectItem(aprs_obj, "path");
+                if (cJSON_IsString(path_j)) APRS_set_path(path_j->valuestring);
+                cJSON *apath_j = cJSON_GetObjectItem(aprs_obj, "ack_path");
+                if (cJSON_IsString(apath_j)) APRS_set_ack_path(apath_j->valuestring);
             }
         }
         APRS_setCallsign((char *)cs, cs_ssid);
@@ -814,6 +825,7 @@ void app_main(void)
     morse_init(boot_cfg);
     remote_cmd_init(boot_cfg);
     msg_retry_init();
+    heard_init();
     rf_console_init(boot_cfg);
     config_free_json(boot_cfg);
 

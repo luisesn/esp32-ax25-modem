@@ -5,7 +5,9 @@
     "ssid": 0,
     "symbol_table": "/",
     "symbol_code": ">",
-    "post_rx_tx_delay_ms": 1050
+    "post_rx_tx_delay_ms": 1050,
+    "path": "WIDE1-1,WIDE2-2",
+    "ack_path": "WIDE1-1,WIDE2-2"
   },
   "wifi": [
     {
@@ -54,7 +56,21 @@
     "enabled": true,
     "baud": 9600,
     "use_for_beacon": true,
-    "beacon_period_s": 600
+    "beacon_period_s": 600,
+    "altitude": false,
+    "use_fixed": false,
+    "fixed_lat": 0.0,
+    "fixed_lon": 0.0,
+    "smart_beacon": {
+      "enabled": false,
+      "fast_speed_kmh": 60,
+      "slow_speed_kmh": 5,
+      "fast_rate_s": 180,
+      "slow_rate_s": 1800,
+      "min_turn_deg": 28,
+      "turn_slope": 26,
+      "min_turn_time_s": 15
+    }
   },
   "display": {
     "enabled": true,

@@ -17,6 +17,7 @@
 #include "ax25ip.h"
 #include "aux_config.h"
 #include "rx_stats.h"
+#include "heard.h"
 #include <strings.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -76,6 +77,8 @@ static void cmd_help(conn_t *c)
         "  status  - system status\r\n"
         "  config  - summary; 'config <section>' shows one section\r\n"
         "  stats   - RX frame counters\r\n"
+        "  heard   - last stations heard\r\n"
+        "  beacon  - send position beacon now\r\n"
         "  reboot  - restart the device\r\n"
         "  quit    - close connection\r\n";
     conn_write(c, msg, strlen(msg));
@@ -211,6 +214,23 @@ static void cmd_stats(conn_t *c)
     conn_write(c, rsp, (size_t)n);
 }
 
+// Opcional: la define gps.c si se añade (devuelve true si encola la baliza).
+#include "gps.h"
+
+static void cmd_heard(conn_t *c)
+{
+    char rsp[640];
+    int n = heard_list(rsp, sizeof(rsp));
+    conn_write(c, rsp, (size_t)n);
+}
+
+static void cmd_beacon(conn_t *c)
+{
+    const char *m;
+    m = gps_send_beacon_now() ? "Beacon queued\r\n" : "beacon: failed (no fix?)\r\n";
+    conn_write(c, m, strlen(m));
+}
+
 static void cmd_reboot(conn_t *c)
 {
     static const char *m = "Rebooting\r\n";
@@ -250,6 +270,10 @@ static bool dispatch(conn_t *c, char *line)
         cmd_config(c, arg);
     } else if (strcmp(lower, "stats") == 0) {
         cmd_stats(c);
+    } else if (strcmp(lower, "heard") == 0) {
+        cmd_heard(c);
+    } else if (strcmp(lower, "beacon") == 0) {
+        cmd_beacon(c);
     } else if (strcmp(lower, "reboot") == 0) {
         cmd_reboot(c);
     } else if (strcmp(lower, "quit") == 0 || strcmp(lower, "exit") == 0) {
