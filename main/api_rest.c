@@ -293,6 +293,82 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 // static de 2 KB permanente y el límite dejaba poco margen sobre el config real).
 #define CONFIG_BODY_MAX 8192
 
+// Compara dos secciones ignorando las claves que se reaplican en caliente.
+static bool section_differs_ignoring(const cJSON *a, const cJSON *b, const char *const *hot) {
+    if (!a || !b) return (a != NULL) != (b != NULL);
+    if (!cJSON_IsObject(a) || !cJSON_IsObject(b)) return !cJSON_Compare(a, b, 1);
+    cJSON *ca = cJSON_Duplicate(a, 1), *cb = cJSON_Duplicate(b, 1);
+    if (!ca || !cb) { cJSON_Delete(ca); cJSON_Delete(cb); return true; }
+    for (int i = 0; hot[i]; i++) {
+        cJSON_DeleteItemFromObject(ca, hot[i]);
+        cJSON_DeleteItemFromObject(cb, hot[i]);
+    }
+    bool diff = !cJSON_Compare(ca, cb, 1);
+    cJSON_Delete(ca); cJSON_Delete(cb);
+    return diff;
+}
+
+// true si cambió alguna sección que no se reaplica en caliente (B12).
+static bool config_reboot_required(const cJSON *old_cfg, const cJSON *new_cfg) {
+    static const char *const hot_aprs[] = { "callsign", "ssid", "post_rx_tx_delay_ms", NULL };
+    static const char *const hot_tx[]   = { "lbt_enabled", "lbt_max_wait_ms", "persist", "slottime_ms", NULL };
+    static const char *const hot_gps[]  = { "beacon_period_s", "symbol_table", "symbol_code",
+                                            "comment", "course_speed", NULL };
+    static const char *const no_hot[]   = { NULL };
+    if (!old_cfg) return true;
+    // Secciones de la config nueva
+    for (const cJSON *it = new_cfg->child; it; it = it->next) {
+        const char *k = it->string;
+        if (!k || !strcmp(k, "version")) continue;
+        const cJSON *o = cJSON_GetObjectItem(old_cfg, k);
+        if (!strcmp(k, "digi") || !strcmp(k, "morse")) continue;   // reaplicadas con digi_init/morse_init
+        const char *const *hot = !strcmp(k, "aprs") ? hot_aprs : !strcmp(k, "tx") ? hot_tx
+                               : !strcmp(k, "gps") ? hot_gps : no_hot;
+        if (section_differs_ignoring(o, it, hot)) return true;
+    }
+    // Secciones eliminadas
+    for (const cJSON *it = old_cfg->child; it; it = it->next) {
+        const char *k = it->string;
+        if (!k || !strcmp(k, "version") || !strcmp(k, "digi") || !strcmp(k, "morse")) continue;
+        if (!cJSON_GetObjectItem(new_cfg, k)) return true;
+    }
+    return false;
+}
+
+// Reaplica en caliente lo que tiene API: indicativo/SSID, retardo post-RX, LBT/CSMA, GPS.
+static void config_apply_hot(cJSON *cfg) {
+    cJSON *aprs = cJSON_GetObjectItem(cfg, "aprs");
+    if (cJSON_IsObject(aprs)) {
+        const char *cs = "NOCALL";
+        int ssid = 0;
+        cJSON *it = cJSON_GetObjectItem(aprs, "callsign");
+        if (cJSON_IsString(it) && it->valuestring[0]) cs = it->valuestring;
+        it = cJSON_GetObjectItem(aprs, "ssid");
+        if (cJSON_IsNumber(it)) ssid = it->valueint;
+        APRS_setCallsign((char *)cs, ssid);
+        it = cJSON_GetObjectItem(aprs, "post_rx_tx_delay_ms");
+        if (cJSON_IsNumber(it) && it->valueint > 0)
+            afsk_set_post_rx_tx_delay_ms((uint32_t)it->valueint);
+    }
+    cJSON *tx = cJSON_GetObjectItem(cfg, "tx");
+    {
+        bool lbt = false; uint32_t wait = 10000; uint8_t persist = 63; uint32_t slot = 100;
+        if (cJSON_IsObject(tx)) {
+            cJSON *it = cJSON_GetObjectItem(tx, "lbt_enabled");
+            if (cJSON_IsBool(it)) lbt = cJSON_IsTrue(it);
+            it = cJSON_GetObjectItem(tx, "lbt_max_wait_ms");
+            if (cJSON_IsNumber(it) && it->valueint > 0) wait = (uint32_t)it->valueint;
+            it = cJSON_GetObjectItem(tx, "persist");
+            if (cJSON_IsNumber(it) && it->valueint >= 0 && it->valueint <= 255) persist = (uint8_t)it->valueint;
+            it = cJSON_GetObjectItem(tx, "slottime_ms");
+            if (cJSON_IsNumber(it) && it->valueint >= 0 && it->valueint <= 2550) slot = (uint32_t)it->valueint;
+        }
+        afsk_lbt_configure(lbt, wait);
+        afsk_csma_configure(persist, slot);
+    }
+    gps_reload_config(cfg);
+}
+
 static esp_err_t config_post_handler(httpd_req_t *req) {
     int remaining = (int)req->content_len;
     if (remaining <= 0) {
@@ -334,23 +410,30 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     }
     cJSON_Delete(parsed);
 
+    cJSON *old_cfg = config_get();   // copia de la config anterior (para reboot_required)
     bool saved = save_config(body);
     free(body);
     if (!saved) {
+        config_free_json(old_cfg);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
         return ESP_FAIL;
     }
 
     // Reload config into RAM and re-apply runtime-updatable settings
     cJSON *new_cfg = config_reload();
+    bool reboot_required = true;   // sin config nueva en RAM no podemos asegurar nada
     if (new_cfg) {
         digi_init(new_cfg);
         morse_init(new_cfg);
+        config_apply_hot(new_cfg);
+        reboot_required = config_reboot_required(old_cfg, new_cfg);
         config_free_json(new_cfg);   // config_reload() devuelve una copia: liberarla
     }
+    config_free_json(old_cfg);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true}");
+    httpd_resp_sendstr(req, reboot_required ? "{\"ok\":true,\"reboot_required\":true}"
+                                            : "{\"ok\":true,\"reboot_required\":false}");
     return ESP_OK;
 }
 
