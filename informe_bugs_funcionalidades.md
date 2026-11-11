@@ -111,19 +111,19 @@ Arreglo: aceptar alfanuméricos y cortar en `}`.
 
 Contador global que incrementan varias tareas (httpd, `aprs_poll_task` vía `remote_cmd`, consola). Dos mensajes simultáneos pueden salir con el mismo ID. Probabilidad baja, arreglo trivial (atómico o sección crítica).
 
-**B10. `cJSON_Duplicate` dentro de una sección crítica** — [main/aux_config.c](main/aux_config.c) · **[Leído]**, impacto **[Hipótesis]**
+**B10. ✅ HECHO (v1.9.0) — `cJSON_Duplicate` dentro de una sección crítica** — [main/aux_config.c](main/aux_config.c) · **[Leído]**, impacto **[Hipótesis]**
 
 `config_get()` duplica todo el árbol de configuración (decenas de `malloc`) con `taskENTER_CRITICAL`, es decir, con las interrupciones del núcleo deshabilitadas durante el orden de milisegundos. Si coincide con el núcleo del audio puede provocar pérdidas de muestras del ADC o tirones en el DAC durante TX. Debe ser un mutex. Varias rutas llaman a `config_get()` en ejecución (API, consola), no sólo en el arranque.
 
-**B11. Condición de carrera en la entrega de tramas IL2P** — [main/il2p.c](main/il2p.c) · **[Leído]**
+**B11. ✅ HECHO (v1.9.0) — Condición de carrera en la entrega de tramas IL2P** — [main/il2p.c](main/il2p.c) · **[Leído]**
 
 `frame_ready` se activa en `receive_audio_task` y se consume en `aprs_poll_task` sin protección; una segunda trama puede sobrescribir `ax25_frame` mientras se entrega la primera. Con tramas seguidas (ráfagas TCP por RF) es plausible. Copiar a un buffer o cola al completar la trama.
 
-**B12. `POST /api/config` sólo reaplica digipeater y morse** — [main/api_rest.c](main/api_rest.c) · **[Leído]**
+**B12. ✅ HECHO (v1.9.0) — `POST /api/config` sólo reaplica digipeater y morse** — [main/api_rest.c](main/api_rest.c) · **[Leído]**
 
 El resto (indicativo, GPS y periodo de baliza, IL2P, LBT, consola…) necesita reinicio y la web no lo indica. Mínimo: que la respuesta incluya `reboot_required` y la UI lo muestre. Mejor: reaplicar en caliente lo que sea barato (indicativo, `post_rx_tx_delay_ms`, LBT, periodo de baliza).
 
-**B13. Baliza GPS** — [main/gps.c](main/gps.c) · **[Leído]**
+**B13. ✅ HECHO (v1.9.0) — Baliza GPS** — [main/gps.c](main/gps.c) · **[Leído]**
 
 - La primera baliza sale después de un periodo completo (hasta 10 min sin anunciarse tras arrancar).
 - La validez del fix oscila: RMC con `V` la pone a falso y GGA con calidad > 0 la pone a verdadero, sentencia a sentencia.
@@ -176,7 +176,7 @@ La inhibición post-RX y el LBT sólo condicionan el despacho de `s_tx_queue`. E
 
 **Resuelto el 2026-11-11 (v1.5.0, commits `748d048` y, en la librería, `8871690`)**: la comprobación se extrajo a `tx_gate_open()` (post-RX + LBT + espera máxima) y se expone como `afsk_tx_clear_to_send()`; `morse_check_and_dispatch()` y `sstv_dispatch_if_pending()` la llaman sólo cuando hay algo pendiente y arrancan únicamente si devuelve true (si no, reintentan en la siguiente iteración; la petición SSTV sigue en cola y el semáforo de morse queda tomado por la tarea de baliza, que espera hasta 60 s). La cola AFSK y el hook mantienen estados independientes. Además la puerta sólo se evalúa si hay una trama en cola (antes el temporizador LBT y su aviso corrían con la cola vacía). **El repetidor queda fuera a propósito**: retransmite una señal recién recibida, de modo que el canal está ocupado por su propia entrada y el LBT lo bloquearía siempre (documentado en README, CLAUDE.md y `repeater.c`). Compila; sin probar en hardware. Limitación: sólo se comprueba el canal antes de empezar; una imagen SSTV ya iniciada no se interrumpe.
 
-**B17. Rutas de error de SSTV** — [main/sstv.c](main/sstv.c) · **[Leído]**
+**B17. ✅ HECHO (v1.9.0) — Rutas de error de SSTV** — [main/sstv.c](main/sstv.c) · **[Leído]**
 
 - El PTT y la cabecera VIS salen **antes** de abrir y validar el JPEG: con un fichero corrupto (ver B15) o de ancho no admitido se transmite ~1 s de VIS y nada más, y aun así se envía `sstv_done` por WebSocket.
 - Si el fichero no se puede abrir no hay ningún evento hacia la web.
@@ -186,13 +186,13 @@ La inhibición post-RX y el LBT sólo condicionan el despacho de `s_tx_queue`. E
 
 Arreglo del primer punto: decodificar la cabecera del JPEG y validar dimensiones antes de pulsar el PTT, y emitir un evento `sstv_error` con el motivo.
 
-**B18. Squelch HFNE** — [main/squelch_sf.c](main/squelch_sf.c) · **[Leído]**, impacto **[Hipótesis]** (sólo con monitor o repetidor activos)
+**B18. ✅ HECHO (v1.9.0) — Squelch HFNE** — [main/squelch_sf.c](main/squelch_sf.c) · **[Leído]**, impacto **[Hipótesis]** (sólo con monitor o repetidor activos)
 
 - `send_ws()` llama a `audio_stream_ws_send_text` desde `receive_audio_task` cada ~100 ms. Es el mismo patrón bloqueante que B2, pero en la tarea que lee el ADC: un cliente web lento puede provocar desbordamientos del ADC. Mover el envío a otra tarea (bandera + tarea de baja prioridad).
 - El suelo de ruido nunca baja si el nivel de ruido disminuye (por ejemplo al bajar el volumen). `carrier_detect` ya lo resuelve reaprendiendo desde v1.4.7; aquí falta.
 - Estado de Goertzel en `int32` con coeficiente en coma flotante: se trunca en cada muestra. Usar `float` para el estado.
 
-**B19. Chat de la web** — JavaScript de [main/spiffs_data/index.html](main/spiffs_data/index.html) · **[Leído]**
+**B19. ✅ HECHO (v1.9.0) — Chat de la web** — JavaScript de [main/spiffs_data/index.html](main/spiffs_data/index.html) · **[Leído]**
 
 - La conversación muestra como burbuja **cualquier** trama del contacto activo que no sea un ACK: balizas, mensajes a terceros, telemetría. Debe filtrarse por mensajes (`:DEST     :`) dirigidos al indicativo propio.
 - Los mensajes enviados sólo existen en la memoria de la página: al recargar desaparecen, junto con el estado "pendiente de ACK". El firmware no los devuelve en `/api/log`.
