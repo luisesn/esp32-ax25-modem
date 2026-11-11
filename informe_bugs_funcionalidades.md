@@ -27,11 +27,11 @@ Cada hallazgo lleva una etiqueta de confianza:
 | ~~B4~~ ✅ | Minutos "60.00" en las balizas de posición | Posición inválida de forma esporádica | Bajo |
 | ~~B5~~ ✅ | Auto-ACK sólo con identificadores numéricos | Mensajes de clientes con ID alfanumérico nunca reciben ACK | Bajo |
 | ~~B6~~ ✅ | Digipeater: dedup sobre la trama completa y sin filtro de tramas propias | Repeticiones duplicadas en cuanto haya otro digi en cobertura | Medio |
-| B7 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
-| B14 | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
-| B15 | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
+| ~~B7~~ 🚫 | Servidor HTTP limitado a 3 sockets | Web lenta o con peticiones fallidas | Bajo |
+| ~~B14~~ ✅ | El códec Reed-Solomon no decodifica ni sus propios bloques | Con `il2p.enabled` no se recibe ninguna trama IL2P; lo transmitido no es RS estándar | Bajo (5 correcciones localizadas, ya validadas en PC) |
+| ~~B15~~ ✅ | La subida de imágenes SSTV pierde ~7 % de los bytes | Los JPEG subidos desde la web quedan corruptos y la subida dice "ok" | Bajo |
 | ~~B16~~ | ✅ **HECHO (v1.5.0)** SSTV y morse transmitían sin LBT ni espera post-RX | Pisaban el canal aunque `tx.lbt_enabled` estuviera activo | Bajo |
-| F1 | Reintento de mensajes con seguimiento de ACK | Hoy un mensaje perdido se pierde sin aviso | Medio |
+| ~~F1~~ ✅ | Reintento de mensajes con seguimiento de ACK | Hoy un mensaje perdido se pierde sin aviso | Medio |
 | ~~F2~~ | ✅ **HECHO (v1.6.0)** Acceso al canal CSMA p-persistente | Menos colisiones con LBT activo | Medio |
 
 ## 1. Bugs
@@ -95,13 +95,17 @@ Arreglo: aceptar alfanuméricos y cortar en `}`.
 
 ### 1.2 Prioridad media
 
-**B7. El servidor HTTP sólo admite 3 sockets** — [main/audio_stream.c](main/audio_stream.c) · **[Leído]**, impacto **[Hipótesis]**
+**B7. 🚫 El servidor HTTP sólo admite 3 sockets** — [main/audio_stream.c](main/audio_stream.c) · **[Leído]**, impacto **[Hipótesis]**
 
 `max_open_sockets = 3` y `AUDIO_STREAM_MAX_CLIENT_FDS 3`, aunque el comentario habla de "2 clientes WS + ráfaga del portal cautivo + margen". Un navegador abre la página, el WebSocket y varias peticiones `fetch` en paralelo; con 3 sockets el servidor va purgando conexiones por LRU. `sdkconfig.defaults` ya reserva 16 sockets lwIP. Probar con 6–7.
 
-**B8. Encolado de TX fallido que se da por bueno** — [LibAPRS.cpp](main/LibAPRS-esp32-i2s/src/LibAPRS.cpp), `aprs_send_handler` · **[Leído]**
+> **Descartado 2026-11-11** — Con 1 cliente web y a lo sumo 1 cliente KISS (que usa su propio socket, no el servidor HTTP) bastan los 3 sockets actuales. Si la UI se cortara, subir `AUDIO_STREAM_MAX_CLIENT_FDS`/`max_open_sockets` a 5–6 (lwIP tiene 16).
+
+**B8. ✅ Encolado de TX fallido que se da por bueno** — [LibAPRS.cpp](main/LibAPRS-esp32-i2s/src/LibAPRS.cpp), `aprs_send_handler` · **[Leído]**
 
 `APRS_queue_msg` ignora el retorno de `afsk_queue_tx_frame` y devuelve el número de secuencia aunque la cola estuviera llena. La API responde con un `msg_id` de un mensaje que nunca saldrá y la web lo deja "esperando ACK". Propagar el error hasta `/api/aprs/send`.
+
+> **Hecho 2026-11-11** — v1.7.0 (librería `76fb3c1`): `APRS_queue_msg` devuelve −1 si la cola está llena y `/api/aprs/send` responde 503 `cola TX llena`; la web muestra el error y no deja la burbuja «esperando ACK».
 
 **B9. `message_seq` sin sincronizar** — [LibAPRS.cpp](main/LibAPRS-esp32-i2s/src/LibAPRS.cpp) · **[Leído]**
 
@@ -125,7 +129,7 @@ El resto (indicativo, GPS y periodo de baliza, IL2P, LBT, consola…) necesita r
 - La validez del fix oscila: RMC con `V` la pone a falso y GGA con calidad > 0 la pone a verdadero, sentencia a sentencia.
 - Siempre añade rumbo/velocidad aunque el nodo sea fijo; símbolo `/>` fijo; sin comentario ni altitud.
 
-**B14. El códec Reed-Solomon está roto: IL2P no puede recibir nada** — [main/rs_codec.c](main/rs_codec.c), [main/il2p.c](main/il2p.c) · **[Calculado]** (prioridad alta si se usa IL2P)
+**B14. ✅ El códec Reed-Solomon está roto: IL2P no puede recibir nada** — [main/rs_codec.c](main/rs_codec.c), [main/il2p.c](main/il2p.c) · **[Calculado]** (prioridad alta si se usa IL2P)
 
 `rs_codec.c` compilado en el PC tal como está en el repositorio:
 
@@ -152,13 +156,17 @@ Falta comprobar que el polinomio y la primera raíz coinciden con los de la espe
 
 La implementación difiere de IL2P estándar en varios puntos: tamaño de cabecera (14+2 frente a 13+2), codificación de indicativos, preámbulo 0x7E y exigencia de flags antes del sync, semilla del scrambler, reparto de bloques RS y uso de NRZI. Además descarta el path de digipeaters. Decidir si se quiere IL2P estándar (reescritura parcial contrastando con la especificación y con Dire Wolf) o un FEC propio documentado como tal.
 
-**B15. La subida de imágenes SSTV corrompe el fichero** — `sstv_upload_handler` en [main/sstv.c](main/sstv.c) · **[Calculado]** (port del bucle a Python) (prioridad alta si se usa SSTV)
+> **Hecho 2026-11-11** — v1.6.7: las 5 correcciones aplicadas a `rs_codec.c` (también en `rsh_encode`) y comprobación de cordura de la cabecera. Validado en host: RS8 0–8 errores 300/300 en 5 longitudes, 9 errores rechazados; cabecera 0/1 error 2000/2000 (2 errores: 5,5 % de falsas correcciones, límite del códec); round-trip `il2p_tx_frame`→`il2p_rx_bit`→`il2p_poll` de 11 tamaños, limpios y con 2 bytes corruptos: 22/22. **Bug adicional corregido**: en `rx_process_bit` (`IL2P_SYNC`) un `bit_count++` tras `rx_start_header()` desalineaba la cabecera 1 bit, así que ninguna cabecera se decodificaba. Pendiente: no interoperable con Dire Wolf (B14 bis), no probado en hardware ni con NRZI/módem real.
+
+**B15. ✅ La subida de imágenes SSTV corrompe el fichero** — `sstv_upload_handler` en [main/sstv.c](main/sstv.c) · **[Calculado]** (port del bucle a Python) (prioridad alta si se usa SSTV)
 
 En el estado `MP_IMAGE_DATA`, tras escribir la parte segura del buffer, el bucle vuelve a entrar con 0 bytes seguros, avanza el índice hasta el final y el código de arrastre guarda 0 bytes. Los últimos ~42 bytes de cada ventana de 592 (la longitud del delimitador multipart) ni se escriben ni se arrastran. Una imagen de 20 000 bytes se guarda con 18 572 (≈7 % perdido), el estado termina en "hecho" y la respuesta es `ok`. La web sube el JPEG por esta ruta, así que todas las imágenes subidas desde ella están afectadas; las flasheadas con la imagen SPIFFS o subidas con `/api/spiffs/upload` no.
 
 Comprobación en el dispositivo: comparar el `size` que devuelve la subida con el tamaño real del fichero enviado.
 
 Arreglo: al quedarse sin bytes seguros, arrastrar el resto (`buf_len - i`) al principio del buffer en lugar de descartarlo. Otros fallos de la misma función: un `\r\n\r\n` partido entre dos lecturas no se detecta en los estados de cabecera; no se comprueba el espacio libre; si el último trozo llega corto y no aparece el delimitador final, se informa de éxito igualmente.
+
+> **Hecho 2026-11-11** — v1.6.6: los bytes sobrantes se arrastran al inicio del buffer; además `\r\n\r\n` y delimitadores partidos entre lecturas, comprobación de espacio (507, margen 8 KB), error 400 sin delimitador final (borrando el parcial) y sólo se borra el fichero que creó esta subida. Test de host con el handler real: 46 comprobaciones OK (el original falla 40/40). Sin probar en hardware. Pendiente de decidir: una subida con nombre ya existente sobrescribe el fichero.
 
 **B16. ✅ HECHO (v1.5.0) — SSTV, morse y repetidor transmiten sin LBT ni espera post-RX** — bucle de despacho en [AFSK.cpp](main/LibAPRS-esp32-i2s/src/AFSK.cpp) · **[Leído]**
 
@@ -249,7 +257,9 @@ Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran
 
 ### 2.1 Recomendadas a corto plazo
 
-**F1. Reintento de mensajes con seguimiento de ACK** (backlog). Tabla pequeña de mensajes pendientes (destino, ID, texto, intentos, próximo envío), reintento con espera creciente (por ejemplo 30/60/120 s, 3–5 intentos), cancelación al recibir `ackNNN` y evento WS `msg_failed`. Sirve al chat de la web y a las respuestas de `remote_cmd`. Requiere B5 y B8.
+**F1. ✅ HECHO (v1.7.0) — Reintento de mensajes con seguimiento de ACK** (backlog). Tabla pequeña de mensajes pendientes (destino, ID, texto, intentos, próximo envío), reintento con espera creciente (por ejemplo 30/60/120 s, 3–5 intentos), cancelación al recibir `ackNNN` y evento WS `msg_failed`. Sirve al chat de la web y a las respuestas de `remote_cmd`. Requiere B5 y B8.
+
+> **Hecho 2026-11-11** — `msg_retry.[ch]`: tabla de 8 entradas (≈0,7 KB), 4 intentos con esperas 30/60/120/120 s, mismo ID en cada reintento vía `APRS_queue_msg_id` (cola TX normal, sin bloquear), cancelación al recibir `ackNNN` (destino+SSID+ID, sin distinguir mayúsculas), eventos WS `msg_retry` y `msg_failed`; la web marca «✗ sin ACK». Tarea de 3 KB, prio 3. **Fuera de alcance**: respuestas de `remote_cmd` (no se rastrean), persistencia tras reinicio, estado «reintentando» en la UI. Sin probar en hardware.
 
 **F2. ✅ HECHO (v1.6.0) — Acceso al canal CSMA p-persistente y parámetros KISS.** Hoy el TX sale en cuanto el canal queda libre: si dos estaciones esperan, colisionan siempre. Añadir slot aleatorio (`slottime` 100 ms, `persist` 63) al despacho de `s_tx_queue`, y aceptar los comandos KISS TXDELAY/P/SlotTime/TXTAIL para que APRSdroid, Xastir o Dire Wolf puedan ajustarlos. Tiene más valor cuando LBT esté activado.
 

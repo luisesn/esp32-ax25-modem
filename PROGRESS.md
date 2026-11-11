@@ -607,3 +607,7 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 - B1 (parcial) tramas TUN siempre por AX.25; B5 auto-ACK alfanumérico (v1.6.1). B2 timeout de envío KISS y B3 reintento STA desde el AP (v1.6.2). B4 formato de posición compartido (v1.6.3). B6 digipeater (v1.6.4).
 - Trabajo repartido en 4 agentes en paralelo por fichero; compilación conjunta OK (≈43 % libre). **Sin probar en hardware**; B6 verificado con test de host.
 - v1.6.5: B2 completo: la salida KISS pasa por un MessageBuffer y `kiss_writer_task`; el hook de RX ya no puede bloquearse con un cliente colgado.
+
+## 2026-11-11 — B14, B15, F1 y B8 (v1.6.6, v1.6.7, v1.7.0)
+- B15 subida SSTV sin pérdida de bytes (v1.6.6, test de host con el handler real). B14 códec RS + alineación de cabecera IL2P (v1.6.7, round-trip en host). F1 reintento de mensajes con ACK y B8 error de cola llena (v1.7.0; librería `76fb3c1`).
+- B7 descartado por requisitos (1 cliente web + 1 KISS). Compilación conjunta OK (≈43 % libre). **Sin probar en hardware.**
