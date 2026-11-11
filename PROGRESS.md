@@ -1,9 +1,9 @@
 # Progreso de arreglos — esp32-aprs-modem
 
-Seguimiento de la resolución de problemas listados en [doc/obsolete/report.md](doc/obsolete/report.md) (informe original, ya no versionado en la raíz). Análisis de mejoras actual: [informe_mejoras.md](informe_mejoras.md).
+Seguimiento de la resolución de problemas listados en [doc/obsolete/report.md](doc/obsolete/report.md) (informe original, ya no versionado en la raíz). Análisis de mejoras actual: [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) e [informe_modem.md](informe_modem.md) (el anterior, `informe_mejoras.md`, no está versionado).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-10-08
+Última actualización: 2026-11-11
 
 ---
 
@@ -588,3 +588,12 @@ Compila limpio (binario 0xeb230 B, 43 % libre; DRAM estática ≈107 KB → 78,6
 - Web rediseñada (una columna + barra lateral), vista CANAL con ejes fijos, medidor de nivel nuevo (pico dBFS desde firmware), balizas propias en el log; sin medidas de RX durante el TX (`afsk_is_transmitting()`, `carrier_detect_hold()`).
 - Calidad por trama (`q`/`qdb`/`lv`/`er`); `er` cuenta solo CRC erróneos desde que el canal se ocupa (v1.4.6). Umbrales HF 6/4 dB según capturas SURVEY a volumen medio y máximo (el máximo satura: no usarlo).
 - v1.4.7: `carrier_detect` reaprende el suelo tras ~12 s seguidos ocupado (con volumen 25 % se quedaba ocupado fijo; causa probable: suelo aprendido alto en el arranque, no reproducido offline). Pendiente de verificar en hardware con `GET /api/carrier`.
+
+## 2026-11-11 — Análisis de los módulos restantes y corrección de documentación (sin cambios de firmware)
+
+Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B14–B22) e [informe_modem.md](informe_modem.md) §3.5. Comprobaciones hechas en PC, nada en hardware.
+
+- ⬜ **Códec Reed-Solomon defectuoso** (`rs_codec.c`, B14): compilado en host, rechaza todos los bloques aunque no tengan errores → la RX IL2P no entrega tramas. Cinco correcciones identificadas y validadas en host (0–8 errores corregidos en 300/300 bloques); sin aplicar.
+- ⬜ **Subida SSTV** (`sstv_upload_handler`, B15): pierde ≈7 % de los bytes de cada imagen (simulación del bucle); sin aplicar.
+- ⬜ **Morse/SSTV/repetidor sin LBT ni inhibición post-RX** (B16); rutas de error de SSTV (B17); squelch HFNE envía WS desde `receive_audio_task` (B18); chat web (B19); indicadores del v1 (B20); consola RF (B21); `netdiag` (B22).
+- ✅ Documentación alineada con el código: cola TX 6 (no 4), DAC 4 descriptores ≈170 ms (no 8/≈336 ms), espera de 5 ms en `switch_to_tx` (no 20), barrido TUNE 50–2000 ms, endpoints `/api/sys` y `/api/netdiag/*`, módulos `netdiag`/`carrier_detect`/`dedup`/`adpcm`/`server/` en la estructura, estado real de IL2P.

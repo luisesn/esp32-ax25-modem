@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-10-08): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P con Reed-Solomon, digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.4.7): **compila limpio (binario ~928 KB, ~46 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P (códec Reed-Solomon defectuoso: no usar, ver trampas), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
 
 Se basa en una adaptación de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino). El fork propio vive en **https://github.com/luisesn/LibAPRS-esp32-i2s** y está clonado en `main/LibAPRS-esp32-i2s/` como **repo git anidado** (ver "Librería LibAPRS" más abajo). Reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -21,6 +21,9 @@ esp32-aprs-modem/
 ├── partitions.csv              # NVS + otadata + OTA×2 (1,625 MB c/u) + SPIFFS 704 KB
 ├── espota.py                   # Cliente OTA por WiFi (protocolo espota, puerto 3232)
 ├── README.md / PROGRESS.md     # Documentación de usuario / bitácora
+├── version.txt                 # Versión del firmware (PROJECT_VER); ver "Al editar este proyecto"
+├── informe_bugs_funcionalidades.md / informe_modem.md  # Análisis de bugs/funcionalidades y del demodulador (2026-11)
+├── server/                     # Servidor de desarrollo en Python (consola serie, flasheo y OTA desde el navegador); ver server/README.md
 ├── .claude/commands/           # Skills: /build, /flash-spiffs, /trap-check
 ├── doc/                        # Notas de diseño y backlog (en .gitignore: no versionado)
 ├── main/
@@ -46,8 +49,11 @@ esp32-aprs-modem/
 │   ├── ota.{h,c} / ota_net.{h,c} # OTA por HTTP (/api/ota/upload) y por espota.py (:3232)
 │   ├── delay_tune.{h,c}        # Autoajuste de post_rx_tx_delay_ms por barrido ICMP
 │   ├── rx_stats.{h,c}          # Contadores por demodulador (v1/v2): CRC ok/err, flags, overflows
+│   ├── carrier_detect.{h,c}    # Detector de portadora ajena (caída de ruido HF + RMS): canal ocupado para LBT, calidad por trama, /api/carrier
+│   ├── netdiag.{h,c}           # Diagnóstico de red desde la web: ping ICMP y miniconsola TCP/UDP/telnet (/api/netdiag*); anota tramas IP RX/TX
+│   ├── dedup.{h,c} / adpcm.{h,c} # Dedup compartido (FNV-1a con TTL) / códec IMA ADPCM
 │   ├── il2p.{h,c} / rs_codec.{h,c} # IL2P (FEC Reed-Solomon + scrambler); RS(255,239) y cabecera sobre GF(2⁸)
-│   ├── squelch_sf.{h,c}        # Squelch HFNE (Goertzel 3150–4350 Hz); canal ocupado para LBT/monitor
+│   ├── squelch_sf.{h,c}        # Squelch HFNE (Goertzel 3150–4350 Hz); sólo con monitor/repetidor activos
 │   ├── rx_survey.{h,c}         # Modo SURVEY: mide audio RX (pico/RMS/Goertzel 1200-2200/HFNE) y emite filas por WS; sólo activo al iniciarlo (pestaña SURVEY)
 │   ├── repeater.{h,c}          # Repetidor de voz analógico (DESHABILITADO: REPEATER_ENABLED 0)
 │   ├── spiffs_data/
@@ -116,12 +122,12 @@ app_main (main.c)
   │     ├── kiss_init(on_kiss_frame)
   │     ├── APRS_init → AFSK_init → AFSK_hw_init
   │     │     ├── gpio_config PTT (GPIO26, salida, reposo bajo)
-  │     │     ├── xQueueCreate(s_tx_queue, 4)           ← cola de tramas TX
+  │     │     ├── xQueueCreate(s_tx_queue, 6)           ← cola de tramas TX (TX_QUEUE_DEPTH)
   │     │     ├── xTaskCreate(aprs_poll_task, prio 9)   ← APRS_poll() + il2p_poll() cada tick
   │     │     └── xTaskCreate(receive_audio_task, prio 10, stack 8192)
   │     │           └── [dentro de la tarea] adc_peripheral_start()
   │     ├── APRS_setCallsign() + afsk_set_post_rx_tx_delay_ms()   ← aprs.* de config.json
-  │     ├── afsk_set_tx_fn(APRS_send_raw_frame)  ← o smart_tx_frame si il2p.enabled
+  │     ├── afsk_set_tx_fn(tx_noted_frame)       ← envoltorio: netdiag_note_tx + APRS_send_raw_frame (o smart_tx_frame si il2p.enabled)
   │     ├── APRS_set_raw_hook(on_ax25_raw_frame) + il2p_init(en, on_ax25_raw_frame)
   │     ├── digi_init / morse_init / remote_cmd_init / rf_console_init
   │     ├── audio_stream_init()  ← HTTP :80 + WS /ws + WAV :8080 (+ sstv/ota/tune/squelch/repeater REST)
@@ -152,9 +158,9 @@ audio_stream_task (audio_stream.c, prio 3):
   → envía frame binario por WebSocket a todos los clientes /ws conectados
   wav_server_task (prio 3): WAV TCP en port 8080 para ffplay/VLC
 
-HTTP server (audio_stream.c, port 80): ~30 endpoints, ver tabla en README.md
+HTTP server (audio_stream.c, port 80): 40 URIs registradas, ver tabla en README.md
   (aprs/send, aprs/beacon, me, config, log, rx/stats, reboot, spiffs/upload, morse, sstv/*,
-   ota/upload, repeater/*, squelch/*, tune/*)
+   ota/upload, repeater/*, squelch/*, tune/*, sys, carrier, survey/*, netdiag/*)
 
 on_ax25_raw_frame (main.c, llamado por el raw_hook de AX25 y de IL2P):
   ├── rx_frame_is_duplicate()        → descarta la 2ª copia (doble módem), ventana 300 ms
@@ -176,7 +182,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
     → ax25_sendRaw → AFSK_transmit
   switch_to_tx():
     tx_mode=true → adc_continuous_stop → adc_continuous_deinit
-    → vTaskDelay(20ms) → dac_continuous_new_channels → dac_continuous_enable
+    → vTaskDelay(5ms) → dac_continuous_new_channels → dac_continuous_enable
     → gpio_set_direction(GPIO_PTT_OUT, OUTPUT)  ← restaura modo digital tras DAC_SIMUL
     → prime silence (TX_SAMPLE_BUFLEN bytes × 0x80)
   transmit_audio_i2s() en bucle: genera muestras AFSK, padding 0x80, escribe
@@ -221,13 +227,15 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **Listen-Before-Talk e inhibición post-RX** (`AFSK.cpp`, bucle de despacho TX): (a) el TX espera `aprs.post_rx_tx_delay_ms` desde la última trama recibida (`afsk_notify_rx_frame()`); (b) si `tx.lbt_enabled` (por defecto **false**), difiere mientras `channel_is_busy()`, hasta `tx.lbt_max_wait_ms` (10 s). `channel_is_busy()` = `carrier_detect_busy()` (siempre activo, `carrier_detect.c`) `||` HFNE (sólo si monitor/repetidor activos). `carrier_detect` declara ocupado cuando, en ventanas de ~107 ms, la energía HF (3,5–4 kHz) cae ≥8 dB bajo su suelo adaptativo **y** el RMS cae bajo 0,65× su suelo (calibrado con SURVEY: la radio sin squelch da ruido sin portadora y lo pierde con ella); falla en abierto (sin ruido → libre). El suelo no se adapta mientras está ocupado, así que tras `CD_MAX_BUSY_WINDOWS` (~12 s seguidos ocupado) se reaprende (`s_warm=0`, v1.4.7): evita quedarse ocupado para siempre si el suelo se aprendió demasiado alto (visto a volumen 25 %; causa sin confirmar, no reproducido offline con las capturas). Diagnóstico: `GET /api/carrier`. Umbrales como `#define` en `carrier_detect.c`, validados con una sola captura (10 tramas, un volumen): recalibrar con SURVEY si cambia la radio/volumen. **Calidad por trama** (`carrier_detect_frame_quality()` + `on_ax25_raw_frame`): campos `q`(1-4)/`qdb`/`lv`/`er` en el JSON `aprs`; umbrales de `q` (15/11/7 dB) provisionales. **Calibración (2 capturas SURVEY, 2026-11-10)**: volumen medio → reposo RMS≈21, pico≈52, caída de HF en portadora 10–12 dB; volumen máximo → reposo RMS≈66, pico 127 saturado, AGC=512 (tope), caída HF 8–11 dB. Ruido de reposo del HF: σ≈1–1,4 dB, por eso `CD_ENTER_HF_DB`=6/`CD_STAY_HF_DB`=4 (con 8 se perdían ventanas válidas). Los CRC erróneos son ≈90 % ruido en reposo (90–165 por captura frente a 4–12 durante portadora): `er` cuenta sólo los de la portadora. Portadoras sin tonos (RMS bajo, d12/d22 negativos) no se pueden decodificar. La web (v1.4.0) es de una columna con barra lateral, incluye la vista CANAL (canvas sin librerías) y muestra la versión del firmware (`/api/sys`).
 
+- **El hook de despacho no pasa por LBT**: la inhibición post-RX y el LBT sólo condicionan `s_tx_queue`. Morse, SSTV y repetidor (`project_dispatch_hook`) transmiten con la única condición de `!tx_mode`, aunque el canal esté ocupado. Una transmisión SSTV dura hasta ~114 s en `receive_audio_task`: sin RX y con la cola AFSK parada.
+
 - **Baliza GPS**: `gps.use_for_beacon` + `gps.beacon_period_s` (por defecto 600 s en código; el `config.json` actual usa 60 s). La tarea `gps_beacon` vive en `gps.c`. Para balizas manuales: `POST /api/aprs/beacon` o `tx,aprs,position` por APRS.
 
 - **Consola RF** (`rf_console.c`): escucha en el puerto `console.port` (23) sólo en la interfaz RF de `ax25ip`; `console.tcp` y `console.udp` se activan por separado (por defecto TCP sí, UDP no). Comandos: `help`, `status`, `config`, `quit`. Sin autenticación.
 
 - **`aprs_poll_task` y el `raw_hook`**: `APRS_poll()` ya no corre en `receive_audio_task` sino en `aprs_poll_task` (prio 9), por lo que `on_ax25_raw_frame` se ejecuta en esa tarea. No bloquear en el hook (WS lento, mutex) o se llenan los FIFOs de RX. `FIFO.h` tiene variantes `_locked` (portMUX); el resto de `fifo_*` sin lock se usa en rutas de una sola tarea/ISR — auditar antes de tocar.
 
-- **IL2P**: `il2p.enabled` (por defecto false). Con IL2P activo `smart_tx_frame` enruta PID=0xCC (IP) por IL2P y el resto por AX.25; la RX acepta ambos en paralelo. `rs_codec.c` usa GF(2⁸) tanto para RS(255,239) del payload como para la cabecera (2 raíces); no hay GF(2⁴).
+- **IL2P**: `il2p.enabled` (por defecto false). Con IL2P activo `smart_tx_frame` enruta PID=0xCC (IP) por IL2P y el resto por AX.25; la RX acepta ambos en paralelo. `rs_codec.c` usa GF(2⁸) tanto para RS(255,239) del payload como para la cabecera (2 raíces); no hay GF(2⁴). **El códec está roto (comprobado en host, 2026-11-11)**: `rs8_decode`/`rsh_decode` rechazan bloques sin errores, así que con `il2p.enabled` la RX IL2P no entrega ninguna trama y la paridad transmitida no es RS estándar. Además en modo TUN el tráfico IP no pasa por IL2P (las tramas no llevan cabecera AX.25). No activar `il2p.enabled` hasta corregirlo: las 5 correcciones están en B14 de `informe_bugs_funcionalidades.md`.
 
 - **Repetidor deshabilitado**: `REPEATER_ENABLED 0` en `config.h` (reservar ~15 KB contiguos de heap, pausa RX y detiene el servidor WAV). Con 0, ni `config.json` ni `/api/repeater/enable` pueden activarlo. Hay presión de heap: vigilar buffers `static` grandes y stacks de tareas.
 
@@ -245,9 +253,9 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **`config_load()` devuelve copia**: `aux_config.c` devuelve `cJSON_Duplicate(root, 1)` — el llamador es responsable de liberar el objeto con `config_free_json()`. No usar el puntero después de liberar.
 
-- **Cola TX entre tareas (`s_tx_queue`)**: en modo KISS TNC, `server_task` **no puede** llamar `APRS_send_raw_frame` directamente porque internamente invoca `adc_continuous_stop`, que debe ejecutarse desde la misma tarea FreeRTOS que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). Solución: `QueueHandle_t s_tx_queue` de capacidad 4 × `afsk_tx_frame_t`. `server_task` encola con `afsk_queue_tx_frame()` (no bloqueante); `receive_audio_task` despacha al inicio de cada iteración. **Es obligatorio llamar `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` antes de `APRS_set_raw_hook`.**
+- **Cola TX entre tareas (`s_tx_queue`)**: en modo KISS TNC, `server_task` **no puede** llamar `APRS_send_raw_frame` directamente porque internamente invoca `adc_continuous_stop`, que debe ejecutarse desde la misma tarea FreeRTOS que llamó a `adc_continuous_start` (mutex interno de ESP-IDF). Solución: `QueueHandle_t s_tx_queue` de capacidad 6 (`TX_QUEUE_DEPTH`) × `afsk_tx_frame_t`. `afsk_queue_tx_frame()` no bloquea (falla si la cola está llena); la ruta KISS (`on_kiss_frame`) usa `afsk_queue_tx_frame_wait()` con `KISS_TX_ENQUEUE_TIMEOUT_MS` (15 s) como contrapresión; `receive_audio_task` despacha al inicio de cada iteración. **Es obligatorio llamar `afsk_set_tx_fn(APRS_send_raw_frame)` en `app_main` antes de `APRS_set_raw_hook`** (hoy se registra el envoltorio `tx_noted_frame` de `main.c`, que anota la trama en `netdiag` y delega).
 
-- **`TX_SAMPLE_BUFLEN=2048` — no reducir**: el descriptor DMA del DAC tiene `buf_size=2048` bytes (≈42 ms a 48 kHz). Con `desc_num=8`, el pool total es ≈336 ms. Las tareas WiFi (prioridad 23) pueden preemptar `receive_audio_task` (prioridad 10) durante decenas de ms. Si el descriptor se consume antes de que la tarea recargue el siguiente, el semáforo `s_dac_wait_to_load_dma_data` expira → `dac_continuous_write` cuelga. Con `TX_SAMPLE_BUFLEN<buf_size` cada escritura llena menos de un descriptor y el margen desaparece.
+- **`TX_SAMPLE_BUFLEN=2048` — no reducir**: el descriptor DMA del DAC tiene `buf_size=2048` bytes (≈42 ms a 48 kHz). Con `DAC_DESC_NUM` = 4 descriptores, el pool total es ≈170 ms (la documentación anterior decía 8 / ≈336 ms; no se sabe si la reducción fue deliberada). Las tareas WiFi (prioridad 23) pueden preemptar `receive_audio_task` (prioridad 10) durante decenas de ms. Si el descriptor se consume antes de que la tarea recargue el siguiente, el semáforo `s_dac_wait_to_load_dma_data` expira → `dac_continuous_write` cuelga. Con `TX_SAMPLE_BUFLEN<buf_size` cada escritura llena menos de un descriptor y el margen desaparece.
 
 - **Siempre escribir el buffer completo al DMA**: cuando `AFSK_dac_isr` establece `sending=false` a mitad del buffer, `transmit_audio_i2s` rellena el resto con `0x80` (nivel DC = silencio) y siempre escribe `TX_SAMPLE_BUFLEN` bytes. Escribir un buffer parcial agota el descriptor en <1 ms, el DMA se detiene, y las escrituras de silencio posteriores no consiguen cargar porque el ISR ya no dispara → timeout × N = bloqueo prolongado.
 
@@ -293,9 +301,9 @@ idf.py monitor             # ver trazas; salir con Ctrl-]
 
 ## Estado del proyecto
 
-Ver [README.md](README.md) (uso, API, configuración), [PROGRESS.md](PROGRESS.md) (bitácora) y [informe_mejoras.md](informe_mejoras.md) (análisis de mejoras, con anexos de seguridad y pruebas). El informe técnico original está en `doc/obsolete/report.md`.
+Ver [README.md](README.md) (uso, API, configuración), [PROGRESS.md](PROGRESS.md) (bitácora) , [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) e [informe_modem.md](informe_modem.md) (análisis de 2026-11: bugs, funcionalidades y mejoras del demodulador). `informe_mejoras.md` (2026-10-08, con anexos de seguridad y pruebas) es el análisis anterior y no está versionado. El informe técnico original está en `doc/obsolete/report.md`.
 
-Resumen rápido (2026-10-08):
+Resumen rápido (2026-11-11):
 - Bloqueantes de la primera auditoría: todos resueltos en código ✅
 - KISS TNC bidireccional (WiFi TCP :8001, keepalive, escritura con buffer, contrapresión) ✅
 - TX verificado en hardware: datos decodificados por receptor externo ✅
@@ -303,9 +311,11 @@ Resumen rápido (2026-10-08):
 - Comandos remotos vía APRS (`remote_cmd.c`), sin autenticación ✅
 - Gateway IP RFC 1226 / TUN (`ax25ip.c`) verificado en hardware ✅
 - Dedup de tramas RX por doble módem en `on_ax25_raw_frame()` ✅
-- Listen-Before-Talk + inhibición post-RX + autoajuste `post_rx_tx_delay_ms` (TUNE) ✅ (LBT sólo efectivo con squelch HFNE activo)
+- Listen-Before-Talk + inhibición post-RX + autoajuste `post_rx_tx_delay_ms` (TUNE) ✅ (LBT usa `carrier_detect`, siempre activo; desactivado por defecto; no cubre morse/SSTV)
 - GPS + baliza de posición periódica; display SSD1306; digipeater WIDEn-N; baliza CW ✅
-- IL2P con Reed-Solomon ✅ (interoperabilidad con Dire Wolf sin verificar)
+- IL2P ❌ códec Reed-Solomon defectuoso (prueba en host): la RX IL2P no decodifica nada; no interopera con Dire Wolf. Pendiente de corregir (B14)
+- Subida de imágenes SSTV desde la web (`/api/sstv/upload`) pierde ~7 % de los bytes (simulado en host, B15) ⚠️
+- Diagnóstico de red en la web (`netdiag.c`: ping, miniconsola TCP/UDP) ✅
 - OTA por HTTP y por `espota.py`; WiFi multi-red con fallback AP ✅
 - Consola RF (TCP/UDP) ✅
 - `sdkconfig.defaults` completo (reproducible) ✅
