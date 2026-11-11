@@ -253,6 +253,18 @@ Las tres primeras filas, la ausencia de `netdiag` y `/api/sys` en la documentaci
 
 El margen de DMA con 4 descriptores es la mitad del que describía la trampa de `TX_SAMPLE_BUFLEN`; conviene confirmar cuál de los dos valores es el deseado.
 
+**B23. ✅ HECHO (v1.11.1) — KISS: un FEND justo después de FESC se descartaba** — [main/kiss.c](main/kiss.c) · **[Probado en host]** (hallado por `test/unit/test_kiss.c`)
+
+En el estado de escape sólo se aceptaban TFEND/TFESC y cualquier otro byte se tiraba, incluido un FEND: una trama truncada por el host (FESC al final) no se cerraba y se fusionaba con la siguiente. Ahora un FEND tras FESC cierra la trama (la que llevara datos) como un FEND normal.
+
+**B24. ✅ HECHO (v1.11.1) — Digipeater: el alias casaba por SSID exacto** — [main/digipeater.c](main/digipeater.c) · **[Probado en host]** (hallado por `test/unit/test_digipeater.c`)
+
+Con la configuración por defecto (`WIDE1-1`, `WIDE2-2`) una trama con salto restante `WIDE2-1` (segundo salto típico tras decrementar) no se repetía. Ahora un alias con SSID N acepta `ALIAS-1..N`; un alias sin SSID (`RELAY`) sólo casa sin SSID. Se mantiene el límite `DIGI_MAX_N`.
+
+**B25. ⬜ ABIERTO — Demodulador v2: poca tolerancia a deriva de reloj y a ruido** — `AFSK.cpp` (`afsk_v2_process`) · **[Medido en host con audio sintético, `test/demod`]**
+
+Decodifica 40/40 hasta ±0,25 % de deriva, pero −0,5 % da 21/40 y ±1 % entre 4 y 10/40 (también sin ruido), ±2 % 0/40; con SNR 12 dB 36/40 y con 9 dB 0/40; tonos −100 Hz pierden un 10 %. Hipótesis (sin comprobar): el lazo de fase corrige ±1 (±2 en el preámbulo) por transición y el preámbulo sólo aporta 2 transiciones cada 8 bits. Pendiente: validar con capturas reales (`/api/rx/capture`) y contrastar con Dire Wolf (`atest`) antes de tocar el demodulador.
+
 ## 2. Funcionalidades
 
 Ordenadas por relación utilidad/esfuerzo. Las marcadas con (backlog) ya figuran en `doc/pending/features_and_improvements.md`; aquí sólo se priorizan.

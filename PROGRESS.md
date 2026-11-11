@@ -7,6 +7,14 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Banco de pruebas en host y v1.11.1
+
+- Nuevo `test/` (CMake sin ESP-IDF, ASan/UBSan, `ctest`): unit de kiss, RS/IL2P, dedup, config_validate, digipeater, heard y regresión del demodulador v2 (audio sintético + corpus WAV).
+- ✅ B23 `kiss.c`: FEND tras FESC cierra la trama. ✅ B24 `digipeater.c`: alias `WIDEn-N` acepta `WIDEn-1..N`. v1.11.1 (compila, 41 % libre).
+- ⬜ B25: el demodulador v2 pierde tramas con deriva de reloj ≥0,5 % y con SNR ≤9 dB (medido en host; falta validar con capturas reales).
+
+---
+
 ## Bloqueantes (sección 1 del report)
 
 | # | Problema | Archivo principal | Estado |
