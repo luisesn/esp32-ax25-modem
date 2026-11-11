@@ -1,0 +1,2 @@
+# Tramas mínimas (generado con: demod_regress genwav sintetico_snr15.wav 8 15; hoy decodifica 8)
+min_frames=7

@@ -1,0 +1,3 @@
+main/digipeater.c
+main/dedup.c
+test/unit/stubs_digipeater.c

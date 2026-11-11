@@ -11,3 +11,4 @@ main/spiffs_data/config.json
 server/*.pem
 sdkconfig
 sdkconfig.old
+build-test*/
