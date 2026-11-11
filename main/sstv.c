@@ -33,6 +33,36 @@
 
 QueueHandle_t s_sstv_queue = NULL;
 static volatile bool s_sstv_abort = false;
+/* true mientras hay una transmisión en curso (la fija sstv_transmit). Junto con
+ * la cola, decide si una orden de stop tiene algo que parar (B17). */
+static volatile bool s_sstv_busy = false;
+
+static void sstv_ws_error(const char *reason) {
+    char m[96];
+    snprintf(m, sizeof(m), "{\"type\":\"sstv_error\",\"reason\":\"%s\"}", reason);
+    audio_stream_ws_send_text(m);
+}
+
+static bool sstv_parse_mode(const char *ms, SstvMode *out) {
+    if (!ms) return false;
+    if      (strcmp(ms, "martin_m1")  == 0) *out = SSTV_MODE_MARTIN_M1;
+    else if (strcmp(ms, "martin_m2")  == 0) *out = SSTV_MODE_MARTIN_M2;
+    else if (strcmp(ms, "scottie_s1") == 0) *out = SSTV_MODE_SCOTTIE_S1;
+    else if (strcmp(ms, "robot_36")   == 0) *out = SSTV_MODE_ROBOT_36;
+    else if (strcmp(ms, "robot_72")   == 0) *out = SSTV_MODE_ROBOT_72;
+    else return false;
+    return true;
+}
+
+/* Stop recibido mientras la petición estaba en cola: se consume aquí, sin
+ * transmitir. Devuelve true si la petición debe descartarse. */
+static bool sstv_consume_pending_stop(void) {
+    if (!s_sstv_abort) return false;
+    s_sstv_abort = false;
+    audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
+    ESP_LOGI(TAG, "SSTV: stop recibido antes de empezar, petición descartada");
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // 256-entry uint8_t sine table (DC=128, amplitude ~127).
@@ -444,7 +474,7 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
     const SstvModeParams *mp = &sstv_modes[(int)mode];
     int bars_rows = (mp->rows * 3) / 4;   /* top 75% = color bars */
 
-    s_sstv_abort = false;
+    if (sstv_consume_pending_stop()) return;
     afsk_switch_to_tx();
     gpio_set_level(GPIO_PTT_OUT, 1);
     s_dac_pos = 0;
@@ -507,6 +537,7 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
     gpio_set_level(GPIO_PTT_OUT, 0);
     afsk_switch_to_rx();
     if (s_sstv_abort) {
+        s_sstv_abort = false;
         audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
         ESP_LOGI(TAG, "SSTV test pattern TX aborted");
     } else {
@@ -519,17 +550,31 @@ static void sstv_transmit_test_pattern(SstvMode mode) {
 // Main transmit function
 // ---------------------------------------------------------------------------
 void sstv_transmit(const SstvRequest *req) {
+    s_sstv_busy = true;
     if (req->is_test) {
-        sstv_transmit_test_pattern(req->mode);
+        if ((int)req->mode >= 0 && (int)req->mode < 5)
+            sstv_transmit_test_pattern(req->mode);
+        else
+            sstv_ws_error("modo desconocido");
+        s_sstv_busy = false;
         return;
     }
     char path[80];
     snprintf(path, sizeof(path), "%s/%s", SSTV_DIR, req->name);
     ESP_LOGI(TAG, "SSTV TX start: %s mode=%d", path, (int)req->mode);
 
+    if ((int)req->mode < 0 || (int)req->mode >= 5) {
+        sstv_ws_error("modo desconocido");
+        s_sstv_busy = false;
+        return;
+    }
+    if (sstv_consume_pending_stop()) { s_sstv_busy = false; return; }
+
     FILE *f = fopen(path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "Cannot open %s", path);
+        sstv_ws_error("no se puede abrir el fichero");
+        s_sstv_busy = false;
         return;
     }
 
@@ -544,22 +589,12 @@ void sstv_transmit(const SstvRequest *req) {
         free(jctx);
         free(jwork);
         fclose(f);
-        audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
+        sstv_ws_error("sin memoria");
+        s_sstv_busy = false;
         return;
     }
 
-    s_sstv_abort = false;
-    afsk_switch_to_tx();
-    gpio_set_level(GPIO_PTT_OUT, 1);
-    s_dac_pos = 0;
-    s_sample_acc = 0;
-
-    tx_vis(req->mode);
-
     ToneGen g = {0};
-    tx_tone(&g, 1500.0f, 10000); /* guard: separate VIS stop from first sync */
-    if (mp->is_scottie)
-        tx_tone(&g, 1200.0f, mp->sync_us);
 
     /* Set up JPEG decode context (calloc ya lo dejó a cero). */
     jctx->f    = f;
@@ -567,25 +602,42 @@ void sstv_transmit(const SstvRequest *req) {
     jctx->mode = req->mode;
     jctx->mp   = mp;
 
+    /* B17: validar el JPEG ANTES de pulsar el PTT. */
     JRESULT rc = jd_prepare(&s_jdec, jpeg_input_cb, jwork, JPEG_WORK_SIZE, jctx);
     if (rc != JDR_OK) {
         ESP_LOGE(TAG, "jd_prepare failed: rc=%d (3=pool_small, 6=fmt, 8=unsupported)",
                  (int)rc);
-        goto done;
+        sstv_ws_error("JPEG inválido");
+        goto reject;
     }
     ESP_LOGI(TAG, "jd_prepare OK, jdec.width=%d jdec.height=%d (expect %dx%d)",
              (int)s_jdec.width, (int)s_jdec.height, mp->cols, mp->rows);
 
     if ((int)s_jdec.width != mp->cols) {
-        /* row_buf and every per-line channel buffer are sized for mp->cols
-         * (320 px) exactly. A narrower image would silently transmit only
-         * the VIS header (the row-complete check never fires); a wider one
-         * is now rejected defensively inside jpeg_output_cb too. Refuse
-         * up front with a clear error instead of either failure mode. */
+        /* row_buf y los buffers por línea están dimensionados para mp->cols. */
         ESP_LOGE(TAG, "image width %d != mode width %d — resize before uploading",
                  (int)s_jdec.width, mp->cols);
-        goto done;
+        sstv_ws_error("ancho no admitido (se requiere 320 px)");
+        goto reject;
     }
+    if ((int)s_jdec.height < 16 || (int)s_jdec.height > 1024) {
+        ESP_LOGE(TAG, "image height %d fuera de rango", (int)s_jdec.height);
+        sstv_ws_error("altura no admitida");
+        goto reject;
+    }
+
+    /* Validado: ahora sí, VIS y PTT. El stop pendiente (si llegó durante la
+     * validación) no se borra: jpeg_output_cb lo ve y aborta. */
+    afsk_switch_to_tx();
+    gpio_set_level(GPIO_PTT_OUT, 1);
+    s_dac_pos = 0;
+    s_sample_acc = 0;
+
+    tx_vis(req->mode);
+
+    tx_tone(&g, 1500.0f, 10000); /* guard: separate VIS stop from first sync */
+    if (mp->is_scottie)
+        tx_tone(&g, 1200.0f, mp->sync_us);
 
     /* Scale 0 = no scaling (output at full resolution). */
     rc = jd_decomp(&s_jdec, jpeg_output_cb, 0);
@@ -601,7 +653,7 @@ void sstv_transmit(const SstvRequest *req) {
         ESP_LOGE(TAG, "jd_decomp error: rc=%d", (int)rc);
     }
 
-done:
+    /* fin de la transmisión */
     dac_flush();  /* send any remaining samples before dropping PTT */
     fclose(f);
     gpio_set_level(GPIO_PTT_OUT, 0);
@@ -612,6 +664,7 @@ done:
     free(jwork);
 
     if (s_sstv_abort) {
+        s_sstv_abort = false;
         audio_stream_ws_send_text("{\"type\":\"sstv_aborted\"}");
         ESP_LOGI(TAG, "SSTV TX aborted after %d lines", lines_done);
     } else {
@@ -621,6 +674,15 @@ done:
         audio_stream_ws_send_text(ws_msg);
         ESP_LOGI(TAG, "SSTV TX done: %d lines", lines_done);
     }
+    s_sstv_busy = false;
+    return;
+
+reject:
+    /* Rechazo previo al PTT: sin sstv_done. */
+    fclose(f);
+    free(jctx);
+    free(jwork);
+    s_sstv_busy = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -707,12 +769,18 @@ static esp_err_t sstv_send_handler(httpd_req_t *req) {
     }
     SstvRequest sr = { .fmt = SSTV_FMT_JPEG, .mode = SSTV_MODE_MARTIN_M1 };
     strncpy(sr.name, name, sizeof(sr.name) - 1);
-    if      (strcmp(mode, "martin_m1") == 0) sr.mode = SSTV_MODE_MARTIN_M1;
-    else if (strcmp(mode, "martin_m2") == 0) sr.mode = SSTV_MODE_MARTIN_M2;
-    else if (strcmp(mode, "scottie_s1") == 0) sr.mode = SSTV_MODE_SCOTTIE_S1;
-    else if (strcmp(mode, "robot_36")  == 0) sr.mode = SSTV_MODE_ROBOT_36;
-    else if (strcmp(mode, "robot_72")  == 0) sr.mode = SSTV_MODE_ROBOT_72;
+    bool mode_ok = sstv_parse_mode(mode, &sr.mode);
     cJSON_Delete(root);
+    if (!mode_ok) {
+        sstv_ws_error("modo desconocido");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown mode");
+        return ESP_FAIL;
+    }
+    if (afsk_tx_queue_pending() > 0) {
+        sstv_ws_error("cola TX ocupada");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "TX queue busy");
+        return ESP_FAIL;
+    }
     if (xQueueSend(s_sstv_queue, &sr, 0) != pdTRUE) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "TX busy");
         return ESP_FAIL;
@@ -1052,7 +1120,10 @@ static esp_err_t sstv_upload_handler(httpd_req_t *req) {
 
 /* ---- POST /api/sstv/stop ---- */
 static esp_err_t sstv_stop_handler(httpd_req_t *req) {
-    s_sstv_abort = true;
+    /* Solo se arma si hay algo que parar (TX en curso o petición en cola); así
+     * un stop suelto no aborta una transmisión posterior. */
+    if (s_sstv_busy || (s_sstv_queue && uxQueueMessagesWaiting(s_sstv_queue) > 0))
+        s_sstv_abort = true;
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;
@@ -1067,16 +1138,19 @@ static esp_err_t sstv_test_handler(httpd_req_t *req) {
         cJSON *root = cJSON_ParseWithLength(buf, len);
         if (root) {
             cJSON *m = cJSON_GetObjectItem(root, "mode");
-            if (m && m->valuestring) {
-                const char *ms = m->valuestring;
-                if      (strcmp(ms, "martin_m1") == 0) mode = SSTV_MODE_MARTIN_M1;
-                else if (strcmp(ms, "martin_m2") == 0) mode = SSTV_MODE_MARTIN_M2;
-                else if (strcmp(ms, "scottie_s1") == 0) mode = SSTV_MODE_SCOTTIE_S1;
-                else if (strcmp(ms, "robot_36")  == 0) mode = SSTV_MODE_ROBOT_36;
-                else if (strcmp(ms, "robot_72")  == 0) mode = SSTV_MODE_ROBOT_72;
+            if (m && m->valuestring && !sstv_parse_mode(m->valuestring, &mode)) {
+                cJSON_Delete(root);
+                sstv_ws_error("modo desconocido");
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown mode");
+                return ESP_FAIL;
             }
             cJSON_Delete(root);
         }
+    }
+    if (afsk_tx_queue_pending() > 0) {
+        sstv_ws_error("cola TX ocupada");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "TX queue busy");
+        return ESP_FAIL;
     }
     SstvRequest sr = {.is_test = true, .mode = mode};
     strncpy(sr.name, "test_pattern", sizeof(sr.name) - 1);
