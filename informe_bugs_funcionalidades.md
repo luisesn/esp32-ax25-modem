@@ -312,7 +312,7 @@ Comparación hecha con las fuentes de Dire Wolf (`il2p_*.c`, descargadas y leíd
 | I6 | **Sync 0xF15E48** sin exigir preámbulo 0x7E; preámbulo 0x55 en TX; tolerancia de 1 bit en el sync | exigía ≥4 flags 0x7E y sync exacto | ✅ |
 | I7 | **Orden de bits**: IL2P va MSB primero; el TX AFSK envía cada byte LSB primero | los bytes salían con los bits invertidos de orden | ✅ `bitrev8` antes de `AFSK_transmit` |
 | I8 | **0x1B en los datos**: el ISR de TX trataba 0x1B (`AX25_ESC`) como escape y se comía el byte | un byte 0x1B (≈1 de cada 256 por byte) corrompía la trama | ✅ el ISR no escapa con `il2p_tx` |
-| I9 | **Tráfico TUN con FEC (resto de B1)**: tramas `00 00 08 00` + IPv4 como bytes opacos | iban por AX.25 sin FEC | ✅ `il2p_tx_raw()`, cabecera tipo 0 (sólo lo entienden equipos con este firmware) |
+| I9 | **IP con FEC e interoperable (resto de B1)**: v1.8.1: el IP de TUN va como UI AX.25 PID 0xCC (tipo 1 estándar); antes bytes opacos (v1.8.0) | iban por AX.25 sin FEC | ✅ `il2p_tx_raw()`, cabecera tipo 0 (sólo lo entienden equipos con este firmware) |
 | I10 | **Decodificación fuera de la tarea de audio**: el RS se ejecuta en `il2p_poll` (`aprs_poll_task`) | en `receive_audio_task` | ✅ estado `RX_PENDING` |
 | I11 | **Validación temprana de la cabecera** (indicativos A-Z/0-9, longitud) para descartar falsos sync | comprobación parcial | ✅ |
 | I12 | Opciones `il2p.max_fec` y `il2p.tx_all` (todo por IL2P, no sólo PID 0xCC) | no existían | ✅ |

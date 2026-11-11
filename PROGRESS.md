@@ -618,3 +618,8 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 - ISR de TX: con `il2p_tx` no se escapa 0x1B (lib LibAPRS, `AFSK.cpp`).
 - TUN con FEC: `il2p_tx_raw()` (tipo 0 opaco). Opciones `il2p.max_fec` / `il2p.tx_all`.
 - Validado en host: scrambler, ejemplos 2 y 3 de la spec byte a byte, round-trips con errores. Sin probar en el aire. Detalle: `informe_bugs_funcionalidades.md` §2 bis.
+
+## 2026-11-11 — v1.8.1: IP interoperable por IL2P
+
+- Con `il2p.enabled`, `ax25ip` envía el IP de TUN como UI AX.25 PID 0xCC (QST→indicativo), que IL2P codifica como tipo 1 estándar; ya no se usa el formato opaco `00 00 08 00` por IL2P. RX en modo TUN acepta ambos formatos (sólo UI con IPv4). Añadido `il2p_is_enabled()`.
+- SSTV: la subida con nombre existente sobrescribe (comportamiento ya vigente, `fopen "wb"`).

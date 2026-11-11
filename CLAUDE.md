@@ -239,7 +239,7 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **`aprs_poll_task` y el `raw_hook`**: `APRS_poll()` ya no corre en `receive_audio_task` sino en `aprs_poll_task` (prio 9), por lo que `on_ax25_raw_frame` se ejecuta en esa tarea. No bloquear en el hook (WS lento, mutex) o se llenan los FIFOs de RX. `FIFO.h` tiene variantes `_locked` (portMUX); el resto de `fifo_*` sin lock se usa en rutas de una sola tarea/ISR — auditar antes de tocar.
 
-- **IL2P** (v1.8.0): `il2p.enabled` (por defecto false), `il2p.max_fec` (true), `il2p.tx_all` (false: sólo PID 0xCC por IL2P). Formato estándar (Dire Wolf): cabecera 13+2 tipo 1 (UI/I/S/U) o tipo 0 (path con repetidores, otras tramas, **TUN opaco** vía `il2p_tx_raw`), sync 0xF15E48, RS GF(2⁸) fcr=0 (`rs_codec.c`), scrambler por bloque, bits MSB primero (el TX hace `bitrev8` porque AFSK envía LSB primero; el ISR no escapa 0x1B con `il2p_tx`). La decodificación RS corre en `il2p_poll`. Validado en host con los vectores de la spec; **sin probar sobre el aire ni en hardware**. Ver `informe_bugs_funcionalidades.md` §2 bis.
+- **IL2P** (v1.8.1): `il2p.enabled` (por defecto false), `il2p.max_fec` (true), `il2p.tx_all` (false: sólo PID 0xCC por IL2P). Formato estándar (Dire Wolf): cabecera 13+2 tipo 1 (UI/I/S/U) o tipo 0 (path con repetidores, otras tramas, **TUN opaco** vía `il2p_tx_raw`), sync 0xF15E48, RS GF(2⁸) fcr=0 (`rs_codec.c`), scrambler por bloque, bits MSB primero (el TX hace `bitrev8` porque AFSK envía LSB primero; el ISR no escapa 0x1B con `il2p_tx`). La decodificación RS corre en `il2p_poll`. Validado en host con los vectores de la spec; **sin probar sobre el aire ni en hardware**. Ver `informe_bugs_funcionalidades.md` §2 bis.
 
 - **Repetidor deshabilitado**: `REPEATER_ENABLED 0` en `config.h` (reservar ~15 KB contiguos de heap, pausa RX y detiene el servidor WAV). Con 0, ni `config.json` ni `/api/repeater/enable` pueden activarlo. Hay presión de heap: vigilar buffers `static` grandes y stacks de tareas.
 
@@ -319,7 +319,7 @@ Resumen rápido (2026-11-11):
 - Dedup de tramas RX por doble módem en `on_ax25_raw_frame()` ✅
 - Listen-Before-Talk + inhibición post-RX + autoajuste `post_rx_tx_delay_ms` (TUNE) ✅ (LBT usa `carrier_detect`, siempre activo; desactivado por defecto; cubre cola AFSK, morse y SSTV, no el repetidor; con CSMA p-persistente)
 - GPS + baliza de posición periódica; display SSD1306; digipeater WIDEn-N; baliza CW ✅
-- IL2P ⚠️ reescrito al estándar (v1.8.0): vectores de la spec OK en host, FEC también para TUN (tipo 0 opaco); pendiente de pruebas en el aire/HW
+- IL2P ⚠️ reescrito al estándar (v1.8.0): vectores de la spec OK en host, IP (también en modo TUN) como UI AX.25 PID 0xCC estándar, interoperable; pendiente de pruebas en el aire/HW
 - Subida de imágenes SSTV desde la web corregida (v1.6.6, B15; probada en host, falta HW) ✅
 - Reintento de mensajes con seguimiento de ACK (`msg_retry.c`, v1.8.0, F1) ✅
 - Diagnóstico de red en la web (`netdiag.c`: ping, miniconsola TCP/UDP) ✅
