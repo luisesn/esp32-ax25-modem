@@ -31,6 +31,21 @@ void heard_init(void)
     portEXIT_CRITICAL(&s_mux);
 }
 
+// Cierto si "call" (base sin SSID) con ese SSID se oyó hace <= secs segundos.
+bool heard_seen_recent(const char *call, int ssid, uint32_t secs)
+{
+    char key[12];
+    if (ssid > 0) snprintf(key, sizeof(key), "%s-%d", call, ssid);
+    else          snprintf(key, sizeof(key), "%s", call);
+    bool found = false;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000LL);
+    portENTER_CRITICAL(&s_mux);
+    for (int i = 0; i < HEARD_MAX; i++)
+        if (s_tab[i].used && !strcmp(s_tab[i].call, key) && now - s_tab[i].last_s <= secs) { found = true; break; }
+    portEXIT_CRITICAL(&s_mux);
+    return found;
+}
+
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000LL); }
 
 static bool digits(const uint8_t *p, int n)
@@ -51,6 +66,60 @@ static bool parse_pos(const uint8_t *p, size_t n, float *lat, float *lon)
     if (la > 90.0f || lo > 180.0f) return false;
     *lat = (p[7] == 'S') ? -la : la;
     *lon = (p[17] == 'W') ? -lo : lo;
+    return true;
+}
+
+// Posición comprimida (APRS101 cap. 9). p apunta a la tabla de símbolos; 13 bytes:
+// tabla(1) lat(4) lon(4) símbolo(1) cs(2) T(1), base91.
+static bool parse_pos_compressed(const uint8_t *p, size_t n, float *lat, float *lon)
+{
+    if (n < 13) return false;
+    // En sin comprimir el primer byte es un dígito; la tabla comprimida es / \ A-Z a-j
+    if (p[0] >= '0' && p[0] <= '9') return false;
+    uint32_t v[2] = {0, 0};
+    for (int k = 0; k < 2; k++) {
+        for (int j = 0; j < 4; j++) {
+            uint8_t c = p[1 + k * 4 + j];
+            if (c < 33 || c > 124) return false;
+            v[k] = v[k] * 91u + (uint32_t)(c - 33);
+        }
+    }
+    *lat = 90.0f - (float)v[0] / 380926.0f;
+    *lon = -180.0f + (float)v[1] / 190463.0f;
+    return true;
+}
+
+// Mic-E (APRS101 cap. 10). dest = 6 bytes del campo destino AX.25 (desplazados);
+// inf = info (inf[0] = ' o `), il >= 4.
+static bool parse_mice(const uint8_t *dest, const uint8_t *inf, size_t il, float *lat, float *lon)
+{
+    if (il < 9) return false;
+    int d[6];
+    bool bit[6];
+    for (int k = 0; k < 6; k++) {
+        char c = (char)(dest[k] >> 1);
+        if (c >= '0' && c <= '9')      { d[k] = c - '0'; bit[k] = false; }
+        else if (c >= 'A' && c <= 'J') { d[k] = c - 'A'; bit[k] = false; }
+        else if (c >= 'P' && c <= 'Y') { d[k] = c - 'P'; bit[k] = true; }
+        else if (c == 'K' || c == 'L') { d[k] = 0;       bit[k] = false; }  // ambigüedad (espacio)
+        else if (c == 'Z')             { d[k] = 0;       bit[k] = true; }
+        else return false;
+    }
+    float la = (float)(d[0] * 10 + d[1]) +
+               ((float)(d[2] * 10 + d[3]) + (float)(d[4] * 10 + d[5]) / 100.0f) / 60.0f;
+    if (la > 90.0f) return false;
+    // Longitud: grados con offset +100 (bit del char 5), minutos, centésimas
+    int deg = (int)inf[1] - 28;
+    if (bit[4]) deg += 100;
+    if (deg >= 190) deg -= 190;
+    else if (deg >= 180) deg -= 80;
+    int min = (int)inf[2] - 28;
+    if (min >= 60) min -= 60;
+    int hun = (int)inf[3] - 28;
+    if (deg < 0 || deg > 180 || min < 0 || min > 59 || hun < 0 || hun > 99) return false;
+    float lo = (float)deg + ((float)min + (float)hun / 100.0f) / 60.0f;
+    *lat = bit[3] ? la : -la;           // char 4: N (1) / S (0)
+    *lon = bit[5] ? -lo : lo;           // char 6: W (1) / E (0)
     return true;
 }
 
@@ -79,10 +148,15 @@ void heard_note(const uint8_t *ax25, size_t len, int q)
     if (i < len) {
         const uint8_t *inf = ax25 + i;
         size_t il = len - i;
-        if (inf[0] == '!' || inf[0] == '=')
+        if (inf[0] == '!' || inf[0] == '=') {
             pos_ok = parse_pos(inf + 1, il - 1, &lat, &lon);
-        else if ((inf[0] == '/' || inf[0] == '@') && il > 8)
+            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 1, il - 1, &lat, &lon);
+        } else if ((inf[0] == '/' || inf[0] == '@') && il > 8) {
             pos_ok = parse_pos(inf + 8, il - 8, &lat, &lon);
+            if (!pos_ok) pos_ok = parse_pos_compressed(inf + 8, il - 8, &lat, &lon);
+        } else if (inf[0] == '\'' || inf[0] == '`') {
+            pos_ok = parse_mice(ax25, inf, il, &lat, &lon);
+        }
     }
 
     uint32_t t = now_s();

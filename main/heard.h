@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -11,8 +12,11 @@ void heard_init(void);
 
 // Registra una trama AX.25 cruda (sin CRC): parsea el indicativo-SSID origen.
 // q = calidad 1-4 (<=0: sin dato, no entra en la media). Rápido y sin bloqueo largo.
-// Si el info es una posición APRS sin comprimir (! = / @), guarda lat/lon.
+// Si el info es una posición APRS (! = / @ sin comprimir o comprimida, o Mic-E ' `), guarda lat/lon.
 void heard_note(const uint8_t *ax25, size_t len, int q);
+
+// ¿Se oyó esa estación (base sin SSID + ssid) hace <= secs segundos?
+bool heard_seen_recent(const char *call, int ssid, uint32_t secs);
 
 // Texto para consola (CRLF), hasta max_rows filas más recientes primero (0 = 10).
 // Devuelve bytes escritos (sin contar el NUL).
