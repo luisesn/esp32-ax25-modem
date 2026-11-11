@@ -195,7 +195,7 @@ Arreglo del primer punto: decodificar la cabecera del JPEG y validar dimensiones
 **B19. ✅ HECHO (v1.9.0) — Chat de la web** — JavaScript de [main/spiffs_data/index.html](main/spiffs_data/index.html) · **[Leído]**
 
 - La conversación muestra como burbuja **cualquier** trama del contacto activo que no sea un ACK: balizas, mensajes a terceros, telemetría. Debe filtrarse por mensajes (`:DEST     :`) dirigidos al indicativo propio.
-- Los mensajes enviados sólo existen en la memoria de la página: al recargar desaparecen, junto con el estado "pendiente de ACK". El firmware no los devuelve en `/api/log`.
+- Los mensajes enviados sólo existen en la memoria de la página: al recargar desaparecían, junto con el estado "pendiente de ACK". **Resuelto en v1.10.0 (F8)**: el firmware los guarda en `/api/log` como `type:"sent"` con su estado.
 - La expresión del ACK sólo admite dígitos (`/^ack\d+/`), coherente con B5; no se trata `rej`.
 - Un mensaje sin ACK queda indefinidamente "pendiente": no hay tiempo límite ni indicación de fallo (ver F1).
 - `parseAPRSPos` sólo entiende posiciones sin comprimir: Mic-E y comprimidas (la mayoría de los equipos portátiles y APRSdroid) no dan posición.
