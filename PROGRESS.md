@@ -7,6 +7,11 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Pestaña MAPA (v1.12.0) y correcciones v1.11.2/v1.11.3
+- ✅ v1.11.2 `ax25ip.c`: valida cabecera IPv4 (IHL, longitud, checksum); los APRS con `@` (PID 0xF0) ya no se registran como `IP RX`.
+- ✅ v1.11.3 `remote_cmd.c`: un mensaje cuyo primer campo no es `tx|rx|sys` se ignora (chat con comas ya no provoca `ERR:unknown cmd`; evita ERR cruzados).
+- ✅ v1.12.0 pestaña MAPA: mapa vectorial embebido en `index.html` (España + CCAA + sur de Francia, Cantabria detallada, ≈5 KB gzip) con estaciones oídas y posición propia. Sin probar en HW.
+
 ## 2026-11-11 — Banco de pruebas en host y v1.11.1
 
 - Nuevo `test/` (CMake sin ESP-IDF, ASan/UBSan, `ctest`): unit de kiss, RS/IL2P, dedup, config_validate, digipeater, heard y regresión del demodulador v2 (audio sintético + corpus WAV).
