@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include <string.h>
+#include <time.h>
 #include <stdio.h>
 #include <math.h>
 #include "cJSON.h"
@@ -593,6 +594,30 @@ static esp_err_t rx_stats_handler(httpd_req_t *req)
 
 // ─── Envío de texto a clientes WebSocket ─────────────────────────────────────
 
+// Envía un texto ya formado a todos los clientes WS (sin tocar el ring).
+static void ws_broadcast_text(const char *send_str)
+{
+    httpd_ws_frame_t pkt = {
+        .final      = true,
+        .fragmented = false,
+        .type       = HTTPD_WS_TYPE_TEXT,
+        .payload    = (uint8_t *)send_str,
+        .len        = strlen(send_str),
+    };
+    int    client_fds[AUDIO_STREAM_MAX_CLIENT_FDS];
+    size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
+    if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
+        // Igual que el audio: nunca esperar por un cliente que no drena. Los
+        // eventos no efímeros ya están en el ring con su `seq`, y el cliente los
+        // recupera al reconectar con GET /api/log?since=<last_seq>, así que
+        // descartarlos aquí no pierde información.
+        for (int i = 0; i < (int)n; i++) {
+            if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
+                ws_try_send(client_fds[i], &pkt);
+        }
+    }
+}
+
 void audio_stream_ws_send_text(const char *text) {
     if (s_httpd == NULL || text == NULL) return;
 
@@ -628,29 +653,73 @@ void audio_stream_ws_send_text(const char *text) {
     }
     free(to_free);
 
-    // Enviar por WebSocket
-    const char *send_str = wrapped ? wrapped : text;
-    httpd_ws_frame_t pkt = {
-        .final      = true,
-        .fragmented = false,
-        .type       = HTTPD_WS_TYPE_TEXT,
-        .payload    = (uint8_t *)send_str,
-        .len        = strlen(send_str),
-    };
-    int    client_fds[AUDIO_STREAM_MAX_CLIENT_FDS];
-    size_t n = sizeof(client_fds) / sizeof(client_fds[0]);
-    if (httpd_get_client_list(s_httpd, &n, client_fds) == ESP_OK) {
-        // Igual que el audio: nunca esperar por un cliente que no drena. Los
-        // eventos no efímeros ya están en el ring con su `seq`, y el cliente los
-        // recupera al reconectar con GET /api/log?since=<last_seq>, así que
-        // descartarlos aquí no pierde información.
-        for (int i = 0; i < (int)n; i++) {
-            if (httpd_ws_get_fd_info(s_httpd, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET)
-                ws_try_send(client_fds[i], &pkt);
-        }
-    }
+    ws_broadcast_text(wrapped ? wrapped : text);
 
     if (!ring_owns) free(wrapped);
+}
+
+
+// F8: mensajes enviados en el log (/api/log). Una entrada por (to, ssid, id);
+// si ya existe se actualiza en su sitio (nuevo seq, para que los clientes que
+// se reconecten la reciban de nuevo). Texto en último lugar del JSON.
+static void json_escape_into(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    for (; *src && o + 7 < cap; src++) {
+        unsigned char c = (unsigned char)*src;
+        if (c == '"' || c == '\\') { dst[o++] = '\\'; dst[o++] = (char)c; }
+        else if (c < 0x20) dst[o++] = ' ';
+        else dst[o++] = (char)c;
+    }
+    dst[o] = '\0';
+}
+
+void audio_stream_log_sent(const char *to, int ssid, const char *text, int id, const char *state)
+{
+    if (!s_log_mutex || !to || !text || !state) return;
+    char eto[24], etxt[150], key[64], buf[320];
+    json_escape_into(eto, sizeof(eto), to);
+    json_escape_into(etxt, sizeof(etxt), text);
+    snprintf(key, sizeof(key), "\"type\":\"sent\",\"to\":\"%s\",\"ssid\":%d,\"id\":%d,",
+             eto, ssid, id);
+    time_t now = time(NULL);
+    long ts = now > 1600000000 ? (long)now : 0;
+
+    char *to_free = NULL, *copy = NULL;
+    xSemaphoreTake(s_log_mutex, portMAX_DELAY);
+    uint32_t seq = s_log_seq_next++;
+    int cap = s_log_max;
+    int start = (s_log_head - s_log_count + cap) % cap;
+    int found = -1;
+    for (int i = s_log_count - 1; i >= 0; i--) {
+        int idx = (start + i) % cap;
+        const char *j = s_log_ring[idx].json;
+        if (j && strstr(j, key)) { found = idx; break; }
+    }
+    if (found >= 0) {
+        const char *t = strstr(s_log_ring[found].json, "\"ts\":");
+        if (t) ts = strtol(t + 5, NULL, 10);
+    }
+    snprintf(buf, sizeof(buf), "{\"seq\":%lu,%s\"state\":\"%s\",\"ts\":%ld,\"text\":\"%s\"}",
+             (unsigned long)seq, key, state, ts, etxt);
+    copy = strdup(buf);
+    if (copy) {
+        int slot;
+        if (found >= 0) {
+            slot = found;
+            to_free = s_log_ring[slot].json;
+        } else {
+            slot = s_log_head;
+            to_free = s_log_ring[slot].json;
+            s_log_head = (s_log_head + 1) % cap;
+            if (s_log_count < cap) s_log_count++;
+        }
+        s_log_ring[slot].seq = seq;
+        s_log_ring[slot].json = copy;
+    }
+    xSemaphoreGive(s_log_mutex);
+    free(to_free);
+    if (s_httpd) ws_broadcast_text(buf);
 }
 
 // ─── WAV server teardown ──────────────────────────────────────────────────────

@@ -61,6 +61,7 @@ static void retry_task(void *arg)
             if (give_up) {
                 ESP_LOGW(TAG, "sin ACK de %s-%d {%03d}: se abandona", e.call, e.ssid, e.id);
                 ws_event("msg_failed", e.call, e.ssid, e.id, e.attempts);
+                audio_stream_log_sent(e.call, e.ssid, e.text, e.id, "failed");
             } else if (due) {
                 // Cola TX no bloqueante; si está llena no se cuenta el intento.
                 bool ok = APRS_queue_msg_id(e.call, e.ssid, e.text, e.id) == 0;
@@ -91,7 +92,7 @@ void msg_retry_init(void)
     if (s_mtx) return;
     s_mtx = xSemaphoreCreateMutex();
     if (!s_mtx) { ESP_LOGE(TAG, "sin mutex"); return; }
-    if (xTaskCreate(retry_task, "msg_retry", 3072, NULL, 3, &s_task) != pdPASS) {
+    if (xTaskCreate(retry_task, "msg_retry", 4096, NULL, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "no se pudo crear la tarea");
         s_task = NULL;
     }
@@ -123,22 +124,34 @@ bool msg_retry_track(const char *to_call, int to_ssid, int id, const char *text)
         stored = true;
     }
     xSemaphoreGive(s_mtx);
+    if (stored) audio_stream_log_sent(to_call, to_ssid, text, id, "pending");
     return stored;
 }
 
-void msg_retry_on_ack(const char *from_call, int from_ssid, const char *id_str)
+static void on_response(const char *from_call, int from_ssid, const char *id_str, const char *state)
 {
     if (!s_mtx || !from_call || !id_str || !*id_str) return;
     for (const char *c = id_str; *c; c++) if (*c < '0' || *c > '9') return;
     int id = atoi(id_str);
+    pending_t done = {0};
+    bool acked = false;
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     for (int i = 0; i < MSG_RETRY_MAX_ENTRIES; i++) {
         pending_t *p = &s_tab[i];
         if (p->used && p->id == id && p->ssid == from_ssid &&
             strncasecmp(p->call, from_call, 6) == 0) {
+            done = *p; acked = true;
             p->used = false;
             ESP_LOGI(TAG, "ACK de %s-%d {%03d}: seguimiento cancelado", p->call, p->ssid, id);
         }
     }
     xSemaphoreGive(s_mtx);
+    if (acked) audio_stream_log_sent(done.call, done.ssid, done.text, done.id, state);
 }
+
+void msg_retry_on_ack(const char *from_call, int from_ssid, const char *id_str)
+{ on_response(from_call, from_ssid, id_str, "acked"); }
+
+/* REJ del destinatario: se deja de reintentar y se registra como rechazado. */
+void msg_retry_on_rej(const char *from_call, int from_ssid, const char *id_str)
+{ on_response(from_call, from_ssid, id_str, "rejected"); }

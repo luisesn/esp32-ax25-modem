@@ -766,6 +766,32 @@ function chatMarkAcked(id,key){chatSetState(id,'acked',key);}
 function chatMarkRejected(id,key){chatSetState(id,'rejected',key);}
 // F1: el firmware agotó los reintentos sin recibir ACK
 function chatMarkFailed(id,key){chatSetState(id,'failed',key);}
+// F8: entrada {type:'sent',to,ssid,id,state,ts,text} del log del firmware → chatSent (sin duplicar por contacto+id)
+function chatMergeSent(p){
+  if(p.to==null||p.text==null)return;
+  const k=chatNormKey(p.to,p.ssid),id=chatIdKey(p.id);
+  const st=p.state||'pending';
+  const ts=p.ts>0?p.ts*1000:Date.now();
+  let e=null;
+  for(let i=chatSent.length-1;i>=0;i--){
+    const c=chatSent[i];
+    if(c.k===k&&id!=null&&c.id===id&&c.text===p.text){e=c;break;}
+  }
+  if(e){
+    if(e.st==='pending'&&st!=='pending'){
+      e.st=st;chatSaveSent();
+      const el=chatEls.get(e);
+      if(el)chatApplyState(el.querySelector('[data-ack]'),st);
+    }
+    return;
+  }
+  e={k,text:p.text,ts,id,st};
+  chatSent.push(e);chatSaveSent();
+  if(chatContact&&k===chatContactKey()){
+    const t=new Date(ts).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    chatAddBubble(true,p.text,t,e);
+  }
+}
 // ¿info es un mensaje APRS (":DEST     :texto") dirigido a nosotros y que no es ack/rej?
 function chatIsMsgToMe(info){
   if(!info||info[0]!==':'||info.length<11||info[10]!==':')return false;
@@ -984,6 +1010,9 @@ function appendSentLog(to,ssid,text){
 }
 function appendSentChatBubble(to,ssid,text,msgId){
   const now=Date.now();
+  // F8: el evento WS 'sent' del firmware puede haber llegado antes que la respuesta del POST
+  const kk=chatNormKey(to,ssid),ik=chatIdKey(msgId);
+  if(ik!=null&&chatSent.some(e=>e.k===kk&&e.id===ik&&e.text===text&&now-(e.ts||0)<60000))return;
   const entry={k:chatNormKey(to,ssid),text,ts:now,id:chatIdKey(msgId),st:'pending'};
   chatSent.push(entry);chatSaveSent();
   if(!chatContact||entry.k!==chatContactKey())return;
@@ -1155,6 +1184,8 @@ function handleMsg(p){
   if(p.seq)s_last_log_seq=p.seq;
   if(p.type==='ack_sent'){
     appendSentLog(p.to,p.ssid,'ack'+p.id);
+  } else if(p.type==='sent'){
+    chatMergeSent(p);
   } else if(p.type==='msg_failed'){
     chatMarkFailed(p.id,p.to!=null?chatNormKey(p.to,p.ssid):null);
   } else if(p.type==='beacon_tx'){

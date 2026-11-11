@@ -19,6 +19,7 @@ void msg_retry_init(void);
 bool msg_retry_track(const char *to_call, int to_ssid, int id, const char *text);
 // Llamar al recibir un ACK: id_str es el texto tras "ack" (sólo cuenta si es numérico).
 void msg_retry_on_ack(const char *from_call, int from_ssid, const char *id_str);
+void msg_retry_on_rej(const char *from_call, int from_ssid, const char *id_str);
 
 #ifdef __cplusplus
 }

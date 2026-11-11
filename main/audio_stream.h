@@ -32,6 +32,11 @@ void audio_stream_init(void);
 // Seguro de llamar desde cualquier tarea FreeRTOS.
 void audio_stream_ws_send_text(const char *text);
 
+// F8: registra/actualiza en el log (/api/log) un mensaje enviado:
+// {type:"sent",to,ssid,id,state,ts,text}. state: pending|acked|rejected|failed.
+// Si ya existe (to+ssid+id) se actualiza en su sitio. No bloquea (mutex breve).
+void audio_stream_log_sent(const char *to, int ssid, const char *text, int id, const char *state);
+
 // Returns the httpd handle (valid after audio_stream_init()).
 // Used by sstv_init() to register its URI handlers.
 #include "esp_http_server.h"
