@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/message_buffer.h"
 
 #include "esp_wifi.h"
 #include "esp_mac.h"      // MACSTR / MAC2STR
@@ -567,8 +568,8 @@ static void server_task(void *arg) {
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
 
-        // Los envíos (hook de RX, aprs_poll_task) no deben bloquear: con el
-        // cliente sin leer, send() expira y la trama se descarta.
+        // Los envíos los hace kiss_writer_task (no el hook de RX): con el cliente
+        // sin leer, send() expira tras KISS_SEND_TIMEOUT_MS y la trama se descarta.
         struct timeval snd_tv = { .tv_sec = 0, .tv_usec = KISS_SEND_TIMEOUT_MS * 1000 };
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
 
@@ -640,6 +641,11 @@ static void wifi_reconnect_task(void *arg) {
 // Operaciones del transporte
 // ---------------------------------------------------------------------------
 
+#define KISS_TXQ_BYTES   3072
+#define KISS_WORK_BYTES  1216   // >= 2 + 1 + AX25_MAX_FRAME_LEN*2 (kiss.c)
+static MessageBufferHandle_t s_kiss_txq = NULL;
+static void kiss_writer_task(void *arg);   // definida junto a wifi_transport_write
+
 static void wifi_transport_init(void) {
     // La tarea de reconexión se crea antes de wifi_connect() para que el handle
     // exista cuando llegue el primer evento. No hay riesgo de que arranque un
@@ -647,10 +653,17 @@ static void wifi_transport_init(void) {
     // y los disconnect no programan el timer.
     xTaskCreate(wifi_reconnect_task, "wifi_reconn", 3072, NULL, 5, &s_reconnect_task_handle);
     wifi_connect();
+    s_kiss_txq = xMessageBufferCreate(KISS_TXQ_BYTES);
+    if (s_kiss_txq)
+        xTaskCreate(kiss_writer_task, "kiss_writer", 2560, NULL, 6, NULL);
+    else
+        ESP_LOGE(TAG, "No se pudo crear la cola KISS: sin salida hacia el host");
     xTaskCreate(server_task, "kiss_tcp_srv", 4096, NULL, 7, NULL);
 }
 
-static void wifi_transport_write(const uint8_t *buf, size_t len) {
+// Envío real al socket del cliente KISS. Sólo lo llama kiss_writer_task: el hook
+// de RX (aprs_poll_task) nunca toca el socket (B2).
+static void kiss_socket_send(const uint8_t *buf, size_t len) {
     int fd = s_client_fd;
     if (fd < 0) return;
 
@@ -682,6 +695,31 @@ static void wifi_transport_write(const uint8_t *buf, size_t len) {
         // Error real (reset, EBADF...): el recv de server_task cerrará el socket.
         ESP_LOGD(TAG, "send() falló (%d), cliente probablemente desconectado", err);
         if (sent > 0) shutdown(fd, SHUT_RDWR);
+    }
+}
+
+// Cola hacia la tarea de escritura (B2): la recepción tiene prioridad, así que
+// wifi_transport_write sólo copia la trama KISS y vuelve sin esperar jamás. Si el
+// cliente no lee y el buffer se llena, se descartan tramas (el flujo KISS queda
+// íntegro porque cada mensaje es una trama completa).
+static void kiss_writer_task(void *arg) {
+    (void)arg;
+    uint8_t *work = (uint8_t *)malloc(KISS_WORK_BYTES);
+    if (!work) { ESP_LOGE(TAG, "kiss_writer: sin memoria"); vTaskDelete(NULL); return; }
+    for (;;) {
+        size_t n = xMessageBufferReceive(s_kiss_txq, work, KISS_WORK_BYTES, portMAX_DELAY);
+        if (n > 0) kiss_socket_send(work, n);
+    }
+}
+
+static void wifi_transport_write(const uint8_t *buf, size_t len) {
+    if (s_client_fd < 0 || !s_kiss_txq) return;   // sin cliente: no encolar
+    static uint32_t s_qdrops = 0;
+    if (len == 0 || len > KISS_WORK_BYTES ||
+        xMessageBufferSend(s_kiss_txq, buf, len, 0) != len) {
+        s_qdrops++;
+        if (s_qdrops == 1 || s_qdrops % 50 == 0)
+            ESP_LOGW(TAG, "Cola KISS llena: trama descartada (%u en total)", (unsigned)s_qdrops);
     }
 }
 
