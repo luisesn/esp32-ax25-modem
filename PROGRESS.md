@@ -627,3 +627,8 @@ Detalle en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) (B
 ## 2026-11-11 — v1.10.0: F3–F8
 - F3 path configurable (`aprs.path`/`aprs.ack_path`, librería); F4 SmartBeaconing + altitud + posición fija + formato común de baliza; F5 2 clientes KISS (decodificador reentrante, cola por cliente, ≈+13 KB heap); F7 `heard`/`beacon`/`config <sección>` en consola RF y `GET /api/heard`; F8 mensajes enviados en `/api/log` (`type:sent`) con estado, incluido REJ. F6 cubierta por B3/B12.
 - Trabajo repartido en agentes en paralelo; compila (≈42 % libre). **Sin probar en hardware**: medir heap con dos clientes KISS y verificar SmartBeaconing en movimiento.
+
+## 2026-11-11 — v1.11.0: mejoras opcionales (§2.2)
+- Mic-E y posiciones comprimidas (`heard.c`), `heard_seen_recent`; `telemetry.c`; `igate.c` (APRS-IS, IS→RF opcional); `aprs_objects.c`; `rx_capture.c` (`/api/rx/capture`); `config_validate.c` (70 tests de host); comandos remotos `rx,stats`/`sys,status`/`sys,reboot` con límite de tasa; morse ampliado; `sstv.cw_id`; formularios nuevos en la web (OÍDAS, objetos, iGate, calibración SURVEY).
+- Trabajo repartido en 7 agentes por fichero. Compila (≈1,01 MB, 41 % libre). Todo lo nuevo desactivado por defecto (sin heap).
+- **Pendiente**: probar en HW/aire; el vector Mic-E de prueba daba 12.129W en vez de 112.129W (verificar con trama real); `rx_capture` solo 9600 Hz; config de `remote_cmd` solo al arrancar; destino iGate `APESPM` sin registrar.
