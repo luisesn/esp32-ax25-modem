@@ -315,8 +315,9 @@ static void print_frames(void) {
     for (size_t i = 0; i < g_rx.frames.size(); i++) {
         auto &f = g_rx.frames[i];
         printf("#%zu (%zu B) ", i + 1, f.size());
-        for (size_t k = 0; k < f.size() && k < 24; k++) printf("%02x", f[k]);
-        if (f.size() > 24) printf("...");
+        size_t lim = getenv("DEMOD_HEX") ? f.size() : 24;
+        for (size_t k = 0; k < f.size() && k < lim; k++) printf("%02x", f[k]);
+        if (f.size() > lim) printf("...");
         printf("\n    %s\n", tnc2(f).c_str());
     }
 }

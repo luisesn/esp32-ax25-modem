@@ -346,7 +346,7 @@ Resumen rápido (2026-11-11):
 - Librería `LibAPRS-esp32-i2s` como repo anidado sin enlazar (sin cambios pendientes en la librería; falta convertirla en submódulo) ⬜
 - Auditoría 2026-11-08: corregidos dedup de comandos remotos, límite de `POST /api/config` (+fuga), exclusión OTA, `fifo_len`/flush, aviso `rx.dual_modem_*`, baliza de posición. Seguridad (sin autenticación, `config` expone contraseñas) aparcada ⬜
 - `config.json` con credenciales seguido por git ⬜
-- Banco de pruebas en host `test/` (unit + demodulador, `ctest`) ✅; sin CI ⬜; FIFOs no `_locked` en rutas multi-tarea sin auditar ⬜
+- Banco de pruebas en host `test/` (unit + demodulador con 2 WAV reales en `test/demod/corpus/`, `ctest`) ✅; sin CI ⬜; FIFOs no `_locked` en rutas multi-tarea sin auditar ⬜
 
 ## Referencias externas
 

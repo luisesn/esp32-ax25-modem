@@ -186,6 +186,25 @@ TEST(mice_position_known_vector)
     cJSON_Delete(r);
 }
 
+TEST(mice_real_captured_frame)
+{
+    // Trama Mic-E real (captura 2026-11-11, test/demod/corpus/real_20261111_b.wav):
+    // EA1IUX-9>TS2QVW,ED1YCF-3*,WIDE1*,EA1HOK-3*:`z6dl ...
+    // Cálculo a mano: destino TS2QVW -> 43 21.67 N; lon: 'z'(122-28=94)+100=194 -> 4 grados,
+    // min '6' = 26, cent 'd' = 72 -> 4 26.72 W => lat 43.36117, lon -4.44533.
+    static const uint8_t raw[] = { 0xa8, 0xa6, 0x64, 0xa2, 0xac, 0xae, 0x60, 0x8a, 0x82, 0x62, 0x92, 0xaa, 0xb0, 0xf2, 0x8a, 0x88, 0x62, 0xb2, 0x86, 0x8c, 0xe6, 0xae, 0x92, 0x88, 0x8a, 0x62, 0x40, 0xe0, 0x8a, 0x82, 0x62, 0x90, 0x9e, 0x96, 0xe7, 0x03, 0xf0, 0x60, 0x7a, 0x36, 0x64, 0x6c, 0x20, 0x1c, 0x3e, 0x2f, 0x60, 0x22, 0x34, 0x76, 0x7d, 0x5f, 0x25, 0x0d };
+    fresh();
+    heard_note(raw, sizeof raw, 0);
+    cJSON *r = get_json();
+    cJSON *e = r ? find_entry(r, "EA1IUX-9") : NULL;
+    CHECK(e != NULL);
+    if (e) {
+        CHECK(fabs(cJSON_GetObjectItem(e, "lat")->valuedouble - 43.36117) < 0.0005);
+        CHECK(fabs(cJSON_GetObjectItem(e, "lon") ->valuedouble + 4.44533) < 0.0005);
+    }
+    cJSON_Delete(r);
+}
+
 TEST(mice_position_without_offset)
 {
     // Igual pero sin offset (dígito 5.ª = '5', no 'U'): 12°25.75'W.
@@ -457,6 +476,7 @@ int main(void)
     RUN(compressed_position);
     RUN(compressed_position_with_timestamp);
     RUN(mice_position_known_vector);
+    RUN(mice_real_captured_frame);
     RUN(mice_position_without_offset);
     RUN(mice_too_short_no_position);
     RUN(status_has_no_position_and_q_average);

@@ -60,6 +60,17 @@ de 16 bit y otras frecuencias (remuestreo por vecino más próximo a 48 kHz).
 Ficheros incluidos: `sintetico_snr15.wav` y `sintetico_snr12.wav` (generados con `genwav`,
 sólo ejercitan el camino de ficheros).
 
+Capturas reales (2026-11-11, radio UV-K5 en 144.800 MHz, WAV mono 16 bit 9600 Hz, ≈5,7 MB en total;
+línea base de RX y referencia para B25):
+
+| Fichero | Duración | Tramas CRC OK | CRC erróneos | Flags | `min_frames` |
+|---|---|---|---|---|---|
+| `real_20261111_a.wav` | 164 s | 11 | 205 | 906 | 10 |
+| `real_20261111_b.wav` | 137 s | 15 | 152 | 760 | 13 |
+
+`real_20261111_b` incluye una trama Mic-E real (`EA1IUX-9>TS2QVW`), usada en `test/unit/test_heard.c`.
+Con `DEMOD_HEX=1` el harness imprime las tramas completas en hexadecimal (si no, 24 bytes).
+
 ## Comparar con Dire Wolf
 
 ```bash
