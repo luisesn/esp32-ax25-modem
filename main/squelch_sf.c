@@ -20,8 +20,8 @@ static const char *TAG = "squelch_sf";
 static const int s_k[HFNE_NBINS] = {42, 47, 53, 58};
 
 static float   s_coeff[HFNE_NBINS];
-static int32_t s_s1[HFNE_NBINS];
-static int32_t s_s2[HFNE_NBINS];
+static float   s_s1[HFNE_NBINS];
+static float   s_s2[HFNE_NBINS];
 static int32_t s_buf_pos = 0;
 
 // ── HFNE state ────────────────────────────────────────────────────────────────
@@ -36,6 +36,11 @@ static float          s_thr       = 0.1f;
 // so a carrier cannot pull the floor down.
 static float s_floor = -1.0f;          // negative = not yet initialised
 #define HFNE_FLOOR_ALPHA 0.02f         // ~50 blocks ≈ 0.67 s time constant
+// Si el squelch lleva abierto este tiempo seguido (~12 s), se reaprende el suelo
+// (como carrier_detect desde v1.4.7): permite que baje si el ruido disminuye
+// (p. ej. al bajar el volumen) en vez de quedarse abierto para siempre.
+#define HFNE_MAX_OPEN_BLOCKS 900       // ~12 s a ~75 bloques/s
+static uint32_t s_open_blocks = 0;
 
 // Close-hold: once closed, stay closed for at least SQUELCH_HOLD_MS.
 // Prevents rapid re-open after a brief signal dropout.
@@ -50,13 +55,15 @@ static volatile bool s_mon_active = false;   // set by UI monitor switch / REST
 // Avoids calling reset_state()/send_ws() from httpd handler, which would
 // race on Goertzel state and block the httpd task on a WebSocket send.
 static volatile bool s_reset_needed  = false;
-static volatile bool s_send_ws_once  = false;
+static volatile bool s_ws_pending    = false;   // lo consume squelch_ws_task
 
 // WS throttle
 static uint32_t s_block_count = 0;
 #define WS_EVERY_BLOCKS 8              // ~100 ms
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+static TaskHandle_t s_ws_task = NULL;
 
 static void send_ws(void)
 {
@@ -70,6 +77,28 @@ static void send_ws(void)
     audio_stream_ws_send_text(buf);
 }
 
+// Envío WS fuera de receive_audio_task (un cliente lento no debe bloquear el ADC).
+static void squelch_ws_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (s_ws_pending) {
+            s_ws_pending = false;
+            send_ws();
+        }
+    }
+}
+
+static void ensure_ws_task(void)
+{
+    if (s_ws_task) return;
+    if (xTaskCreate(squelch_ws_task, "squelch_ws", 3072, NULL, 2, &s_ws_task) != pdPASS) {
+        s_ws_task = NULL;
+        ESP_LOGW(TAG, "no se pudo crear squelch_ws");
+    }
+}
+
 static void reset_state(void)
 {
     s_open  = false;
@@ -80,6 +109,7 @@ static void reset_state(void)
     s_buf_pos    = 0;
     s_block_count = 0;
     s_hold_until = 0;
+    s_open_blocks = 0;
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -107,6 +137,7 @@ void squelch_sf_init(cJSON *config)
     s_block_count = 0;
     s_hold_until = 0;
     s_floor = -1.0f;
+    s_open_blocks = 0;
 
     ESP_LOGI(TAG, "HFNE init: thr=%.2f, bins k=[%d,%d,%d,%d] (~3150-4350 Hz)",
              (double)s_thr, s_k[0], s_k[1], s_k[2], s_k[3]);
@@ -117,13 +148,12 @@ void squelch_sf_push_sample(int8_t sample)
     if (s_reset_needed) { s_reset_needed = false; reset_state(); }
 
     if (!s_rep_active && !s_mon_active) {
-        if (s_send_ws_once) { s_send_ws_once = false; send_ws(); }
         return;
     }
 
-    int32_t x = (int32_t)sample;
+    float x = (float)sample;
     for (int i = 0; i < HFNE_NBINS; i++) {
-        int32_t s0 = (int32_t)(s_coeff[i] * (float)s_s1[i]) - s_s2[i] + x;
+        float s0 = s_coeff[i] * s_s1[i] - s_s2[i] + x;
         s_s2[i] = s_s1[i];
         s_s1[i] = s0;
     }
@@ -133,9 +163,9 @@ void squelch_sf_push_sample(int8_t sample)
     // Compute average Goertzel power across HFNE bins
     float raw = 0.0f;
     for (int i = 0; i < HFNE_NBINS; i++) {
-        float p = (float)s_s1[i] * s_s1[i]
-                + (float)s_s2[i] * s_s2[i]
-                - s_coeff[i] * (float)s_s1[i] * (float)s_s2[i];
+        float p = s_s1[i] * s_s1[i]
+                + s_s2[i] * s_s2[i]
+                - s_coeff[i] * s_s1[i] * s_s2[i];
         raw += p < 0.0f ? 0.0f : p;
     }
     raw /= HFNE_NBINS;
@@ -153,6 +183,15 @@ void squelch_sf_push_sample(int8_t sample)
 
     // Close-hold squelch logic
     TickType_t now = xTaskGetTickCount();
+    if (s_open) {
+        if (++s_open_blocks >= HFNE_MAX_OPEN_BLOCKS) {
+            s_floor = -1.0f;          // reaprender suelo en el siguiente bloque
+            s_open_blocks = 0;
+            s_open = false;
+        }
+    } else {
+        s_open_blocks = 0;
+    }
     if (norm >= s_thr) {
         s_open = false;
         s_hold_until = now + pdMS_TO_TICKS(SQUELCH_HOLD_MS);
@@ -166,7 +205,7 @@ void squelch_sf_push_sample(int8_t sample)
 
     if (++s_block_count >= WS_EVERY_BLOCKS) {
         s_block_count = 0;
-        send_ws();
+        s_ws_pending = true;
     }
 }
 
@@ -176,7 +215,8 @@ void squelch_sf_set_repeater_active(bool en)
     s_rep_active = en;
     bool now_active = s_rep_active || s_mon_active;
     if (!en && !now_active && was_active) s_reset_needed = true;
-    s_send_ws_once = true;
+    s_ws_pending = true;
+    if (s_rep_active || s_mon_active) ensure_ws_task();
 }
 
 void squelch_sf_set_monitor_active(bool en)
@@ -185,7 +225,8 @@ void squelch_sf_set_monitor_active(bool en)
     s_mon_active = en;
     bool now_active = s_rep_active || s_mon_active;
     if (!en && !now_active && was_active) s_reset_needed = true;
-    s_send_ws_once = true;
+    s_ws_pending = true;
+    if (s_rep_active || s_mon_active) ensure_ws_task();
 }
 
 bool squelch_sf_is_active(void)         { return s_rep_active || s_mon_active; }
