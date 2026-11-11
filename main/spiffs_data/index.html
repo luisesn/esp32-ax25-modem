@@ -328,7 +328,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
       <div id="log-hdr"><span>APRS LOG</span><button id="dl-btn" onclick="downloadLog()" title="Descargar log como CSV" aria-label="Descargar log como CSV">&#x2B07; CSV</button></div>
       <div id="log-cols"><span>HORA</span><span>ORIGEN</span><span>DESTINO</span><span>RUTA</span><span title="Calidad estimada de recepción">CALIDAD</span><span>CONTENIDO</span></div>
       <div id="log"></div>
-      <div id="log-foot"><span>En el log <b id="lf-n">0</b></span><span>CRC ok <b id="lf-ok">—</b></span><span title="CRC erróneos totales: ~90 % son ruido en reposo, no indican calidad. Se descartan y no llegan al log">CRC err (ruido) <b id="lf-err">—</b></span><span style="margin-left:auto" title="Caída del ruido del canal (quieting) mientras se recibe la trama. Estimación relativa a esta radio y volumen; no es un S-meter.">Calidad = caída de ruido del canal</span></div>
+      <div id="log-foot"><span>En el log <b id="lf-n">0</b></span><span>CRC ok <b id="lf-ok">—</b></span><span title="CRC erróneos totales: ~90 % son ruido en reposo, no indican calidad. Se descartan y no llegan al log">CRC err (ruido) <b id="lf-err">—</b></span><button class="map-btn" style="margin-left:auto" onclick="logHistClear()" title="Borra el historial del log guardado en localStorage y vacía el log mostrado">Borrar historial local</button><span title="Caída del ruido del canal (quieting) mientras se recibe la trama. Estimación relativa a esta radio y volumen; no es un S-meter.">Calidad = caída de ruido del canal</span></div>
     </div>
     <div id="tab-heard" class="tab-pane" style="justify-content:flex-start;gap:.5rem;overflow-y:auto">
       <div style="display:flex;gap:.5rem;align-items:center;font-size:.65rem;color:#888">
@@ -1012,11 +1012,44 @@ function parseThirdParty(info){
   const m=/^\}([^>]+)>([^,:]+)((?:,[^:]*)?):(.*)$/s.exec(info);
   return m?{src:m[1],dst:m[2],path:m[3].replace(/^,/,''),info:m[4]}:null;
 }
-function appendLog(src,dst,path,info,isDigi,qual){
+// ── Historial del log en localStorage ──────────────────────────────────────
+// Cada entrada mostrada se guarda (hasta LOGHIST_MAX / 14 días) y se repinta al abrir la web;
+// así no se pierde lo que el equipo ya no conserva (su log es un anillo en RAM que se borra al reiniciar).
+const LOGHIST_MAX=1000,LOGHIST_AGE=14*864e5;
+let logHist=[],logHistTimer=null;
+function logHistSave(){
+  logHistTimer=null;
+  const cut=Date.now()-LOGHIST_AGE;logHist=logHist.filter(r=>r.t>=cut);
+  if(logHist.length>LOGHIST_MAX)logHist=logHist.slice(-LOGHIST_MAX);
+  for(let i=0;i<3;i++){
+    try{localStorage.setItem('aprs.log_hist',JSON.stringify(logHist));return;}
+    catch(_){logHist=logHist.slice(Math.floor(logHist.length/2));}   // cuota llena: tirar la mitad más antigua
+  }
+}
+function logHistAdd(r){logHist.push(r);if(!logHistTimer)logHistTimer=setTimeout(logHistSave,2000);}
+function logHistLoad(){
+  try{logHist=JSON.parse(lsGet('log_hist')||'[]');if(!Array.isArray(logHist))logHist=[];}catch(_){logHist=[];}
+  if(!myCall){myCall=lsGet('mycall')||'';const ss=parseInt(lsGet('myssid'),10);if(!isNaN(ss))mySsid=ss;}   // para marcar «PARA MÍ» al repintar
+  const sq=parseInt(lsGet('log_seq')||'0',10);if(sq>0)s_last_log_seq=sq;
+  for(const r of logHist.slice(-MAX_LOG)){   // más antiguo primero; appendLog prepende
+    try{
+      if(r.k==='s')appendSentLog(r.to,r.ssid,r.text,new Date(r.t),true);
+      else appendLog(r.src,r.dst,r.path,r.info,!!r.dg,r.ql,new Date(r.t),true);
+    }catch(_){}
+  }
+}
+function logHistClear(){
+  if(!confirm('¿Borrar el historial del log guardado en este navegador? También se vacía el log mostrado.'))return;
+  logHist=[];clearTimeout(logHistTimer);logHistTimer=null;
+  try{localStorage.removeItem('aprs.log_hist');}catch(_){}
+  document.getElementById('log').innerHTML='';logData.length=0;logCountUpdate();
+}
+function appendLog(src,dst,path,info,isDigi,qual,when,replay){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt';
-  const ts=new Date().toLocaleTimeString('es',
+  const dt=when||new Date();
+  const ts=dt.toLocaleTimeString('es',
     {hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const tp=parseThirdParty(info);
   const dInfo=tp?tp.info:info;
@@ -1042,19 +1075,20 @@ function appendLog(src,dst,path,info,isDigi,qual){
   }else if(qual&&(qual.lv||qual.er)){
     qh='<span class="q qna" title="Sin suelo de ruido aún; '+(qual.lv<0?'audio bajo':qual.lv>0?'audio alto':'')+'">—</span>';
   }
-  d.innerHTML=`<span class="ts">${esc(ts)}</span>`+
+  d.innerHTML=`<span class="ts" title="${esc(dt.toLocaleString('es'))}">${esc(ts)}</span>`+
     `<span class="src" data-call="${esc(tp?tp.src:src)}" title="Copiar al destino">${esc(tp?tp.src:src)}</span>`+
     `<span class="dst">${esc(tp?tp.dst:dst)}</span>`+
     `<span class="path">${tp?'vía '+esc(src):fmtHops(path)}</span>`+
     qh+
     `<span class="info">${badge}${tp?'<span class="third-badge" title="Tráfico de terceros: paquete reenviado, originado en otra estación">3RD</span>':''}${esc(dInfo)}${mapLink}</span>`;
   log.prepend(d);
-  const tsISO=new Date().toISOString();
+  const tsISO=dt.toISOString();
+  if(!replay)logHistAdd({t:dt.getTime(),k:'r',src,dst,path,info,dg:isDigi?1:0,ql:qual||null});
   logData.unshift({ts:tsISO,type:isDigi?'digi':(isAck?'ack':(isToMe?'me':'rx')),src,dst,path,info,q:qual&&qual.q!=null?qual.q:'',qdb:qual&&qual.qdb!=null?qual.qdb:''});
   logCountUpdate();
   if(logData.length>MAX_LOG)logData.length=MAX_LOG;
   // Chat: ACK/REJ de un mensaje nuestro (dirigido a nosotros) y mensajes del contacto activo
-  if(!isDigi&&!tp){
+  if(!replay&&!isDigi&&!tp){
     const ai=aprsParseAck(info);
     const bare=info&&info[0]!==':';
     if(ai&&(bare||isMessageToMe(info))){
@@ -1065,20 +1099,22 @@ function appendLog(src,dst,path,info,isDigi,qual){
     }
   }
 }
-function appendSentLog(to,ssid,text){
+function appendSentLog(to,ssid,text,when,replay){
   const log=document.getElementById('log');
   while(log.children.length>=MAX_LOG)log.removeChild(log.lastChild);
   const d=document.createElement('div');d.className='pkt pkt-sent';
-  const ts=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const dt=when||new Date();
+  const ts=dt.toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const dest=(ssid>=0&&ssid<=15)?`${to}-${ssid}`:to;
-  d.innerHTML=`<span class="ts">${esc(ts)}</span>`+
+  d.innerHTML=`<span class="ts" title="${esc(dt.toLocaleString('es'))}">${esc(ts)}</span>`+
     `<span class="tx-lbl">TX →</span>`+
     `<span class="dst">${esc(dest)}</span>`+
     `<span class="path"></span><span class="q"></span>`+
     `<span class="info">${esc(text)}</span>`;
   log.prepend(d);
   logCountUpdate();
-  const tsISO=new Date().toISOString();
+  const tsISO=dt.toISOString();
+  if(!replay)logHistAdd({t:dt.getTime(),k:'s',to,ssid,text});
   logData.unshift({ts:tsISO,type:'tx',src:myCall+(mySsid>0?'-'+mySsid:''),dst:dest,path:'',info:text});
   if(logData.length>MAX_LOG)logData.length=MAX_LOG;
 }
@@ -1255,7 +1291,7 @@ function loadVersion(){
 // ── Dispatcher de mensajes WebSocket / historial ──────────────────────────
 function handleMsg(p){
   if(p.type==='audio_level'){if(p.tx!==undefined)meterTx(!!p.tx);else if(!mTx)meterPush(p.pk|0);return;}
-  if(p.seq)s_last_log_seq=p.seq;
+  if(p.seq){s_last_log_seq=p.seq;lsSet('log_seq',p.seq);}
   if(p.type==='ack_sent'){
     appendSentLog(p.to,p.ssid,'ack'+p.id);
   } else if(p.type==='sent'){
@@ -1376,11 +1412,13 @@ function connectWS(){
   ws.onopen=()=>{if(sock!==ws)return;wsDelay=1000;setStatus('Conectado');
     document.getElementById('btn').disabled=false;
     document.getElementById('rec-btn').disabled=false;
-    api('/api/log?since='+s_last_log_seq)
+    const fetchLog=since=>api('/api/log?since='+since)
       .then(d=>{
-        if(d.last_seq)s_last_log_seq=d.last_seq;
+        if(d.last_seq&&d.last_seq<since)return fetchLog(0);   // el equipo se reinició: su numeración volvió a empezar
+        if(d.last_seq){s_last_log_seq=d.last_seq;lsSet('log_seq',d.last_seq);}
         if(d.entries)d.entries.forEach(e=>{try{handleMsg(JSON.parse(e));}catch(_){}});
-      }).catch(e=>console.warn('log:',e.message));};
+      });
+    fetchLog(s_last_log_seq).catch(e=>console.warn('log:',e.message));};
   ws.onmessage=e=>{
     if(e.data instanceof ArrayBuffer){
       // Pestaña oculta sin reproducir ni grabar: no gastar CPU en decodificar audio
@@ -2003,7 +2041,7 @@ function repRefresh(){
   }).catch(e=>console.warn('squelch status:',e.message));
 }
 document.addEventListener('DOMContentLoaded',()=>{ repRefresh(); });
-window.addEventListener('load',()=>{mapTrkLoad();mapTrkPoll();setInterval(mapTrkPoll,30000);connectWS();loadVersion();api('/api/me').then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;if(chatContact)openChat(chatContact.call,chatContact.ssid);}).catch(e=>console.warn('me:',e.message));repRefresh();});
+window.addEventListener('load',()=>{logHistLoad();mapTrkLoad();mapTrkPoll();setInterval(mapTrkPoll,30000);connectWS();loadVersion();api('/api/me').then(d=>{myCall=d.call||'';mySsid=d.ssid!=null?d.ssid:-1;lsSet('mycall',myCall);lsSet('myssid',mySsid);if(chatContact)openChat(chatContact.call,chatContact.ssid);}).catch(e=>console.warn('me:',e.message));repRefresh();});
 // ── Diagnóstico de red ───────────────────────────────────────────────────
 let netGen=-1,netSince=0,netTimer=null,netFormInit=false,netBusy=false;
 function netPost(path,body){

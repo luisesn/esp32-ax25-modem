@@ -7,6 +7,9 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-11 — Historial del log en localStorage (v1.14.0)
+- ✅ El log se guarda en el navegador (≤1000 entradas / 14 días) y se repinta al abrir la web; botón «Borrar historial local»; seq del log persistida con detección de reinicio del equipo. Sin probar en navegador real.
+
 ## 2026-11-11 — Trazas en el mapa (v1.13.0)
 - ✅ `heard.c`: historial de posiciones (150 puntos, dedup por movimiento) y `GET /api/heard?track=<min>`; selector de traza en la pestaña MAPA. Test unitario. Sin probar en HW.
 
