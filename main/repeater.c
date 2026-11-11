@@ -18,6 +18,10 @@
 
 static const char *TAG = "repeater";
 
+// Decisión de diseño: el repetidor NO usa afsk_tx_clear_to_send() (LBT/CSMA).
+// Retransmite audio recibido hace instantes, así que el canal está ocupado por
+// la propia señal de entrada y el LBT bloquearía siempre. Morse y SSTV sí lo usan.
+
 #define REPEATER_SAMPLE_RATE_HZ  9600u
 #define REPEATER_DAC_RATE_HZ     48000u
 #define REPEATER_UPSAMPLE        5u

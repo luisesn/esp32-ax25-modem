@@ -1,6 +1,7 @@
 #include "kiss.h"
 #include "transport.h"
 #include "LibAPRS-esp32-i2s/src/AX25.h"  // AX25_MAX_FRAME_LEN
+#include "LibAPRS-esp32-i2s/src/AFSK.h"  // afsk_csma_*
 #include "esp_log.h"
 
 static const char *TAG = "kiss";
@@ -65,6 +66,19 @@ void kiss_rx_byte(uint8_t b) {
             } else if ((s_cmd & 0x0F) == 0x00 && s_len > 0 && s_on_frame) {
                 // Solo entregar tramas DATA (cmd bajo nibble = 0x0, puerto 0)
                 s_on_frame(s_buf, s_len);
+            }
+            else if (s_len == 1 && !s_overflow) {
+                // Parámetros KISS que afectan al acceso al canal (sólo con LBT activo).
+                // TXDELAY/TXTAIL/FullDuplex se ignoran: el preámbulo sale de aprs.* en config.json.
+                uint8_t persist; uint32_t slot_ms;
+                afsk_csma_get(&persist, &slot_ms);
+                switch (s_cmd & 0x0F) {
+                case 0x02: persist = s_buf[0]; afsk_csma_configure(persist, slot_ms);
+                           ESP_LOGI(TAG, "KISS P=%u", (unsigned)persist); break;
+                case 0x03: slot_ms = (uint32_t)s_buf[0] * 10u; afsk_csma_configure(persist, slot_ms);
+                           ESP_LOGI(TAG, "KISS SlotTime=%lu ms", (unsigned long)slot_ms); break;
+                default: break;
+                }
             }
             s_state    = S_CMD;
             s_len      = 0;

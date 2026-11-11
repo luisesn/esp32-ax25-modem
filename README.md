@@ -6,7 +6,7 @@ Uso la placa ESPRI (de https://github.com/kamilsss655/ESPRI)
 
 (Creado dando latigazos a Claude y otros...)
 
-> ✅ **Estado (2026-11-11, firmware v1.4.7): compila limpio (binario ~928 KB, ~46 % libre de la partición de app). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (detector de portadora `carrier_detect`, más el squelch HFNE si el monitor o el repetidor están activos) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json` (**no usar por ahora**: el códec Reed-Solomon tiene defectos y la recepción IL2P no decodifica, ver la sección IL2P). **Novedades desde junio**: WiFi multi-red con reconexión; KISS TCP con keepalive, escritura con buffer y contrapresión; deduplicación de tramas del doble módem (`on_ax25_raw_frame`, 300 ms); tráfico de terceros en el log; baliza GPS periódica (`gps.use_for_beacon`); consola RF por TCP y/o UDP; `sdkconfig.defaults` completo (build reproducible); `APRS_poll()` en tarea propia (`aprs_poll_task`). RX pendiente verificación con señal RF real.**
+> ✅ **Estado (2026-11-11, firmware v1.6.0): compila limpio (binario ~928 KB, ~46 % libre de la partición de app). KISS TNC bidireccional operativo. TX verificado en hardware. UI web funcional con log, chat APRS por burbujas con confirmación ACK, baliza de posición, editor de configuración, grabación de audio, actualización OTA de firmware (HTTP y espota via `espota.py`) y botón de reinicio remoto. Barra de nivel de audio con zonas de rango correcto (verde) e incorrecto (rojo), con marcadores de umbral en la barra AGC. Digipeater WIDEn-N operativo. Baliza morse CW periódica operativa. TX SSTV implementado (Martin M1/M2, Scottie S1, Robot 36/72) con botón de parada. GPS NMEA por UART2 implementado. Display SSD1306 I2C 128×64 implementado con estadísticas de decodificador. Gateway IP RFC 1226 (modo TUN) verificado en hardware con tncattach y dos Baofeng UV-5R (ping bidireccional operativo con `post_rx_tx_delay_ms: 500`). Paquetes IP mostrados en el log APRS en tiempo real. Reconexión WiFi automática con ciclo de redes y fallback a AP. Latencia TX→RX reducida (callback DMA en lugar de espera fija). **Repetidor de voz analógico implementado**: squelch HFNE (Goertzel sobre banda de ruido FM), grabación ADPCM IMA (~49 KB por 10 s), retransmisión con tono de cortesía e identificación CW, ventana mínima de grabación de 500 ms, modo monitor independiente. **Consola RF TCP** (telnet, port 23) sobre interfaz IP RF operativa. **Ajuste automático de retardo TX** (pestaña TUNE): barrido ICMP con análisis de porcentaje de éxito para encontrar el `post_rx_tx_delay_ms` óptimo. **Comandos remotos vía APRS** (`remote_cmd.c`): tx SSTV, morse beacon, posición GPS y listado de ficheros desde cualquier estación APRS. Bug-fix sweep: race condición WAV queue, SPIFFS mount check, morse wait finito, AP doble-init, fwrite SSTV, KISS reconnect, orden ACK/respuesta en comandos remotos. **Listen-Before-Talk (LBT) implementado**: el módem verifica que el canal esté libre (detector de portadora `carrier_detect`, más el squelch HFNE si el monitor o el repetidor están activos) antes de transmitir; si está ocupado encola el frame y reintenta hasta `lbt_max_wait_ms` (por defecto 10 s), tras lo cual transmite de todas formas con aviso en log; configurable con `tx.lbt_enabled` / `tx.lbt_max_wait_ms` en `config.json`. **IL2P (Improved Layer 2 Protocol) implementado**: Reed-Solomon FEC + scrambling LFSR sobre el mismo módem AFSK Bell-202; RX en paralelo con AX.25; TX de tráfico IP vía IL2P, APRS vía AX.25 normal; activable con `il2p.enabled` en `config.json` (**no usar por ahora**: el códec Reed-Solomon tiene defectos y la recepción IL2P no decodifica, ver la sección IL2P). **Novedades desde junio**: WiFi multi-red con reconexión; KISS TCP con keepalive, escritura con buffer y contrapresión; deduplicación de tramas del doble módem (`on_ax25_raw_frame`, 300 ms); tráfico de terceros en el log; baliza GPS periódica (`gps.use_for_beacon`); consola RF por TCP y/o UDP; `sdkconfig.defaults` completo (build reproducible); `APRS_poll()` en tarea propia (`aprs_poll_task`). RX pendiente verificación con señal RF real.**
 
 ---
 
@@ -198,8 +198,9 @@ En Windows con el entorno IDF, sustituye `<PUERTO_SERIE>` por `COM3`, `COM4`, et
 9. `display_init()` inicializa el bus I2C y el SSD1306 (GPIO13/GPIO19) y arranca la tarea de refresco del display a 2 Hz.
 10. `rf_console_init()` arranca el servidor de consola TCP sobre la IP RF (`ip.addr`) si `console.enabled: true` en config.json. Acepta una conexión telnet a la vez, emite prompt `> `, y atiende los comandos `status` (callsign, IPs, heap libre, uptime), `config` (vuelca config.json), `help` y `quit`.
 11. `audio_stream_init()` arranca el servidor HTTP en port 80 (UI web + WebSocket `/ws`) y el WAV server en port 8080.
-12. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
-13. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
+12. Los comandos KISS **P** (persistencia) y **SlotTime** (en unidades de 10 ms) enviados por el host (Dire Wolf, APRSdroid, Xastir…) ajustan en caliente `tx.persist` / `tx.slottime_ms`; TXDELAY, TXtail y FullDuplex se ignoran (el preámbulo sale de `aprs.*` en `config.json`).
+13. Cuando el host envía una trama KISS → `on_kiss_frame` → `afsk_queue_tx_frame()` (encola) → `receive_audio_task` despacha → `APRS_send_raw_frame()` → DAC → radio.
+14. `audio_level_task` muestrea `audio_peak` cada 100 ms, genera la barra de nivel de la consola serie, y controla los LEDs: el **LED verde** (GPIO33, `GPIO_LED_RX`) lo gestiona AFSK.cpp y parpadea en cada paquete AX.25 decodificado; el **LED rojo** (GPIO23, `GPIO_LED_WARN`) parpadea cuando el nivel de audio supera `AUDIO_LEVEL_TOO_HIGH` (demasiado alto) o está por debajo de `AUDIO_LEVEL_TOO_LOW` (demasiado bajo). El display SSD1306 también muestra la barra y el texto "LOUD" en la misma condición.
 
 ## Interfaz web
 
@@ -331,6 +332,7 @@ Identificación CW periódica configurable desde `config.json`:
 - El indicativo CW siempre se toma de `aprs.callsign`.
 - Se despacha desde `receive_audio_task` (propietaria del I2S0) para respetar el mutex ADC/DAC. El mecanismo de despacho usa `afsk_set_dispatch_hook()` para mantener la librería LibAPRS libre de dependencias del proyecto.
 - Activable on-demand con `POST /api/morse/trigger` o el botón "Morse" en la UI web.
+- Respeta Listen-Before-Talk y CSMA (`tx.lbt_enabled`, v1.5.0): si el canal está ocupado la baliza espera, hasta `tx.lbt_max_wait_ms`, y después sale igualmente.
 
 ## SSTV (Slow-Scan Television)
 
@@ -363,11 +365,13 @@ Las imágenes se almacenan en `/spiffs/sstv/` (máx. 10 ficheros × 200 KB). El 
 - No se admite recepción SSTV (solo TX).
 - La resolución de entrada es libre; TJpgDec escala al tamaño del modo seleccionado.
 - **Defecto conocido en la subida** (`POST /api/sstv/upload`, la que usa la web): se pierde ≈7 % de los bytes del JPEG y la respuesta es `ok` igualmente (reproducido en una simulación del bucle, no en el dispositivo; B15 en [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md)). Hasta corregirlo, subir las imágenes con `POST /api/spiffs/upload?name=sstv/foto.jpg` o incluirlas en la imagen SPIFFS.
-- SSTV y la baliza morse no pasan por Listen-Before-Talk: transmiten aunque el canal esté ocupado. Durante una transmisión SSTV (hasta ~114 s) no hay recepción ni se despachan tramas AX.25.
+- SSTV respeta Listen-Before-Talk y CSMA (`tx.lbt_enabled`, v1.5.0): sólo se comprueba el canal **antes** de empezar; una vez en el aire la imagen no se interrumpe aunque el canal se ocupe. Durante una transmisión SSTV (hasta ~114 s) no hay recepción ni se despachan tramas AX.25.
 
 ## Repetidor de voz analógico
 
 El firmware incluye un repetidor de voz analógico completo para FM/VHF. Graba el audio de entrada, lo retransmite cuando el canal queda libre y envía una identificación CW tras la retransmisión.
+
+> **Sin LBT (decisión de diseño):** a diferencia de las tramas AX.25, SSTV y morse, el repetidor no pasa por `afsk_tx_clear_to_send()`. Retransmite audio recibido hace instantes, de modo que el canal ya está ocupado por la señal de entrada y un LBT lo bloquearía siempre; la protección contra pisar a otro es el tiempo de cola (`tail_delay_ms`) y el squelch HFNE.
 
 ### Principio de funcionamiento
 
@@ -1027,7 +1031,9 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
   },
   "tx": {
     "lbt_enabled": true,
-    "lbt_max_wait_ms": 10000
+    "lbt_max_wait_ms": 10000,
+    "persist": 63,
+    "slottime_ms": 100
   },
   "il2p": {
     "enabled": false
@@ -1069,8 +1075,10 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
 | `rx` | `active_modem` | string | `"v1"`, `"v2"` o `"best"` (ambos en paralelo; el dedup está en `on_ax25_raw_frame`). **Ignorado con `AFSK_RX_V1_ENABLED 0`** |
 | `rx` | `squelch_threshold` | int 0–127 | Umbral de squelch del demodulador V2 (0 = abierto) |
 | `rx` | `deemphasis_enabled` | bool | Activa filtro de de-énfasis en el demodulador V2 |
-| `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre antes de transmitir. Usa el detector de portadora `carrier_detect` (siempre activo) y, si el monitor o el repetidor están activos, también el squelch HFNE. No se aplica a SSTV ni a la baliza morse |
+| `tx` | `lbt_enabled` | bool | Activa Listen-Before-Talk: espera a que el canal esté libre antes de transmitir. Usa el detector de portadora `carrier_detect` (siempre activo) y, si el monitor o el repetidor están activos, también el squelch HFNE. También gobierna SSTV y la baliza morse (desde v1.5.0). **El repetidor de voz queda fuera a propósito** (ver más abajo) |
 | `tx` | `lbt_max_wait_ms` | int | Tiempo máximo de espera LBT (ms); si expira, transmite de todas formas con aviso en log |
+| `tx` | `persist` | int 0–255 | (v1.6.0) CSMA p-persistente (parámetro KISS «P», por defecto 63 ≈ 25 %): con el canal libre se transmite si `random(0..255) <= persist`; si no, se espera un slot y se vuelve a escuchar. 255 = transmitir siempre, sin slots. Sólo actúa con `lbt_enabled: true` |
+| `tx` | `slottime_ms` | int 0–2550 | Duración del slot CSMA en ms (parámetro KISS «SlotTime», por defecto 100; 0 = sin slots) |
 | `il2p` | `enabled` | bool | Activa IL2P: RX acepta IL2P en paralelo con AX.25; TX enruta tráfico IP (PID=0xCC) vía IL2P y APRS vía AX.25 normal |
 | `remote_cmd` | `enabled` | bool | Activa procesado de comandos remotos vía mensaje APRS dirigido al indicativo. Si el remitente reintenta el mismo mensaje (mismo `{NNN}`) porque perdió el ACK, el ACK se reenvía pero el comando **no se vuelve a ejecutar** (ventana de 5 min por origen+id, 8 entradas) |
 | `console` | `enabled` | bool | Activa la consola TCP sobre la IP RF (requiere `ip.enabled: true`) |
@@ -1085,7 +1093,7 @@ Edita `main/spiffs_data/config.json` (o parte de tu copia local `config.json.nor
 - **RX verificación RF** — el demodulador funciona en banco de pruebas; pendiente validación con señal RF real de un transceptor.
 - **IL2P no funcional** — el códec Reed-Solomon tiene defectos (prueba en PC): la recepción IL2P no decodifica y no interopera con Direwolf. Mantener `il2p.enabled: false`.
 - **Subida de imágenes SSTV** — `POST /api/sstv/upload` pierde ≈7 % de los bytes (ver SSTV, Limitaciones).
-- **LBT no cubre SSTV ni morse** — sólo las tramas AX.25/IL2P de la cola de TX esperan a canal libre.
+- **El repetidor de voz no usa LBT, por diseño** — retransmite una señal que acaba de recibir, así que el canal está ocupado por definición (por la propia entrada) y esperar a que quede libre no tendría sentido; además está deshabilitado (`REPEATER_ENABLED 0`).
 - **Repetidor sin verificación en hardware real** — implementado y compilado limpio; pendiente prueba con radio FM real.
 - **SSTV solo TX** — no hay decodificador RX.
 - **GPS y display sin verificación en hardware real** — implementados y compilados limpios; pendiente prueba con módulo GPS real y pantalla SSD1306 conectada.
