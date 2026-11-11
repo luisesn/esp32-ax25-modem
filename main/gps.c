@@ -37,6 +37,16 @@ static char          s_sym_table   = '/';
 static char          s_sym_code    = '>';
 static char          s_comment[44] = "";
 static bool          s_course_speed = true;
+static bool          s_altitude     = false;
+static bool          s_use_fixed    = false;
+static double        s_fixed_lat    = 0.0, s_fixed_lon = 0.0;
+// SmartBeaconing (HamHUD): gps.smart_beacon
+typedef struct {
+    bool enabled;
+    int  fast_speed_kmh, slow_speed_kmh, fast_rate_s, slow_rate_s;
+    int  min_turn_deg, turn_slope, min_turn_time_s;
+} smart_cfg_t;
+static smart_cfg_t   s_smart = { false, 60, 5, 180, 1800, 28, 26, 15 };
 
 // Validez del fix combinada: RMC=A y GGA calidad>0 (si GGA llega; si no, basta RMC)
 static bool    s_rmc_active = false;
@@ -166,6 +176,13 @@ static void parse_gga(char **f, int n) {
     g_gps_pos.fix_quality = quality;
     g_gps_pos.satellites  = sats;
     s_gga_ok      = quality > 0;
+    // f[9] = altitud (m); sólo si hay fix y el campo no está vacío
+    if (quality > 0 && n > 9 && f[9][0] != '\0') {
+        g_gps_pos.altitude_m = (float)atof(f[9]);
+        g_gps_pos.alt_valid  = true;
+    } else {
+        g_gps_pos.alt_valid  = false;
+    }
     s_last_gga_us = esp_timer_get_time();
     update_valid_locked();
     gps_unlock_pos();
@@ -246,48 +263,134 @@ void aprs_format_position(char *out, size_t out_len, double lat, double lon, cha
              clon / 6000, (clon % 6000) / 100, clon % 100, ew, symbol);
 }
 
+// Instantánea de posición + opciones de baliza (bajo mutex).
+typedef struct {
+    bool   have, from_gps;
+    double lat, lon;
+    float  course, speed_kn;
+    bool   alt_valid;
+    float  alt_m;
+    char   tbl, code;
+    bool   cs, alt_opt;
+    char   comment[sizeof(s_comment)];
+    smart_cfg_t smart;
+} beacon_snap_t;
+
+static void beacon_snapshot(beacon_snap_t *b) {
+    memset(b, 0, sizeof(*b));
+    if (s_pos_mutex) gps_lock_pos();
+    if (g_gps_pos.valid) {
+        b->have = b->from_gps = true;
+        b->lat = g_gps_pos.lat;  b->lon = g_gps_pos.lon;
+        b->course = g_gps_pos.course_deg;  b->speed_kn = g_gps_pos.speed_knots;
+        b->alt_valid = g_gps_pos.alt_valid;  b->alt_m = g_gps_pos.altitude_m;
+    } else if (s_use_fixed) {
+        b->have = true;
+        b->lat = s_fixed_lat;  b->lon = s_fixed_lon;
+    }
+    b->tbl = s_sym_table;  b->code = s_sym_code;
+    b->cs = s_course_speed;  b->alt_opt = s_altitude;
+    memcpy(b->comment, s_comment, sizeof(b->comment));
+    b->smart = s_smart;
+    if (s_pos_mutex) gps_unlock_pos();
+}
+
+// Formato común: pos [cse/spd] [/A=nnnnnn] comentario
+static void format_info(char *out, size_t out_len, double lat, double lon,
+                        bool has_cse, int cse, int spd, char tbl, char code,
+                        bool has_alt, float alt_m, const char *comment) {
+    char pos[APRS_POS_BUF_LEN];
+    aprs_format_position(pos, sizeof(pos), lat, lon, code);
+    pos[9] = tbl;   // tabla de símbolos (el formateador compartido usa '/')
+    char cse_s[10] = "";
+    if (has_cse) snprintf(cse_s, sizeof(cse_s), "%03d/%03d", cse, spd);
+    char alt_s[12] = "";
+    if (has_alt) snprintf(alt_s, sizeof(alt_s), "/A=%06ld", lround(alt_m * 3.28084));
+    snprintf(out, out_len, "%s%s%s%s", pos, cse_s, alt_s, comment ? comment : "");
+}
+
+static void format_from_snap(char *out, size_t out_len, const beacon_snap_t *b) {
+    int cse = (int)lroundf(b->course), spd = (int)lroundf(b->speed_kn);
+    if (cse < 0 || cse > 360) cse = 0;
+    if (spd < 0 || spd > 999) spd = 0;
+    format_info(out, out_len, b->lat, b->lon, b->cs && b->from_gps, cse, spd,
+                b->tbl, b->code, b->alt_opt && b->from_gps && b->alt_valid, b->alt_m, b->comment);
+}
+
+bool gps_build_beacon_info(char *out, size_t out_len) {
+    beacon_snap_t b;
+    beacon_snapshot(&b);
+    if (!b.have) return false;
+    format_from_snap(out, out_len, &b);
+    return true;
+}
+
+void gps_build_beacon_info_at(char *out, size_t out_len, double lat, double lon,
+                              bool has_cse, int cse, int spd,
+                              char sym_code, const char *comment) {
+    beacon_snap_t b;
+    beacon_snapshot(&b);
+    format_info(out, out_len, lat, lon, has_cse, cse, spd, b.tbl,
+                sym_code ? sym_code : b.code,
+                b.alt_opt && b.from_gps && b.alt_valid, b.alt_m,
+                comment ? comment : b.comment);
+}
+
+// Periodo SmartBeaconing (HamHUD) en segundos según la velocidad (km/h).
+static int smart_rate_s(const smart_cfg_t *c, double kmh) {
+    if (kmh <= c->slow_speed_kmh) return c->slow_rate_s;
+    if (kmh >= c->fast_speed_kmh) return c->fast_rate_s;
+    double r = (double)c->fast_rate_s * c->fast_speed_kmh / kmh;
+    if (r < c->fast_rate_s) r = c->fast_rate_s;
+    if (r > c->slow_rate_s) r = c->slow_rate_s;
+    return (int)r;
+}
+
 // Periodic APRS position beacon. Only queues a frame (APRS_queue_beacon is
 // non-blocking); the actual TX happens in receive_audio_task.
-// La primera baliza sale BEACON_FIRST_DELAY_S s después de tener fix estable;
-// las siguientes cada beacon_period_s.
+// La primera baliza sale BEACON_FIRST_DELAY_S s después de tener posición
+// (fix estable o posición fija); las siguientes cada beacon_period_s, o según
+// SmartBeaconing (velocidad y cambio de rumbo) si gps.smart_beacon.enabled.
 static void gps_beacon_task(void *arg) {
     int64_t last_tx_us   = 0;      // 0 = aún no se ha enviado ninguna
     int64_t valid_since  = 0;
+    float   last_course  = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         int64_t now = esp_timer_get_time();
 
-        gps_lock_pos();
-        bool   valid  = g_gps_pos.valid;
-        double lat    = g_gps_pos.lat;
-        double lon    = g_gps_pos.lon;
-        float  course = g_gps_pos.course_deg;
-        float  speed  = g_gps_pos.speed_knots;
-        char   tbl    = s_sym_table, code = s_sym_code;
-        bool   cs     = s_course_speed;
-        char   comment[sizeof(s_comment)];
-        memcpy(comment, s_comment, sizeof(comment));
-        gps_unlock_pos();
-
-        if (!valid) { valid_since = 0; continue; }
+        beacon_snap_t b;
+        beacon_snapshot(&b);
+        if (!b.have) { valid_since = 0; continue; }
         if (!valid_since) valid_since = now;
 
         bool due;
-        if (!last_tx_us) due = (now - valid_since) >= (int64_t)BEACON_FIRST_DELAY_S * 1000000LL;
-        else             due = (now - last_tx_us) >= (int64_t)s_beacon_period_s * 1000000LL;
+        if (!last_tx_us) {
+            due = (now - valid_since) >= (int64_t)BEACON_FIRST_DELAY_S * 1000000LL;
+        } else {
+            double elapsed = (double)(now - last_tx_us) / 1e6;
+            if (b.smart.enabled) {
+                double kmh = b.from_gps ? b.speed_kn * 1.852 : 0.0;
+                due = elapsed >= smart_rate_s(&b.smart, kmh);
+                // Corner pegging: sólo con velocidad suficiente (el rumbo a baja
+                // velocidad no es fiable) y respetando el tiempo mínimo entre giros
+                if (!due && b.from_gps && kmh > b.smart.slow_speed_kmh &&
+                    elapsed >= b.smart.min_turn_time_s) {
+                    double diff = fabs((double)b.course - (double)last_course);
+                    if (diff > 180.0) diff = 360.0 - diff;
+                    if (diff > b.smart.min_turn_deg + (double)b.smart.turn_slope / kmh) due = true;
+                }
+            } else {
+                due = elapsed >= (double)s_beacon_period_s;
+            }
+        }
         if (!due) continue;
 
-        char pos[APRS_POS_BUF_LEN];
-        aprs_format_position(pos, sizeof(pos), lat, lon, code);
-        pos[9] = tbl;   // tabla de símbolos (el formateador compartido usa '/')
-
         char info[96];
-        if (cs)
-            snprintf(info, sizeof(info), "%s%03.0f/%03.0f%s", pos, (double)course, (double)speed, comment);
-        else
-            snprintf(info, sizeof(info), "%s%s", pos, comment);
+        format_from_snap(info, sizeof(info), &b);
         APRS_queue_beacon(info);
-        last_tx_us = now;
+        last_tx_us  = now;
+        last_course = b.course;
         ESP_LOGI(TAG, "beacon sent: %s", info);
         {   // aviso a la web (el log solo mostraba lo enviado desde la propia UI)
             cJSON *ev = cJSON_CreateObject();
@@ -302,13 +405,23 @@ static void gps_beacon_task(void *arg) {
     }
 }
 
+// Baliza inmediata (consola RF). false si no hay posición.
+bool gps_send_beacon_now(void) {
+    char info[96];
+    if (!gps_build_beacon_info(info, sizeof(info))) return false;
+    APRS_queue_beacon(info);
+    return true;
+}
+
 // Aplica en caliente las opciones de la sección "gps" que no requieren reinicio:
 // beacon_period_s, symbol_table, symbol_code, comment, course_speed.
 void gps_reload_config(cJSON *cfg) {
     cJSON *g = cfg ? cJSON_GetObjectItem(cfg, "gps") : NULL;
     int    period = s_beacon_period_s;
     char   tbl = '/', code = '>', comment[sizeof(s_comment)] = "";
-    bool   cs = true;
+    bool   cs = true, alt = false, use_fixed = false;
+    double flat = 0.0, flon = 0.0;
+    smart_cfg_t sm = { false, 60, 5, 180, 1800, 28, 26, 15 };
     if (cJSON_IsObject(g)) {
         cJSON *it = cJSON_GetObjectItem(g, "beacon_period_s");
         if (cJSON_IsNumber(it) && it->valueint > 0) period = it->valueint;
@@ -320,10 +433,38 @@ void gps_reload_config(cJSON *cfg) {
         if (cJSON_IsString(it)) snprintf(comment, sizeof(comment), "%s", it->valuestring);
         it = cJSON_GetObjectItem(g, "course_speed");
         if (cJSON_IsBool(it)) cs = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItem(g, "altitude");
+        if (cJSON_IsBool(it)) alt = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItem(g, "use_fixed");
+        if (cJSON_IsBool(it)) use_fixed = cJSON_IsTrue(it);
+        it = cJSON_GetObjectItem(g, "fixed_lat");
+        if (cJSON_IsNumber(it)) flat = it->valuedouble;
+        it = cJSON_GetObjectItem(g, "fixed_lon");
+        if (cJSON_IsNumber(it)) flon = it->valuedouble;
+        if (flat < -90.0 || flat > 90.0 || flon < -180.0 || flon > 180.0) use_fixed = false;
+        cJSON *sb = cJSON_GetObjectItem(g, "smart_beacon");
+        if (cJSON_IsObject(sb)) {
+            it = cJSON_GetObjectItem(sb, "enabled");
+            if (cJSON_IsBool(it)) sm.enabled = cJSON_IsTrue(it);
+            struct { const char *k; int *v; } nums[] = {
+                { "fast_speed_kmh", &sm.fast_speed_kmh }, { "slow_speed_kmh", &sm.slow_speed_kmh },
+                { "fast_rate_s", &sm.fast_rate_s }, { "slow_rate_s", &sm.slow_rate_s },
+                { "min_turn_deg", &sm.min_turn_deg }, { "turn_slope", &sm.turn_slope },
+                { "min_turn_time_s", &sm.min_turn_time_s } };
+            for (size_t i = 0; i < sizeof(nums) / sizeof(nums[0]); i++) {
+                it = cJSON_GetObjectItem(sb, nums[i].k);
+                if (cJSON_IsNumber(it) && it->valueint > 0) *nums[i].v = it->valueint;
+            }
+            // Coherencia: fast > slow y fast_rate <= slow_rate; si no, valores por defecto
+            if (sm.fast_speed_kmh <= sm.slow_speed_kmh || sm.fast_rate_s > sm.slow_rate_s)
+                sm.enabled = false;
+        }
     }
     s_beacon_period_s = period;
     if (s_pos_mutex) gps_lock_pos();
     s_sym_table = tbl; s_sym_code = code; s_course_speed = cs;
+    s_altitude = alt; s_use_fixed = use_fixed; s_fixed_lat = flat; s_fixed_lon = flon;
+    s_smart = sm;
     memcpy(s_comment, comment, sizeof(s_comment));
     if (s_pos_mutex) gps_unlock_pos();
 }
@@ -351,13 +492,18 @@ void gps_init(cJSON *cfg) {
         }
     }
 
-    if (!enabled) {
-        ESP_LOGI(TAG, "disabled in config");
-        return;
-    }
-
     s_pos_mutex = xSemaphoreCreateMutex();
     gps_reload_config(cfg);
+
+    if (!enabled) {
+        ESP_LOGI(TAG, "disabled in config");
+        // Sin UART pero con posición fija: la baliza periódica sigue funcionando
+        if (s_beacon_enabled && s_use_fixed) {
+            xTaskCreate(gps_beacon_task, "gps_beacon", 3072, NULL, 3, NULL);
+            ESP_LOGI(TAG, "beacon con posición fija (GPS desactivado), period=%ds", s_beacon_period_s);
+        }
+        return;
+    }
 
     uart_config_t ucfg = {
         .baud_rate  = baud,

@@ -89,25 +89,22 @@ static void cmd_tx_morse(const char *src_call, int src_ssid) {
 // ---------------------------------------------------------------------------
 
 static void cmd_tx_aprs_position(const char *src_call, int src_ssid) {
-    gps_lock_pos();
-    bool   valid = g_gps_pos.valid;
-    double lat   = g_gps_pos.lat;
-    double lon   = g_gps_pos.lon;
-    gps_unlock_pos();
-
-    if (!valid) {
+    // Mismo formato que la baliza GPS (símbolo, comentario, altitud, posición fija)
+    char info[96];
+    if (!gps_build_beacon_info(info, sizeof(info))) {
         APRS_queue_msg(src_call, src_ssid, "No GPS fix");
         return;
     }
-
-    // Posición APRS sin comprimir compartida con gps.c y la API
-    char info[APRS_POS_BUF_LEN];
-    aprs_format_position(info, sizeof(info), lat, lon, '>');
     APRS_queue_beacon(info);
     {
-        char ev[80];
-        snprintf(ev, sizeof(ev), "{\"type\":\"beacon_tx\",\"info\":\"%s\"}", info);
-        audio_stream_ws_send_text(ev);
+        cJSON *ev = cJSON_CreateObject();
+        if (ev) {
+            cJSON_AddStringToObject(ev, "type", "beacon_tx");
+            cJSON_AddStringToObject(ev, "info", info);
+            char *txt = cJSON_PrintUnformatted(ev);
+            if (txt) { audio_stream_ws_send_text(txt); cJSON_free(txt); }
+            cJSON_Delete(ev);
+        }
     }
     APRS_queue_msg(src_call, src_ssid, "Position sent");
 }
