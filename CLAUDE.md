@@ -59,6 +59,7 @@ esp32-aprs-modem/
 │   ├── spiffs_data/
 │   │   ├── config.json         # Config activa flasheada en SPIFFS (¡contiene credenciales!)
 │   │   ├── config.json.normal  # Copia de referencia local (en .gitignore)
+│   │   ├── config.json.defaults # Plantilla versionada sin secretos (todas las secciones, incl. `tx`); copiar a config.json y rellenar WiFi/indicativo
 │   │   ├── index.html          # UI web completa (~89 KB, ~1600 líneas, un solo fichero); el build la flashea como index.html.gz (~23 KB) vía build/spiffs_staging
 │   │   └── sstv/               # Imágenes JPEG de usuario (en .gitignore)
 │   └── LibAPRS-esp32-i2s/      # ← REPO GIT ANIDADO (luisesn/LibAPRS-esp32-i2s), no submódulo

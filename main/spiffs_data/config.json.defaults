@@ -1,0 +1,92 @@
+{
+  "version": "1",
+  "aprs": {
+    "callsign": "N0CALL",
+    "ssid": 0,
+    "symbol_table": "/",
+    "symbol_code": ">",
+    "post_rx_tx_delay_ms": 1050
+  },
+  "wifi": [
+    {
+      "ssid": "TU_WIFI",
+      "password": "TU_PASSWORD",
+      "connect_timeout_s": 15
+    }
+  ],
+  "ap": {
+    "enabled": true,
+    "ssid": "APRS_AP",
+    "password": "CAMBIAME_AP"
+  },
+  "ip": {
+    "enabled": true,
+    "mode": "tun",
+    "mtu": 250,
+    "addr": "44.0.0.2",
+    "netmask": "255.255.255.0",
+    "gateway": "44.0.0.1",
+    "remote": {
+      "addr": "44.0.0.3"
+    }
+  },
+  "il2p": {
+    "enabled": false
+  },
+  "digi": {
+    "enabled": false,
+    "alias": [
+      "WIDE1-1",
+      "WIDE2-2",
+      "RELAY"
+    ],
+    "comment": "ESP32-DIGI"
+  },
+  "morse": {
+    "enabled": false,
+    "tone_hz": 1000,
+    "wpm": 20,
+    "period_s": 600
+  },
+  "gps": {
+    "enabled": true,
+    "baud": 9600,
+    "use_for_beacon": true,
+    "beacon_period_s": 600
+  },
+  "display": {
+    "enabled": true,
+    "i2c_addr": 60
+  },
+  "rx": {
+    "dual_modem_enabled": false,
+    "active_modem": "v2",
+    "squelch_threshold": 0,
+    "deemphasis_enabled": false
+  },
+  "remote_cmd": {
+    "enabled": true
+  },
+  "console": {
+    "enabled": true,
+    "tcp": true,
+    "udp": false,
+    "port": 23
+  },
+  "repeater": {
+    "enabled": false,
+    "squelch_threshold": 15,
+    "lockout_ms": 3000,
+    "max_record_s": 3,
+    "tail_delay_ms": 1000,
+    "courtesy_tone_hz": 1000,
+    "courtesy_tone_ms": 200,
+    "cw_id": true
+  },
+  "tx": {
+    "lbt_enabled": false,
+    "lbt_max_wait_ms": 10000,
+    "persist": 63,
+    "slottime_ms": 100
+  }
+}
