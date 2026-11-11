@@ -12,6 +12,17 @@ typedef void (*kiss_frame_cb)(const uint8_t *buf, size_t len);
 
 void kiss_init(kiss_frame_cb on_frame);
 
+// Decodificador reentrante: un contexto por cliente KISS (F5). El callback
+// on_frame es único y global (kiss_init); se invoca desde la tarea que llama
+// a kiss_ctx_rx_byte, así que debe ser seguro entre tareas.
+typedef struct kiss_ctx kiss_ctx_t;
+kiss_ctx_t *kiss_ctx_new(void);                       // NULL si no hay memoria (~0,7 KB)
+void        kiss_ctx_free(kiss_ctx_t *c);
+void        kiss_ctx_reset(kiss_ctx_t *c);
+void        kiss_ctx_rx_byte(kiss_ctx_t *c, uint8_t b);
+
+// Versiones de contexto único (compatibilidad). kiss_rx_byte/kiss_reset operan
+// sobre un contexto por defecto creado en kiss_init.
 // Reset the decoder state machine without touching the registered callback.
 // Call when a client disconnects so the next client starts from a clean state.
 void kiss_reset(void);

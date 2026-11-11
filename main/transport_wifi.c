@@ -6,6 +6,8 @@
 
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -61,10 +63,42 @@ static bool s_radio_started = false;
 // One-shot timer: fires RECONNECT_DELAY_US after a disconnect to retry.
 static esp_timer_handle_t s_reconnect_timer;
 
-// Acceso al fd del cliente sin mutex: en ESP32 (32-bit) leer/escribir un int
-// alineado es atómico. El peor caso es un send() sobre un fd recién cerrado,
-// que falla con EBADF de forma inocua.
-static volatile int s_client_fd = -1;
+// ---------------------------------------------------------------------------
+// Clientes KISS (F5): hasta KISS_MAX_CLIENTS simultáneos, cada uno con su socket,
+// su decodificador KISS, su MessageBuffer de salida y sus dos tareas (lectura y
+// escritura). Un cliente lento o muerto sólo afecta a su propio slot.
+//
+// Acceso al fd sin mutex: en ESP32 (32-bit) leer/escribir un int alineado es
+// atómico. El peor caso es un send() sobre un fd recién cerrado, que falla con
+// EBADF de forma inocua.
+//
+// RAM añadida respecto a un único cliente (v1.6.5: 1 MessageBuffer 3 KB + writer
+// 2,5 KB + server 4 KB + work 1,2 KB ≈ 11 KB), con 2 clientes: tarea de accept
+// 3 KB + por slot (cola 2 KB + tarea de lectura 4 KB + tarea de escritura 2,5 KB
+// + work 1,2 KB + contexto KISS ~0,7 KB ≈ 10,4 KB) × 2 ≈ 24 KB, es decir
+// ≈ +13 KB de heap, reservados una sola vez en el arranque (las tareas son
+// permanentes y no se crean/destruyen por conexión: sin fragmentación).
+// ---------------------------------------------------------------------------
+#define KISS_MAX_CLIENTS   2
+#define KISS_TXQ_BYTES     2048   // por cliente; debe ser > KISS_WORK_BYTES + 4
+#define KISS_WORK_BYTES    1216   // >= 2 + 1 + AX25_MAX_FRAME_LEN*2 (kiss.c)
+
+typedef struct {
+    volatile int         fd;        // -1 = libre/sin cliente
+    volatile bool        busy;      // slot reservado (de accept hasta fin de la tarea cliente)
+    int                  drops;     // descartes seguidos por cliente lento (sólo la tarea writer)
+    uint32_t             qdrops;    // tramas descartadas por cola llena
+    MessageBufferHandle_t txq;
+    TaskHandle_t         rx_task;   // tarea de lectura (se despierta con notify al asignar fd)
+    char                 ip[INET_ADDRSTRLEN];
+    int                  idx;
+} kiss_client_t;
+
+static kiss_client_t s_clients[KISS_MAX_CLIENTS];
+
+static void kiss_clients_invalidate(void) {
+    for (int i = 0; i < KISS_MAX_CLIENTS; i++) s_clients[i].fd = -1;
+}
 
 // Cached network credentials (populated at init, used by reconnect task).
 #define MAX_WIFI_NETS 5
@@ -102,7 +136,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         xEventGroupSetBits(s_wifi_eg, WIFI_STOPPED_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
-        s_client_fd = -1;
+        kiss_clients_invalidate();
         // Orden importante: s_sta_steady se comprueba primero para que un
         // disconnect llegado entre GOT_IP y el fin del ciclo no se pierda.
         if (s_sta_steady) {
@@ -512,6 +546,38 @@ static void wifi_connect(void) {
 // Servidor TCP KISS
 // ---------------------------------------------------------------------------
 
+static void kiss_socket_send(kiss_client_t *c, const uint8_t *buf, size_t len);
+
+// Tarea de lectura de un slot: espera a que server_task le asigne un fd y lee
+// KISS hasta que el cliente cierre. Cada cliente tiene su propio decodificador,
+// así que tramas parciales de uno no se mezclan con las del otro.
+static void kiss_client_task(void *arg) {
+    kiss_client_t *c = (kiss_client_t *)arg;
+    kiss_ctx_t *ctx = kiss_ctx_new();
+    if (!ctx) {
+        ESP_LOGE(TAG, "cliente KISS %d: sin memoria para el decodificador", c->idx);
+        vTaskDelete(NULL);
+        return;
+    }
+    uint8_t buf[256];
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        int fd = c->fd;
+        if (fd >= 0) {
+            kiss_ctx_reset(ctx);
+            int n;
+            while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+                for (int i = 0; i < n; i++)
+                    kiss_ctx_rx_byte(ctx, buf[i]);
+            }
+            ESP_LOGI(TAG, "Cliente KISS %d desconectado (%s)", c->idx, c->ip);
+        }
+        c->fd = -1;
+        if (fd >= 0) close(fd);
+        c->busy = false;   // slot libre para el siguiente accept
+    }
+}
+
 static void server_task(void *arg) {
     struct sockaddr_in addr = {
         .sin_family      = AF_INET,
@@ -536,8 +602,9 @@ static void server_task(void *arg) {
         return;
     }
 
-    listen(server_fd, 1);
-    ESP_LOGI(TAG, "Servidor KISS TCP escuchando en puerto %d", KISS_TCP_PORT);
+    listen(server_fd, KISS_MAX_CLIENTS);
+    ESP_LOGI(TAG, "Servidor KISS TCP escuchando en puerto %d (máx. %d clientes)",
+             KISS_TCP_PORT, KISS_MAX_CLIENTS);
 
     for (;;) {
         struct sockaddr_in client_addr;
@@ -550,17 +617,27 @@ static void server_task(void *arg) {
 
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-        ESP_LOGI(TAG, "Cliente KISS conectado desde %s", client_ip);
+
+        // Slot libre (sólo este hilo reserva slots; la tarea cliente los libera).
+        kiss_client_t *c = NULL;
+        for (int i = 0; i < KISS_MAX_CLIENTS; i++) {
+            if (!s_clients[i].busy && s_clients[i].rx_task) { c = &s_clients[i]; break; }
+        }
+        if (!c) {
+            ESP_LOGW(TAG, "Cliente KISS %s rechazado: ya hay %d conectados",
+                     client_ip, KISS_MAX_CLIENTS);
+            close(fd);
+            continue;
+        }
+        ESP_LOGI(TAG, "Cliente KISS %d conectado desde %s", c->idx, client_ip);
 
         /* KISS hosts can legitimately stay silent for a long time (they only
-         * send when they have a frame to TX), so recv() below has no
-         * timeout — a plain read timeout would kick out idle-but-alive
-         * clients. TCP keepalive instead only fires when the peer stops
-         * ACKing: a client that vanishes without a clean FIN/RST (crash,
-         * cable pull, silent NAT/firewall drop) would otherwise leave this
-         * task blocked in recv() forever, with the single-slot listen()
-         * backlog meaning no other client could ever connect again until
-         * reboot. */
+         * send when they have a frame to TX), so recv() has no timeout — a
+         * plain read timeout would kick out idle-but-alive clients. TCP
+         * keepalive instead only fires when the peer stops ACKing: a client
+         * that vanishes without a clean FIN/RST (crash, cable pull, silent
+         * NAT/firewall drop) would otherwise leave its task blocked in recv()
+         * forever and its slot occupied until reboot. */
         int ka = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
         int ka_idle = 10, ka_intvl = 5, ka_cnt = 3;
@@ -568,24 +645,16 @@ static void server_task(void *arg) {
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
         setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
 
-        // Los envíos los hace kiss_writer_task (no el hook de RX): con el cliente
-        // sin leer, send() expira tras KISS_SEND_TIMEOUT_MS y la trama se descarta.
+        // Los envíos los hace la tarea writer del slot (no el hook de RX): con el
+        // cliente sin leer, send() expira tras KISS_SEND_TIMEOUT_MS y la trama se descarta.
         struct timeval snd_tv = { .tv_sec = 0, .tv_usec = KISS_SEND_TIMEOUT_MS * 1000 };
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
 
-        s_client_fd = fd;
-
-        uint8_t buf[256];
-        int n;
-        while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
-            for (int i = 0; i < n; i++)
-                kiss_rx_byte(buf[i]);
-        }
-
-        ESP_LOGI(TAG, "Cliente KISS desconectado");
-        kiss_reset();   // clear stale partial-frame state before next client connects
-        s_client_fd = -1;
-        close(fd);
+        strlcpy(c->ip, client_ip, sizeof(c->ip));
+        c->drops = 0;
+        c->busy  = true;
+        c->fd    = fd;
+        xTaskNotifyGive(c->rx_task);
     }
 }
 
@@ -637,13 +706,11 @@ static void wifi_reconnect_task(void *arg) {
     }
 }
 
+
 // ---------------------------------------------------------------------------
 // Operaciones del transporte
 // ---------------------------------------------------------------------------
 
-#define KISS_TXQ_BYTES   3072
-#define KISS_WORK_BYTES  1216   // >= 2 + 1 + AX25_MAX_FRAME_LEN*2 (kiss.c)
-static MessageBufferHandle_t s_kiss_txq = NULL;
 static void kiss_writer_task(void *arg);   // definida junto a wifi_transport_write
 
 static void wifi_transport_init(void) {
@@ -653,23 +720,39 @@ static void wifi_transport_init(void) {
     // y los disconnect no programan el timer.
     xTaskCreate(wifi_reconnect_task, "wifi_reconn", 3072, NULL, 5, &s_reconnect_task_handle);
     wifi_connect();
-    s_kiss_txq = xMessageBufferCreate(KISS_TXQ_BYTES);
-    if (s_kiss_txq)
-        xTaskCreate(kiss_writer_task, "kiss_writer", 2560, NULL, 6, NULL);
-    else
-        ESP_LOGE(TAG, "No se pudo crear la cola KISS: sin salida hacia el host");
-    xTaskCreate(server_task, "kiss_tcp_srv", 4096, NULL, 7, NULL);
+
+    for (int i = 0; i < KISS_MAX_CLIENTS; i++) {
+        kiss_client_t *c = &s_clients[i];
+        c->idx = i;
+        c->fd  = -1;
+        c->txq = xMessageBufferCreate(KISS_TXQ_BYTES);
+        if (!c->txq) {
+            ESP_LOGE(TAG, "No se pudo crear la cola KISS %d: slot deshabilitado", i);
+            continue;
+        }
+        char name[16];
+        snprintf(name, sizeof(name), "kiss_wr%d", i);
+        if (xTaskCreate(kiss_writer_task, name, 2560, c, 6, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "No se pudo crear kiss_writer %d: slot deshabilitado", i);
+            continue;
+        }
+        snprintf(name, sizeof(name), "kiss_cli%d", i);
+        if (xTaskCreate(kiss_client_task, name, 4096, c, 7, &c->rx_task) != pdPASS) {
+            c->rx_task = NULL;
+            ESP_LOGE(TAG, "No se pudo crear kiss_cli %d: slot deshabilitado", i);
+        }
+    }
+    xTaskCreate(server_task, "kiss_tcp_srv", 3072, NULL, 7, NULL);
 }
 
-// Envío real al socket del cliente KISS. Sólo lo llama kiss_writer_task: el hook
-// de RX (aprs_poll_task) nunca toca el socket (B2).
-static void kiss_socket_send(const uint8_t *buf, size_t len) {
-    int fd = s_client_fd;
-    if (fd < 0) return;
+// Envío real al socket de un cliente KISS. Sólo lo llama su kiss_writer_task: el
+// hook de RX (aprs_poll_task) nunca toca un socket (B2).
+static void kiss_socket_send(kiss_client_t *c, const uint8_t *buf, size_t len) {
+    int fd = c->fd;
+    if (fd < 0) return;   // sin cliente: se descarta lo que quedara en cola
 
     // Único camino de envío al cliente: una trama KISS por llamada, con
     // SO_SNDTIMEO del socket (150 ms) como tope de espera.
-    static int s_drops = 0;
     size_t sent = 0;
     int err = 0;
     while (sent < len) {
@@ -678,48 +761,53 @@ static void kiss_socket_send(const uint8_t *buf, size_t len) {
         err = errno;
         break;
     }
-    if (sent == len) { s_drops = 0; return; }
+    if (sent == len) { c->drops = 0; return; }
 
     if (err == EAGAIN || err == EWOULDBLOCK) {
         // Cliente que no lee. Con envío parcial el flujo KISS queda cortado a
-        // media trama: cerrar la conexión (server_task limpia al ver el recv).
-        if (sent > 0 || ++s_drops >= KISS_SEND_MAX_DROPS) {
-            ESP_LOGW(TAG, "Cliente KISS no lee (%u/%u B, %d descartes): cerrando",
-                     (unsigned)sent, (unsigned)len, s_drops);
-            s_drops = 0;
+        // media trama: cerrar la conexión (su tarea cliente limpia al ver el recv).
+        if (sent > 0 || ++c->drops >= KISS_SEND_MAX_DROPS) {
+            ESP_LOGW(TAG, "Cliente KISS %d no lee (%u/%u B, %d descartes): cerrando",
+                     c->idx, (unsigned)sent, (unsigned)len, c->drops);
+            c->drops = 0;
             shutdown(fd, SHUT_RDWR);
-        } else if (s_drops == 1 || s_drops % 20 == 0) {
-            ESP_LOGW(TAG, "Cliente KISS lento: trama descartada (%d seguidas)", s_drops);
+        } else if (c->drops == 1 || c->drops % 20 == 0) {
+            ESP_LOGW(TAG, "Cliente KISS %d lento: trama descartada (%d seguidas)",
+                     c->idx, c->drops);
         }
     } else {
-        // Error real (reset, EBADF...): el recv de server_task cerrará el socket.
-        ESP_LOGD(TAG, "send() falló (%d), cliente probablemente desconectado", err);
+        // Error real (reset, EBADF...): el recv de la tarea cliente cerrará el socket.
+        ESP_LOGD(TAG, "send() falló (%d), cliente %d probablemente desconectado", err, c->idx);
         if (sent > 0) shutdown(fd, SHUT_RDWR);
     }
 }
 
-// Cola hacia la tarea de escritura (B2): la recepción tiene prioridad, así que
-// wifi_transport_write sólo copia la trama KISS y vuelve sin esperar jamás. Si el
-// cliente no lee y el buffer se llena, se descartan tramas (el flujo KISS queda
-// íntegro porque cada mensaje es una trama completa).
+// Cola hacia la tarea de escritura de cada cliente (B2/F5): la recepción tiene
+// prioridad, así que wifi_transport_write sólo copia la trama KISS a la cola de
+// cada cliente conectado y vuelve sin esperar jamás. Si un cliente no lee y su
+// cola se llena, se descartan tramas sólo para él (el flujo KISS queda íntegro
+// porque cada mensaje es una trama completa).
 static void kiss_writer_task(void *arg) {
-    (void)arg;
+    kiss_client_t *c = (kiss_client_t *)arg;
     uint8_t *work = (uint8_t *)malloc(KISS_WORK_BYTES);
-    if (!work) { ESP_LOGE(TAG, "kiss_writer: sin memoria"); vTaskDelete(NULL); return; }
+    if (!work) { ESP_LOGE(TAG, "kiss_writer %d: sin memoria", c->idx); vTaskDelete(NULL); return; }
     for (;;) {
-        size_t n = xMessageBufferReceive(s_kiss_txq, work, KISS_WORK_BYTES, portMAX_DELAY);
-        if (n > 0) kiss_socket_send(work, n);
+        size_t n = xMessageBufferReceive(c->txq, work, KISS_WORK_BYTES, portMAX_DELAY);
+        if (n > 0) kiss_socket_send(c, work, n);
     }
 }
 
 static void wifi_transport_write(const uint8_t *buf, size_t len) {
-    if (s_client_fd < 0 || !s_kiss_txq) return;   // sin cliente: no encolar
-    static uint32_t s_qdrops = 0;
-    if (len == 0 || len > KISS_WORK_BYTES ||
-        xMessageBufferSend(s_kiss_txq, buf, len, 0) != len) {
-        s_qdrops++;
-        if (s_qdrops == 1 || s_qdrops % 50 == 0)
-            ESP_LOGW(TAG, "Cola KISS llena: trama descartada (%u en total)", (unsigned)s_qdrops);
+    for (int i = 0; i < KISS_MAX_CLIENTS; i++) {
+        kiss_client_t *c = &s_clients[i];
+        if (c->fd < 0 || !c->txq) continue;   // sin cliente: no encolar
+        if (len == 0 || len > KISS_WORK_BYTES ||
+            xMessageBufferSend(c->txq, buf, len, 0) != len) {
+            c->qdrops++;
+            if (c->qdrops == 1 || c->qdrops % 50 == 0)
+                ESP_LOGW(TAG, "Cola KISS %d llena: trama descartada (%u en total)",
+                         i, (unsigned)c->qdrops);
+        }
     }
 }
 
