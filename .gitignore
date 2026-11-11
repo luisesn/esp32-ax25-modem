@@ -9,3 +9,5 @@ main/spiffs_data/config.json
 
 # server de desarrollo
 server/*.pem
+sdkconfig
+sdkconfig.old
