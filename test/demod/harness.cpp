@@ -56,8 +56,13 @@ static Rx g_rx;
 // Reinicia TODO el estado del demodulador (equivale a un arranque en frío).
 static void demod_reset(int squelch = 64) {
     bp_x1 = bp_x2 = bp_y1 = bp_y2 = 0;
+#if AFSK_V2_CORRELATOR
+    memset(s_v2_corr_ring, 0, sizeof s_v2_corr_ring);
+    s_v2_corr_pos = 0;
+#else
     s_v2_disc_x0 = s_v2_disc_x1 = s_v2_disc_y0 = s_v2_disc_y1 = 0;
     s_v2_lp_x2 = s_v2_lp_y2 = 0;
+#endif
     s_v2_deemph_state = 0;
     dc_offset_v2_q10 = 2048 << 10;
     agc_env_q6 = 32 << 6;
