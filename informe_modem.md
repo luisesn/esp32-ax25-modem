@@ -137,7 +137,7 @@ Ganancia esperada **[Hipótesis]**: notable con señales débiles y con estacion
 
 ### 3.4 Demodulador por correlación (mark/space)
 
-> **Hecho en v1.17.0** (`afsk_v2_correlate`, ventana de 10 muestras): en el banco gana ~4 dB frente al ruido (SNR 7 dB: 5→95 de 100 tramas). El DPLL de §2.7 se cambió en v1.16.0. Los hallazgos de filtros (§2.1, §2.2, §2.6) ya no aplican con `AFSK_V2_CORRELATOR 1`.
+> **Hecho en v1.17.0** (`afsk_v2_correlate`, ventana de 10 muestras): en el banco gana ~4 dB frente al ruido (SNR 7 dB: 5→95 de 100 tramas). El DPLL de §2.7 se cambió en v1.16.0. Los hallazgos de filtros (§2.1, §2.2, §2.6) no aplican al correlador. **Desde v1.18.0** este demodulador es el **v3** (`afsk_v3_process`/`afsk_v3_correlate`) y el «v2» analizado en este informe (filtros + retardo-y-multiplica + DPLL de paso fijo) se conserva en paralelo sólo para comparar (`rx.dual_modem_enabled`).
 
 Sustituir retardo-y-multiplica por dos correladores en cuadratura (1200 y 2200 Hz, ventana de un bit), con la envolvente de cada tono normalizada por separado (AGC por tono) y decisión por diferencia. Ventajas: mejor comportamiento con ruido (unos 2–3 dB frente al detector de retardo según la literatura), inmunidad al twist por construcción, y una medida natural de calidad y de portadora de datos (DCD). Coste: 4 acumulaciones por muestra con ventana deslizante; asumible a 9600 Hz en un ESP32, pero hay que medir CPU porque `receive_audio_task` ya hace Goertzel en coma flotante en `carrier_detect`.
 

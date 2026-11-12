@@ -77,8 +77,8 @@
     "i2c_addr": 60
   },
   "rx": {
-    "dual_modem_enabled": false,
-    "active_modem": "v2",
+    "dual_modem_enabled": true,
+    "active_modem": "best",
     "squelch_threshold": 0,
     "deemphasis_enabled": false
   },

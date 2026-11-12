@@ -261,8 +261,13 @@ static bool check_display(const ctx_t *c, const cJSON *o)
 
 static bool check_rx(const ctx_t *c, const cJSON *o)
 {
-    return t_bool(c, o, "rx", "dual_modem_enabled") && t_str(c, o, "rx", "active_modem") &&
-           t_num(c, o, "rx", "squelch_threshold") && t_bool(c, o, "rx", "deemphasis_enabled");
+    if (!t_bool(c, o, "rx", "dual_modem_enabled") || !t_str(c, o, "rx", "active_modem"))
+        return false;
+    const cJSON *am = item(o, "active_modem");
+    if (am && strcmp(am->valuestring, "v2") != 0 && strcmp(am->valuestring, "v3") != 0 &&
+        strcmp(am->valuestring, "best") != 0)
+        return fail(c, "rx.active_modem debe ser v2, v3 o best");
+    return t_num(c, o, "rx", "squelch_threshold") && t_bool(c, o, "rx", "deemphasis_enabled");
 }
 
 static bool check_remote_cmd(const ctx_t *c, const cJSON *o)

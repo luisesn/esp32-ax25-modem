@@ -3,9 +3,15 @@
 Seguimiento de la resolución de problemas listados en [doc/obsolete/report.md](doc/obsolete/report.md) (informe original, ya no versionado en la raíz). Análisis de mejoras actual: [informe_bugs_funcionalidades.md](informe_bugs_funcionalidades.md) e [informe_modem.md](informe_modem.md) (el anterior, `informe_mejoras.md`, no está versionado).
 Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️ parcial / pendiente verificación HW.
 
-Última actualización: 2026-11-11
+Última actualización: 2026-11-12
 
 ---
+
+## 2026-11-12 — Módem v3 y comparación v2/v3; se retira el v1 (v1.18.0)
+- El demodulador de v1.16.0/v1.17.0 (correlador + DPLL proporcional) pasa a ser el **v3** (`afsk_v3_process`, siempre activo); el **v2** vuelve a ser el de v1.15.3 y corre en paralelo si `rx.dual_modem_enabled` (por defecto true). El RX v1 y las macros `AFSK_RX_V1_ENABLED`/`AFSK_V2_CORRELATOR` se eliminan.
+- `rx.active_modem` = `v3` | `v2` | `best` (por defecto; dedup de 300 ms en `on_ax25_raw_frame`). `/api/rx/stats`: claves `v2`, `v3`, `v2_enabled`, `v3_enabled`, `agc_peak`, `squelch_open`. STATS, consola RF y `rx,stats` comparan v2/v3; `carrier_detect`, telemetría, SURVEY y display leen el v3. IL2P sólo desde el v3.
+- Banco (`demod_synth`, columna `v2` informativa): v3 snr9 39/40, snr7 20/40, reloj ±1–2 % 40/40; v2 snr9 0/40, reloj ±1 % 4–10/40, ±2 % 0/40; corpus real 39 en ambos (pero el v2 da ~40× más CRC erróneos con ruido real: 619 frente a 15).
+- ⚠️ Sin probar en el aire; CPU y pila de `receive_audio_task` con los dos módems sin medir (`/api/sys`). El `config.json` local tiene `dual_modem_enabled:false`: hay que ponerlo a `true` (y `active_modem:"best"`) para ver la comparación.
 
 ## 2026-11-12 — Correlador mark/space en el demodulador v2 (v1.17.0)
 - `afsk_v2_process` sustituye paso banda + retardo-y-multiplica + paso bajo por un correlador en cuadratura (energía a 1200 y 2200 Hz sobre 10 muestras, enteros). `AFSK_V2_CORRELATOR 0` en `AFSK.h` vuelve al detector anterior.

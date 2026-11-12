@@ -326,10 +326,10 @@ static void screen_normal(char *line) {
     }
 
     // --- Page 4: APRS decoder stats ---
-    // Solo demodulador v2 (v1 desactivado, AFSK_RX_V1_ENABLED 0): tramas OK / flags
+    // Demodulador v3 (el principal): tramas OK / flags
     snprintf(line, 32, "APRS:%u ok %u fl",
-             (unsigned)(rx_stats_v2.frames_crc_ok % 1000),
-             (unsigned)(rx_stats_v2.hdlc_flags    % 1000));
+             (unsigned)(rx_stats_v3.frames_crc_ok % 1000),
+             (unsigned)(rx_stats_v3.hdlc_flags    % 1000));
     fb_text(4, 0, line);
 
     fb_hline(5, 0x08);

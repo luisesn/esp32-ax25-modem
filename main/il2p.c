@@ -437,7 +437,7 @@ typedef struct {
     uint8_t  spayload[IL2P_MAX_ENC];
 } il2p_rx_t;
 
-static il2p_rx_t s_rx[2];   /* 0 = modem v1, 1 = modem v2 */
+static il2p_rx_t s_rx[2];   /* sólo se usa el 1 (demodulador v3); el 0 era el RX v1 */
 
 static inline int popcount24(uint32_t v)
 {

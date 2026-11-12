@@ -204,6 +204,8 @@ Arreglo del primer punto: decodificar la cabecera del JPEG y validar dimensiones
 
 Con el v1 desactivado, la fila `APRS:` del display muestra `v1/v2` con el primer valor siempre a 0, y la pestaña STATS conserva la columna v1 vacía. Además, el contador `frames_err` del pie del LOG cuenta sobre todo CRC erróneos producidos por ruido en reposo (≈90 % según las capturas SURVEY), así que no indica calidad. Mostrar sólo v2 y, para los errores, el contador limitado a portadora (`er`).
 
+> **Resuelto en v1.18.0**: el v1 se eliminó; STATS, consola RF y `rx,stats` comparan v2 (detector anterior) y v3 (correlador), y el display muestra el v3.
+
 **B21. ✅ HECHO (v1.9.1) — Consola RF** — [main/rf_console.c](main/rf_console.c) · **[Leído]**
 
 - `config` vuelca el JSON completo por un enlace de 1200 bps (más de un minuto de canal). Limitarlo a un resumen o a una sección (`config aprs`).

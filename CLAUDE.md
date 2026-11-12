@@ -4,7 +4,7 @@ Guía de contexto para Claude Code al trabajar en este repositorio.
 
 ## Resumen del proyecto
 
-Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-11, firmware v1.17.0): **compila limpio (binario ~1,01 MB, ~41 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P estándar (v1.8.0, validado en host con los vectores de la spec; sin probar en el aire), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
+Módem APRS (AX.25 sobre AFSK Bell 202, 1200 bps) sobre **ESP32** usando **ESP-IDF v6.1**. Estado actual (2026-11-12, firmware v1.18.0): **compila limpio (binario ~1,01 MB, ~41 % libre de la partición de app de 1,625 MB), KISS TNC bidireccional operativo, TX verificado en hardware, UI web (log APRS, chat con ACK, audio, SSTV, OTA, TUNE…), comandos remotos vía APRS, gateway IP RFC 1226 (TUN) verificado, IL2P estándar (v1.8.0, validado en host con los vectores de la spec; sin probar en el aire), digipeater WIDEn-N, GPS + baliza periódica, display SSD1306, Listen-Before-Talk. Pendiente: verificación de RX con señal RF real y de los módulos con "HW pendiente" (repetidor, IL2P, display)**.
 
 Se basa en una adaptación de [LibAPRS-esp32-i2s](https://github.com/handiko/LibAPRS-esp32-i2s) (fork de LibAPRS de markqvist para AVR/Arduino). El fork propio vive en **https://github.com/luisesn/LibAPRS-esp32-i2s** y está clonado en `main/LibAPRS-esp32-i2s/` como **repo git anidado** (ver "Librería LibAPRS" más abajo). Reescrita para usar:
 - **DAC continuo** (`dac_continuous`, GPIO 25/DAC1) para la salida de audio.
@@ -50,7 +50,7 @@ esp32-aprs-modem/
 │   ├── rf_console.{h,c}        # Consola de texto (TCP y/o UDP, puerto 23) sobre la interfaz RF de ax25ip
 │   ├── ota.{h,c} / ota_net.{h,c} # OTA por HTTP (/api/ota/upload) y por espota.py (:3232)
 │   ├── delay_tune.{h,c}        # Autoajuste de post_rx_tx_delay_ms por barrido ICMP
-│   ├── rx_stats.{h,c}          # Contadores por demodulador (v1/v2): CRC ok/err, flags, overflows
+│   ├── rx_stats.{h,c}          # Contadores por demodulador (v2/v3): CRC ok/err, flags, overflows
 │   ├── carrier_detect.{h,c}    # Detector de portadora ajena (caída de ruido HF + RMS): canal ocupado para LBT, calidad por trama, /api/carrier
 │   ├── netdiag.{h,c}           # Diagnóstico de red desde la web: ping ICMP y miniconsola TCP/UDP/telnet (/api/netdiag*); anota tramas IP RX/TX
 │   ├── igate.{h,c}             # iGate APRS-IS (RF→IS, IS→RF opcional); sólo si igate.enabled; /api/igate
@@ -72,7 +72,7 @@ esp32-aprs-modem/
 │   └── LibAPRS-esp32-i2s/      # ← REPO GIT ANIDADO (luisesn/LibAPRS-esp32-i2s), no submódulo
 │       └── src/
 │           ├── LibAPRS.{h,cpp} # API de alto nivel (init, queue_msg→int, queue_ack, getCallsign…)
-│           ├── AFSK.{h,cpp}    # Mod/demod AFSK (v1 y v2), DAC TX, ADC RX, cola TX, LBT, inhibición post-RX
+│           ├── AFSK.{h,cpp}    # Mod/demod AFSK (RX v3 y v2), DAC TX, ADC RX, cola TX, LBT, inhibición post-RX
 │           ├── AX25.{h,cpp}    # AX.25 + raw_hook
 │           ├── CRC-CCIT.{h,c}, HDLC.h
 │           ├── FIFO.h          # Cola circular; variantes _locked (portMUX) son static inline
@@ -154,7 +154,7 @@ receive_audio_task (bucle infinito, prio 10):
   2) project_dispatch_hook(): morse_check_and_dispatch / sstv_dispatch_if_pending / repeater_dispatch_if_pending
   3) Si tx_mode==true → vTaskDelay(10ms) y repetir   [pausa durante TX]
   4) adc_continuous_read(timeout=20ms)               [DMA ring buffer]
-  5) Para cada muestra: decimar x5 → adc_to_s8 → AFSK_adc_isr (demod v1 y, si dual_modem, v2)
+  5) Para cada muestra: decimar x5 (FIR) → adc_to_s8_v2 (AGC) → afsk_rx_process (demod v3 y, si dual_modem, v2)
      └── audio_hook → audio_stream_q (ADPCM) + repeater_audio_hook + squelch_sf_push_sample
   6) vTaskDelay(1)                                   [cede CPU a IDLE]
 
@@ -171,7 +171,7 @@ HTTP server (audio_stream.c, port 80): hasta 56 URIs (`max_uri_handlers`), ver t
    ota/upload, repeater/*, squelch/*, tune/*, sys, carrier, survey/*, netdiag/*)
 
 on_ax25_raw_frame (main.c, llamado por el raw_hook de AX25 y de IL2P):
-  ├── rx_frame_is_duplicate()        → descarta la 2ª copia (doble módem), ventana 300 ms
+  ├── rx_frame_is_duplicate()        → descarta la 2ª copia (doble módem v3+v2), ventana 300 ms
   ├── afsk_notify_rx_frame()         → reinicia la ventana de inhibición post-RX
   ├── kiss_send_frame()              → host KISS TCP
   ├── try_auto_ack()                 → si va dirigida a nosotros con {NNN}: APRS_queue_ack()
@@ -248,8 +248,9 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **v1.11.0 (mejoras opcionales §2.2)**: Mic-E y posiciones comprimidas en `heard.c`; `telemetry.c` (T#/PARM/UNIT/EQNS/BITS, `telemetry.enabled`), `igate.c` (APRS-IS, `igate.*`, `rf_gate` sólo mensajes a estaciones oídas <30 min, `/api/igate`), `aprs_objects.c` (`objects.*`, `POST /api/aprs/object|bulletin`), `rx_capture.c` (`GET /api/rx/capture?secs=&rate=9600`, WAV 8 bit), `config_validate.c` (400 en `POST /api/config` si no valida), comandos remotos `rx,stats`/`sys,status`/`sys,reboot` (`remote_cmd.allow_reboot`, `min_interval_s`; config sólo al arrancar) y `sstv.cw_id`. iGate/telemetría/objetos desactivados por defecto: sin tareas ni buffers. Caveat: el vector Mic-E de prueba daba 12.129W en vez de 112.129W (verificar con trama real). Todo sin probar en HW.
 
-- **v1.17.0 (correlador RX v2)**: el detector del v2 es un correlador en cuadratura mark/space (`afsk_v2_correlate`, 10 muestras, enteros; `AFSK_V2_CORRELATOR` en `AFSK.h`, 0 = detector anterior paso banda + retardo-y-multiplica + LP). El AGC y el pre-énfasis opcional siguen delante; DPLL, voto de 5 y HDLC detrás. Banco: ~4 dB más de tolerancia al ruido (snr9 3→39 de 40; snr7 20/40), corpus real igual (39). Sin probar en el aire ni medida la CPU.
-- **v1.16.0 (DPLL proporcional RX v2)**: `afsk_v2_process` (librería) usa fase de 1/32 de muestra (`int16_t currentPhase`) con corrección proporcional en cada transición (0,7; 0,5 en los 4 primeros flags) en vez de ±1/64 de bit. En `test/demod` deriva ±1–2 % pasa de 0–6 a 36–38 de 40 tramas; corpus real sin cambios (39). Sin probar en el aire.
+- **v1.18.0 (módem v3 y comparación v2/v3)**: el demodulador mejorado de v1.16.0/v1.17.0 pasa a llamarse **v3**; el **v2** vuelve a ser el de v1.15.3 y corre en paralelo para comparar; el v1 se elimina. `/api/rx/stats` cambia de claves: `v2`, `v3`, `v2_enabled`, `v3_enabled`, `agc_peak`, `squelch_open` (antes `v1`/`v2`/`v2_agc_peak`/`v2_squelch_open`); STATS, consola RF (`status`) y `rx,stats` muestran v2/v3. `config_validate` rechaza `rx.active_modem` distinto de `v2|v3|best`. Banco: v3 = números de v1.17.0; v2 = los de v1.15.3 (snr9 0/40, reloj ±1 % 4–10/40); corpus real 39 en ambos. ≈+5 KB de DRAM por el segundo módem (FIFOs). El `config.json` local sigue con `dual_modem_enabled:false`/`active_modem:"v2"`: así sólo corre el v3 (con aviso en el log); poner `true`/`"best"` para comparar. Sin probar en el aire ni medida la CPU con los dos.
+- **v1.17.0 (correlador RX v2; desde v1.18.0 es el v3)**: el detector del v2 es un correlador en cuadratura mark/space (`afsk_v2_correlate`, 10 muestras, enteros; `AFSK_V2_CORRELATOR` en `AFSK.h`, 0 = detector anterior paso banda + retardo-y-multiplica + LP). El AGC y el pre-énfasis opcional siguen delante; DPLL, voto de 5 y HDLC detrás. Banco: ~4 dB más de tolerancia al ruido (snr9 3→39 de 40; snr7 20/40), corpus real igual (39). Sin probar en el aire ni medida la CPU.
+- **v1.16.0 (DPLL proporcional RX v2; desde v1.18.0 es el v3)**: `afsk_v2_process` (hoy `afsk_v3_process`, librería) usa fase de 1/32 de muestra (`int16_t currentPhase`) con corrección proporcional en cada transición (0,7; 0,5 en los 4 primeros flags) en vez de ±1/64 de bit. En `test/demod` deriva ±1–2 % pasa de 0–6 a 36–38 de 40 tramas; corpus real sin cambios (39). Sin probar en el aire.
 - **v1.15.3 (3RD en el mapa)**: `heard_note` registraba el tráfico de terceros (`}SRC>DST,PATH:INFO`) con el gateway como origen y sin posición. Ahora anota el gateway (sin posición) y la estación interna con la posición del paquete interno (incl. Mic-E con el destino interno). La línea del mapa también reconoce esos registros (origen interno, path externo). Test `third_party_position_goes_to_inner_station`.
 - **v1.15.2 (mapa)**: la línea de enlace es continua si la ruta es directa o el digipetidor tiene posición, y discontinua (estación→yo) si pasó por un digi sin posición conocida; la estación propia pasa de estrella roja a triángulo verde (como las demás) y el contorno del mapa a verde ejército `#4f6b3a`.
 - **v1.15.1 (path con `*` en el log)**: `ax25_frame_to_json` (main.c) no leía el bit H de los repetidores, así que el path nunca llevaba `*` (ni se veía el último salto, ni el enlace del mapa de v1.15.0 funcionaba para tramas vía digi). Ahora añade `*` a los repetidores con H=1. En tráfico de terceros (`}`) la web muestra `GW <estación que lo pasó a RF> · <path externo>` en vez de «vía <gateway>», que parecía un salto de digipetidor. Sin probar en HW.
@@ -289,9 +290,9 @@ TX (despachado por receive_audio_task desde s_tx_queue):
 
 - **GPIO 26 = PTT = DAC2 (conflicto de recurso)**: GPIO 26 es simultáneamente el pin de PTT y DAC2 del ESP32. `DAC_CHANNEL_MODE_SIMUL` en `switch_to_tx()` puede reconfigurarlo como salida analógica DAC, dejando el GPIO en modo analógico y sacando el PTT del control digital. Mitigación aplicada: llamar `gpio_set_direction(GPIO_PTT_OUT, GPIO_MODE_OUTPUT)` después de `dac_continuous_new_channels()` en `switch_to_tx()` para restaurar el modo digital.
 
-- **Demodulador v1 desactivado** (`AFSK_RX_V1_ENABLED 0` en `AFSK.h` de la librería; el arranque avisa si `rx.dual_modem_enabled`/`rx.active_modem` están en el config): sólo RX v2 (`AFSK_modem_v2` se crea siempre; `rx.dual_modem_enabled`/`rx.active_modem` se ignoran). `AFSK_modem` sigue siendo el modem de TX. `rx_stats_v1` queda a 0; `TNC_MODE_APRS` (`AX25.hook`) no recibe mensajes parseados. Poner a 1 para restaurar el doble módem (entonces aplica lo siguiente).
+- **Demoduladores RX v2 y v3; el v1 ya no existe** (v1.18.0, librería): `AFSK_modem_v3` (correlador mark/space + DPLL proporcional) se crea siempre y es el principal; `AFSK_modem_v2` (el detector de v1.15.3: paso banda + retardo-y-multiplica + paso bajo + DPLL de paso fijo) sólo si `rx.dual_modem_enabled` (por defecto **true** si falta la clave), para comparar. El RX v1 (`AFSK_adc_isr`, macros `AFSK_RX_V1_ENABLED`/`AFSK_V2_CORRELATOR`) se eliminó; `AFSK_modem` es sólo el módem de TX y `TNC_MODE_APRS` (`AX25.hook`) no recibe mensajes parseados. El frente es común y se ejecuta una vez por muestra (FIR ×5 → AGC `adc_to_s8_v2` → squelch → pre-énfasis opcional → `afsk_rx_process`). IL2P sólo se alimenta desde el v3. `rx.active_modem` = `"v3"` | `"v2"` | `"best"` (por defecto; otro valor → `best` con aviso; `"v2"` sin doble módem → entrega el v3 con aviso). Los símbolos `afsk_v2_agc_peak`/`afsk_v2_squelch_open` conservan el nombre pero son del frente común.
 
-- **Doble módem RX entrega cada trama dos veces**: con `rx.active_modem = "best"` (valor por defecto), v1 (`ax25_poll`) y v2 (`aprs_poll_v2`) demodulan el mismo audio y llaman por separado a `s_app_raw_hook` con la misma trama, separados por unos ms. Sin filtro eso significa doble inyección en lwIP (`ax25ip`), doble auto-ACK y doble digipetición — en un ping por RF se ve como `DUP!` y dos ciclos TX. El dedup está **en `on_ax25_raw_frame()`** (`rx_frame_is_duplicate()`, ventana `RX_DUP_WINDOW_MS` = 300 ms, comparación byte a byte), que es el punto donde convergen todos los consumidores. No añadir un segundo filtro en LibAPRS (rompería `rx_stats_v1`/`rx_stats_v2`) ni en `ax25ip.c`/`digipeater.c`.
+- **Doble módem RX entrega cada trama dos veces**: con `rx.active_modem = "best"`, v3 y v2 demodulan el mismo audio y `poll_modem()` (`LibAPRS.cpp`, v3 primero) llama por separado a `s_app_raw_hook` con la misma trama, separados por unos ms. Sin filtro eso significa doble inyección en lwIP (`ax25ip`), doble auto-ACK y doble digipetición — en un ping por RF se ve como `DUP!` y dos ciclos TX. El dedup está **en `on_ax25_raw_frame()`** (`rx_frame_is_duplicate()`, ventana `RX_DUP_WINDOW_MS` = 300 ms, comparación byte a byte), que es el punto donde convergen todos los consumidores. No añadir un segundo filtro en LibAPRS (rompería `rx_stats_v2`/`rx_stats_v3`) ni en `ax25ip.c`/`digipeater.c`. Las métricas de un solo módem (`carrier_detect` `er`, telemetría, SURVEY, display) leen `rx_stats_v3`.
 
 - **Polaridad PTT**: El hardware usa PTT **activo alto** (1 = transmitiendo, 0 = reposo). El control de PTT está centralizado en `AFSK.cpp`. **No invertir** las llamadas a `gpio_set_level`.
 
@@ -338,7 +339,7 @@ Resumen rápido (2026-11-11):
 - UI web (`index.html`): log APRS (incluye tráfico de terceros), CHAT con ACK, audio ADPCM, SSTV, OTA, TUNE, CONFIG, STATS ✅
 - Comandos remotos vía APRS (`remote_cmd.c`), sin autenticación ✅
 - Gateway IP RFC 1226 / TUN (`ax25ip.c`) verificado en hardware ✅
-- Dedup de tramas RX por doble módem en `on_ax25_raw_frame()` ✅
+- Dedup de tramas RX por doble módem (v2/v3) en `on_ax25_raw_frame()` ✅
 - Listen-Before-Talk + inhibición post-RX + autoajuste `post_rx_tx_delay_ms` (TUNE) ✅ (LBT usa `carrier_detect`, siempre activo; desactivado por defecto; cubre cola AFSK, morse y SSTV, no el repetidor; con CSMA p-persistente)
 - GPS + baliza de posición periódica; display SSD1306; digipeater WIDEn-N; baliza CW ✅
 - IL2P ⚠️ reescrito al estándar (v1.8.0): vectores de la spec OK en host, IP (también en modo TUN) como UI AX.25 PID 0xCC estándar, interoperable; pendiente de pruebas en el aire/HW

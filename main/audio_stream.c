@@ -564,20 +564,21 @@ static esp_err_t rx_stats_handler(httpd_req_t *req)
 {
     char buf[448];
     snprintf(buf, sizeof(buf),
-        "{\"v1\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
-        "\"v2\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
-        "\"v2_enabled\":%s,\"v2_agc_peak\":%ld,\"v2_squelch_open\":%s,"
+        "{\"v2\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
+        "\"v3\":{\"frames_ok\":%lu,\"frames_err\":%lu,\"hdlc_flags\":%lu,\"fifo_ov\":%lu},"
+        "\"v2_enabled\":%s,\"v3_enabled\":%s,\"agc_peak\":%ld,\"squelch_open\":%s,"
         "\"audio\":{\"samples\":%lu,\"blocks\":%lu,\"sent\":%lu,\"drop\":%lu,"
         "\"starve\":%lu,\"ws_clients\":%lu,\"hs\":%lu,\"q_waiting\":%u,\"heap\":%u}}",
-        (unsigned long)rx_stats_v1.frames_crc_ok,
-        (unsigned long)rx_stats_v1.frames_crc_err,
-        (unsigned long)rx_stats_v1.hdlc_flags,
-        (unsigned long)rx_stats_v1.fifo_overflows,
         (unsigned long)rx_stats_v2.frames_crc_ok,
         (unsigned long)rx_stats_v2.frames_crc_err,
         (unsigned long)rx_stats_v2.hdlc_flags,
         (unsigned long)rx_stats_v2.fifo_overflows,
+        (unsigned long)rx_stats_v3.frames_crc_ok,
+        (unsigned long)rx_stats_v3.frames_crc_err,
+        (unsigned long)rx_stats_v3.hdlc_flags,
+        (unsigned long)rx_stats_v3.fifo_overflows,
         AFSK_modem_v2 ? "true" : "false",
+        AFSK_modem_v3 ? "true" : "false",
         (long)afsk_v2_agc_peak,
         afsk_v2_squelch_open ? "true" : "false",
         (unsigned long)s_a_samples, (unsigned long)s_a_blocks,

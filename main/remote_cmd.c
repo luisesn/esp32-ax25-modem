@@ -197,11 +197,11 @@ static void cmd_rx_sstv_list(const char *src_call, int src_ssid) {
 static void cmd_rx_stats(const char *src_call, int src_ssid) {
     // Una línea (<=67 car.): ok/err/flags/overflows por demodulador
     char r[128];
-    snprintf(r, sizeof(r), "RX ok/er/fl/ov v1 %lu/%lu/%lu/%lu v2 %lu/%lu/%lu/%lu",
-             (unsigned long)rx_stats_v1.frames_crc_ok, (unsigned long)rx_stats_v1.frames_crc_err,
-             (unsigned long)rx_stats_v1.hdlc_flags,    (unsigned long)rx_stats_v1.fifo_overflows,
+    snprintf(r, sizeof(r), "RX ok/er/fl/ov v2 %lu/%lu/%lu/%lu v3 %lu/%lu/%lu/%lu",
              (unsigned long)rx_stats_v2.frames_crc_ok, (unsigned long)rx_stats_v2.frames_crc_err,
-             (unsigned long)rx_stats_v2.hdlc_flags,    (unsigned long)rx_stats_v2.fifo_overflows);
+             (unsigned long)rx_stats_v2.hdlc_flags,    (unsigned long)rx_stats_v2.fifo_overflows,
+             (unsigned long)rx_stats_v3.frames_crc_ok, (unsigned long)rx_stats_v3.frames_crc_err,
+             (unsigned long)rx_stats_v3.hdlc_flags,    (unsigned long)rx_stats_v3.fifo_overflows);
     APRS_queue_msg(src_call, src_ssid, r);
 }
 

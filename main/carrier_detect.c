@@ -93,7 +93,7 @@ static void window_done(float hf, float rms)
 
     if (!s_busy) {
         s_hits = enter_ok ? s_hits + 1 : 0;
-        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; s_busy_run = 0; s_err_at_rise = rx_stats_v2.frames_crc_err; }
+        if (s_hits >= CD_ENTER_WINDOWS) { s_busy = true; s_miss = 0; s_busy_events++; s_busy_run = 0; s_err_at_rise = rx_stats_v3.frames_crc_err; }
         else if (!enter_ok && !stay_ok) {
             // canal libre: el suelo sigue al ruido (EMA lenta)
             s_floor_hf  += (hf  - s_floor_hf)  / (float)(1 << CD_FLOOR_SHIFT);
@@ -117,7 +117,7 @@ int carrier_detect_errors_since_rise(void)
     // Solo cuenta mientras hay portadora (o acaba de terminar): en reposo el ruido
     // genera cientos de "tramas" con CRC erróneo que no dicen nada de la señal.
     if (!s_busy && (esp_timer_get_time() - s_last_busy_us) > 1500000) return 0;
-    int d = (int)(rx_stats_v2.frames_crc_err - s_err_at_rise);
+    int d = (int)(rx_stats_v3.frames_crc_err - s_err_at_rise);
     return d < 0 ? 0 : d;
 }
 

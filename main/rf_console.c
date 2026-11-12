@@ -205,12 +205,12 @@ static void cmd_stats(conn_t *c)
 {
     char rsp[256];
     int n = snprintf(rsp, sizeof(rsp),
-        "v1 ok:%lu err:%lu flags:%lu ovf:%lu\r\n"
-        "v2 ok:%lu err:%lu flags:%lu ovf:%lu\r\n",
-        (unsigned long)rx_stats_v1.frames_crc_ok, (unsigned long)rx_stats_v1.frames_crc_err,
-        (unsigned long)rx_stats_v1.hdlc_flags, (unsigned long)rx_stats_v1.fifo_overflows,
+        "v2 ok:%lu err:%lu flags:%lu ovf:%lu\r\n"
+        "v3 ok:%lu err:%lu flags:%lu ovf:%lu\r\n",
         (unsigned long)rx_stats_v2.frames_crc_ok, (unsigned long)rx_stats_v2.frames_crc_err,
-        (unsigned long)rx_stats_v2.hdlc_flags, (unsigned long)rx_stats_v2.fifo_overflows);
+        (unsigned long)rx_stats_v2.hdlc_flags, (unsigned long)rx_stats_v2.fifo_overflows,
+        (unsigned long)rx_stats_v3.frames_crc_ok, (unsigned long)rx_stats_v3.frames_crc_err,
+        (unsigned long)rx_stats_v3.hdlc_flags, (unsigned long)rx_stats_v3.fifo_overflows);
     conn_write(c, rsp, (size_t)n);
 }
 

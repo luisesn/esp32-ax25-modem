@@ -57,7 +57,7 @@ static void telemetry_task(void *arg)
     uint32_t seq = 0;
     uint32_t last_defs = 0;       // s desde arranque del último envío de defs
     int64_t  last_t = esp_timer_get_time();
-    uint32_t last_crc = rx_stats_v2.frames_crc_err;
+    uint32_t last_crc = rx_stats_v3.frames_crc_err;
     uint32_t last_rx = s_rx_cnt, last_tx = s_tx_cnt;
     bool first = true;
 
@@ -76,7 +76,7 @@ static void telemetry_task(void *arg)
         uint32_t dt_s = (uint32_t)((t - last_t) / 1000000);
         if (dt_s < 1) dt_s = 1;
         last_t = t;
-        uint32_t rx = s_rx_cnt, tx = s_tx_cnt, crc = rx_stats_v2.frames_crc_err;
+        uint32_t rx = s_rx_cnt, tx = s_tx_cnt, crc = rx_stats_v3.frames_crc_err;
         uint32_t rx_min = (uint32_t)(((uint64_t)(rx - last_rx) * 60 + dt_s / 2) / dt_s);
         uint32_t tx_min = (uint32_t)(((uint64_t)(tx - last_tx) * 60 + dt_s / 2) / dt_s);
         uint32_t crc_d  = crc - last_crc;

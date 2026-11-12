@@ -77,9 +77,9 @@ static void reset_hook_state(void)
     memset(s_pw, 0, sizeof(s_pw));
     s_pos = 0; s_blk = 0; s_sum = 0; s_sumsq = 0; s_cnt = 0;
     s_peak = 0; s_clip = 0;
-    s_prev_ok    = rx_stats_v2.frames_crc_ok;
-    s_prev_err   = rx_stats_v2.frames_crc_err;
-    s_prev_flags = rx_stats_v2.hdlc_flags;
+    s_prev_ok    = rx_stats_v3.frames_crc_ok;
+    s_prev_err   = rx_stats_v3.frames_crc_err;
+    s_prev_flags = rx_stats_v3.hdlc_flags;
     s_note_len = 0;
 }
 
@@ -110,9 +110,9 @@ static void finish_window(void)
     r->peak  = s_peak;
     r->clip  = s_clip;
 
-    uint32_t ok = rx_stats_v2.frames_crc_ok;
-    uint32_t er = rx_stats_v2.frames_crc_err;
-    uint32_t fl = rx_stats_v2.hdlc_flags;
+    uint32_t ok = rx_stats_v3.frames_crc_ok;
+    uint32_t er = rx_stats_v3.frames_crc_err;
+    uint32_t fl = rx_stats_v3.hdlc_flags;
     r->fr = sat8(ok - s_prev_ok);
     r->fe = sat8(er - s_prev_err);
     r->fl = sat8(fl - s_prev_flags);

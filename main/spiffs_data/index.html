@@ -222,7 +222,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
 .stats-grid td{text-align:right;padding:.05rem .5rem;font-variant-numeric:tabular-nums}
 .stats-grid td:first-child{text-align:left;color:#888;padding-left:0}
 .stats-grid tr:not(:last-child) td,.stats-grid tr:not(:last-child) th{border-bottom:1px solid #191919}
-.stats-v1{color:#7ecfff}.stats-v2{color:#4fc84f}
+.stats-v2{color:#7ecfff}.stats-v3{color:#4fc84f}
 #agc-wrap{flex:1;height:8px;
           background:linear-gradient(90deg,#3a1010 0%,#3a1010 3.9%,#0d2a0d 3.9%,#0d2a0d 78.1%,#3a1010 78.1%,#3a1010 100%);
           border:1px solid #333;border-radius:2px;overflow:hidden;margin:0 .5rem;position:relative}
@@ -466,15 +466,15 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <thead>
           <tr>
             <th></th>
-            <th class="stats-v1">V1</th>
             <th class="stats-v2">V2</th>
+            <th class="stats-v3">V3</th>
           </tr>
         </thead>
         <tbody>
-          <tr><td>Tramas CRC OK</td><td id="s-v1-ok">—</td><td id="s-v2-ok">—</td></tr>
-          <tr><td>CRC ERR (ruido)</td><td id="s-v1-err">—</td><td id="s-v2-err">—</td></tr>
-          <tr><td>Flags HDLC</td><td id="s-v1-flags">—</td><td id="s-v2-flags">—</td></tr>
-          <tr><td>FIFO overflows</td><td id="s-v1-ov">—</td><td id="s-v2-ov">—</td></tr>
+          <tr><td>Tramas CRC OK</td><td id="s-v2-ok">—</td><td id="s-v3-ok">—</td></tr>
+          <tr><td>CRC ERR (ruido)</td><td id="s-v2-err">—</td><td id="s-v3-err">—</td></tr>
+          <tr><td>Flags HDLC</td><td id="s-v2-flags">—</td><td id="s-v3-flags">—</td></tr>
+          <tr><td>FIFO overflows</td><td id="s-v2-ov">—</td><td id="s-v3-ov">—</td></tr>
         </tbody>
       </table>
       <div class="send-row">
@@ -483,7 +483,7 @@ h1{font-size:1.2rem;letter-spacing:.1em;color:#7ecfff}
         <span id="agc-val" style="font-size:.7rem;color:#555;min-width:2rem;text-align:right">—</span>
       </div>
       <div class="stats-badges">
-        <span id="v2-badge" class="bdg bdg-off">V2 desactivado</span>
+        <span id="v2-badge" class="bdg bdg-off">Sólo V3</span>
         <span id="squelch-badge" class="bdg bdg-off">Squelch cerrado</span>
       </div>
       <div id="igate-box" hidden style="border:1px solid #23272e;border-radius:4px;padding:.4rem .6rem;font-size:.68rem;color:#9ab">
@@ -1195,7 +1195,7 @@ function logCountUpdate(){
 }
 function logFootStats(){
   api('/api/rx/stats').then(d=>{
-    const v=d.v2_enabled?d.v2:d.v1;
+    const v=d.v3;
     document.getElementById('lf-ok').textContent=v.frames_ok;
     document.getElementById('lf-err').textContent=v.frames_err;
   }).catch(()=>{});
@@ -1588,33 +1588,32 @@ function fmtAPRSLon(lon){
 let statsTimer=null;
 function loadStats(){
   api('/api/rx/stats').then(d=>{
-    const v1act=(d.v1.frames_ok+d.v1.frames_err+d.v1.hdlc_flags)>0;
-    document.querySelectorAll('.stats-v1,[id^="s-v1-"]').forEach(e=>{
-      const c=e.closest('td,th')||e;c.style.display=v1act?'':'none';});
-    document.getElementById('s-v1-ok').textContent    = d.v1.frames_ok;
-    document.getElementById('s-v1-err').textContent   = d.v1.frames_err;
-    document.getElementById('s-v1-flags').textContent = d.v1.hdlc_flags;
-    document.getElementById('s-v1-ov').textContent    = d.v1.fifo_ov;
-    document.getElementById('s-v2-ok').textContent    = d.v2_enabled ? d.v2.frames_ok  : '—';
-    document.getElementById('s-v2-err').textContent   = d.v2_enabled ? d.v2.frames_err : '—';
-    document.getElementById('s-v2-flags').textContent = d.v2_enabled ? d.v2.hdlc_flags : '—';
-    document.getElementById('s-v2-ov').textContent    = d.v2_enabled ? d.v2.fifo_ov    : '—';
-    // v2_agc_peak is in ADC counts, range 4–512 (not 0–127).
+    // v3 = demodulador principal (correlador); v2 = detector anterior, sólo si rx.dual_modem_enabled
+    document.querySelectorAll('.stats-v2,[id^="s-v2-"]').forEach(e=>{
+      const c=e.closest('td,th')||e;c.style.display=d.v2_enabled?'':'none';});
+    for(const m of ['v2','v3']){
+      const on=m==='v3'||d.v2_enabled, o=d[m]||{};
+      document.getElementById('s-'+m+'-ok').textContent    = on ? o.frames_ok  : '—';
+      document.getElementById('s-'+m+'-err').textContent   = on ? o.frames_err : '—';
+      document.getElementById('s-'+m+'-flags').textContent = on ? o.hdlc_flags : '—';
+      document.getElementById('s-'+m+'-ov').textContent    = on ? o.fifo_ov    : '—';
+    }
+    // agc_peak is in ADC counts, range 4–512 (not 0–127).
     // too-weak < 20 (noise floor / no signal), too-loud > 400 (ADC near saturation).
     const AGC_MAX=512, AGC_LO=20, AGC_HI=400;
-    const agcPeak=d.v2_agc_peak, pct=Math.min(Math.abs(agcPeak)/AGC_MAX*100,100);
+    const agcPeak=d.agc_peak, pct=Math.min(Math.abs(agcPeak)/AGC_MAX*100,100);
     const agcBarEl=document.getElementById('agc-bar'),agcValEl=document.getElementById('agc-val');
     agcBarEl.style.width=pct+'%';
-    if(!d.v2_enabled){agcBarEl.style.background='#2a5a2a';agcValEl.textContent='—';agcValEl.style.color='#555';}
+    if(!d.v3_enabled){agcBarEl.style.background='#2a5a2a';agcValEl.textContent='—';agcValEl.style.color='#555';}
     else{const ok=agcPeak>=AGC_LO&&agcPeak<=AGC_HI;
          agcBarEl.style.background=ok?'#2a8a2a':'#8a3030';
          agcValEl.textContent=agcPeak;agcValEl.style.color=ok?'#4fc84f':'#c04040';}
     const v2b=document.getElementById('v2-badge');
-    v2b.textContent=d.v2_enabled?'V2 activo':'V2 desactivado';
+    v2b.textContent=d.v2_enabled?'V2+V3 activos':'Sólo V3';
     v2b.className='bdg '+(d.v2_enabled?'bdg-ok':'bdg-off');
     const sqb=document.getElementById('squelch-badge');
-    sqb.textContent=d.v2_squelch_open?'Squelch ABIERTO':'Squelch cerrado';
-    sqb.className='bdg '+(d.v2_squelch_open?'bdg-ok':'bdg-off');
+    sqb.textContent=d.squelch_open?'Squelch ABIERTO':'Squelch cerrado';
+    sqb.className='bdg '+(d.squelch_open?'bdg-ok':'bdg-off');
     const st=document.getElementById('stats-status');
     st.textContent=new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     loadIgate();

@@ -1,7 +1,7 @@
-// Regresión del demodulador RX v2 en host (sin ESP-IDF).
+// Regresión de los demoduladores RX v3 y v2 en host (sin ESP-IDF).
 //
 // Incluye AFSK.cpp directamente para acceder a las funciones/variables static
-// del demodulador (afsk_v2_process, adc_to_s8_v2, fir5, estado del biquad...).
+// del demodulador (afsk_v3_process, afsk_v2_process, adc_to_s8_v2, fir5, estado del biquad...).
 // El código de producción NO se modifica: las dependencias de ESP-IDF se
 // sustituyen por stubs de test/demod/stubs/.
 //
@@ -13,7 +13,7 @@
 // La cadena por muestra replica receive_audio_task (AFSK.cpp ~1290-1350):
 //   5 muestras crudas de 12 bit a 48 kHz -> FIR fir5 -> adc_to_s8_v2 (DC+AGC)
 //   -> potencia de squelch -> afsk_v2_process -> rxFifo (HDLC con escapes)
-//   -> decodificador de bytes equivalente a aprs_poll_v2 (CRC-CCITT).
+//   -> decodificador de bytes equivalente a poll_modem (CRC-CCITT).
 
 #define CUSTOM_FRAME_SIZE 600   // igual que main/CMakeLists.txt
 #include "../../main/LibAPRS-esp32-i2s/src/AFSK.cpp"
@@ -29,8 +29,8 @@
 #include "CRC-CCIT.h"
 
 // ---- Símbolos que AFSK.cpp espera de otros módulos ---------------------------
-RxStats rx_stats_v1 = {0, 0, 0, 0};
 RxStats rx_stats_v2 = {0, 0, 0, 0};
+RxStats rx_stats_v3 = {0, 0, 0, 0};
 extern "C" void il2p_rx_bit(uint8_t, uint8_t) {}
 extern "C" void il2p_poll(void) {}
 extern "C" void APRS_poll(void) {}
@@ -42,7 +42,7 @@ int LibAPRS_vref = 0;
 static int      g_ov_count = 0;
 static int32_t  g_ov_sum   = 0;
 
-// Decodificador de bytes equivalente a aprs_poll_v2 (LibAPRS.cpp)
+// Decodificador de bytes equivalente a poll_modem (LibAPRS.cpp)
 struct Rx {
     bool     sync = false, escape = false;
     uint16_t crc_in = CRC_CCIT_INIT_VAL;
@@ -51,24 +51,22 @@ struct Rx {
     int      crc_ok = 0, crc_err = 0;
     std::vector<std::vector<uint8_t>> frames;   // tramas correctas (sin CRC)
 };
-static Rx g_rx;
+static Rx g_rx;      // demodulador v3 (el que se evalúa contra los umbrales)
+static Rx g_rx_v2;   // demodulador v2 (columna informativa)
 
 // Reinicia TODO el estado del demodulador (equivale a un arranque en frío).
 static void demod_reset(int squelch = 64) {
     bp_x1 = bp_x2 = bp_y1 = bp_y2 = 0;
-#if AFSK_V2_CORRELATOR
-    memset(s_v2_corr_ring, 0, sizeof s_v2_corr_ring);
-    s_v2_corr_pos = 0;
-#else
+    memset(s_v3_corr_ring, 0, sizeof s_v3_corr_ring);
+    s_v3_corr_pos = 0;
     s_v2_disc_x0 = s_v2_disc_x1 = s_v2_disc_y0 = s_v2_disc_y1 = 0;
     s_v2_lp_x2 = s_v2_lp_y2 = 0;
-#endif
     s_v2_deemph_state = 0;
     dc_offset_v2_q10 = 2048 << 10;
     agc_env_q6 = 32 << 6;
     s_v2_squelch_power = 0;
     v2_hdlc_flags_seen = 0;
-    v2_was_receiving = false;
+    v3_hdlc_flags_seen = 0;
     afsk_v2_agc_peak = 0;
     afsk_v2_squelch_open = false;
     memset(v2_fir_buf, 0, sizeof(v2_fir_buf));
@@ -77,9 +75,13 @@ static void demod_reset(int squelch = 64) {
     s_il2p_enabled = false;
     s_rx_paused = false;
     s_cur_stats = NULL;
-    memset(&rx_stats_v1, 0, sizeof(rx_stats_v1));
+    s_cur_flags_seen = NULL;
     memset(&rx_stats_v2, 0, sizeof(rx_stats_v2));
-    // Réplica de la parte v2 de AFSK_hw_init
+    memset(&rx_stats_v3, 0, sizeof(rx_stats_v3));
+    // Réplica de la parte de RX de AFSK_init (v3 siempre, v2 para comparar)
+    memset(&afsk_v3_instance, 0, sizeof(afsk_v3_instance));
+    AFSK_modem_v3 = &afsk_v3_instance;
+    fifo_init(&AFSK_modem_v3->rxFifo, AFSK_modem_v3->rxBuf, sizeof(AFSK_modem_v3->rxBuf));
     memset(&afsk_v2_instance, 0, sizeof(afsk_v2_instance));
     AFSK_modem_v2 = &afsk_v2_instance;
     AFSK_modem_v2->phaseInc = MARK_INC;
@@ -89,12 +91,12 @@ static void demod_reset(int squelch = 64) {
     for (int i = 0; i < SAMPLESPERBIT / 2; i++) fifo_push(&AFSK_modem_v2->delayFifo, 0);
     g_ov_count = 0; g_ov_sum = 0;
     g_rx = Rx();
+    g_rx_v2 = Rx();
 }
 
-static void rx_poll(void) {
+static void rx_poll_one(Rx &r, int (*getchar_fn)(void)) {
     int c;
-    Rx &r = g_rx;
-    while ((c = afsk_getchar_v2()) != EOF) {
+    while ((c = getchar_fn()) != EOF) {
         if (!r.escape && c == HDLC_FLAG) {
             if (r.len >= AX25_MIN_FRAME_LEN) {
                 if (r.crc_in == AX25_CRC_CORRECT) {
@@ -117,6 +119,11 @@ static void rx_poll(void) {
     }
 }
 
+static void rx_poll(void) {
+    rx_poll_one(g_rx, afsk_getchar_v3);
+    rx_poll_one(g_rx_v2, afsk_getchar_v2);
+}
+
 // Alimenta una muestra cruda de 12 bit a 48 kHz (bucle interior de receive_audio_task).
 static void feed_raw(uint16_t raw) {
     v2_fir_buf[g_ov_count] = raw;
@@ -129,7 +136,7 @@ static void feed_raw(uint16_t raw) {
         int8_t s8_v2 = adc_to_s8_v2(avg12_v2);
         s_v2_squelch_power += ((int32_t)s8_v2 * s8_v2 - s_v2_squelch_power) >> 8;
         afsk_v2_squelch_open = (s_v2_squelch_power > s_squelch_threshold);
-        if (afsk_v2_squelch_open) afsk_v2_process(AFSK_modem_v2, s8_v2);
+        if (afsk_v2_squelch_open) afsk_rx_process(s8_v2);
         rx_poll();
     }
 }
@@ -253,7 +260,21 @@ struct Scenario {
     int    max_false;     // máximo de tramas con CRC ok que no se enviaron (falsos positivos)
 };
 
-struct Result { int sent, ok, matched, falsepos, crc_err; };
+struct Result { int sent, ok, matched, falsepos, crc_err, v2_matched; };
+
+// Tramas de `got` que coinciden con alguna enviada (cada enviada cuenta una vez).
+static int count_matched(const std::vector<std::vector<uint8_t>> &sent,
+                         const std::vector<std::vector<uint8_t>> &got, int *falsepos) {
+    std::vector<bool> used(sent.size(), false);
+    int matched = 0;
+    for (auto &fr : got) {
+        bool hit = false;
+        for (size_t i = 0; i < sent.size(); i++)
+            if (!used[i] && sent[i] == fr) { used[i] = true; hit = true; break; }
+        if (hit) matched++; else if (falsepos) (*falsepos)++;
+    }
+    return matched;
+}
 
 static Result run_scenario(const Scenario &sc, uint64_t seed, bool verbose = false) {
     demod_reset();
@@ -279,14 +300,9 @@ static Result run_scenario(const Scenario &sc, uint64_t seed, bool verbose = fal
         m.sigma = old;
     }
     for (uint16_t s : m.out) feed_raw(s);
-    Result r{(int)sent.size(), g_rx.crc_ok, 0, 0, g_rx.crc_err};
-    std::vector<bool> used(sent.size(), false);
-    for (auto &fr : g_rx.frames) {
-        bool hit = false;
-        for (size_t i = 0; i < sent.size(); i++)
-            if (!used[i] && sent[i] == fr) { used[i] = true; hit = true; break; }
-        if (hit) r.matched++; else r.falsepos++;
-    }
+    Result r{(int)sent.size(), g_rx.crc_ok, 0, 0, g_rx.crc_err, 0};
+    r.matched    = count_matched(sent, g_rx.frames, &r.falsepos);
+    r.v2_matched = count_matched(sent, g_rx_v2.frames, NULL);
     if (verbose) printf("  [%s seed=%llu] audio=%.1fs\n", sc.name, (unsigned long long)seed, m.out.size() / 48000.0);
     return r;
 }
@@ -390,8 +406,9 @@ static int run_file(const char *path, int expect, bool quiet) {
     for (uint16_t s : raw) feed_raw(s);
     for (int i = 0; i < 48000 / 4; i++) feed_raw(2048);
     if (!quiet) print_frames();
-    printf("%s: %d tramas (CRC err: %d, flags: %u, %.1f s @ %d Hz)", path, g_rx.crc_ok, g_rx.crc_err,
-           (unsigned)rx_stats_v2.hdlc_flags, raw.size() / 48000.0, rate);
+    printf("%s: %d tramas (CRC err: %d, flags: %u, %.1f s @ %d Hz) [v2: %d tramas, CRC err: %d]",
+           path, g_rx.crc_ok, g_rx.crc_err, (unsigned)rx_stats_v3.hdlc_flags, raw.size() / 48000.0, rate,
+           g_rx_v2.crc_ok, g_rx_v2.crc_err);
     if (expect >= 0) {
         bool ok = g_rx.crc_ok >= expect;
         printf("  esperado >= %d: %s", expect, ok ? "OK" : "FALLO");
@@ -422,7 +439,8 @@ static int run_corpus(const char *dir) {
 }
 
 // ---- Batería sintética -----------------------------------------------------------------
-// Umbrales (min_ok) calibrados con el demodulador v2 de v1.11.0 sumando 2 semillas
+// Umbrales (min_ok) del demodulador v3 (el v2 sólo sale en la columna informativa
+// "v2"); calibrados sumando 2 semillas
 // (2 x frames tramas por escenario); se han fijado ~10 % por debajo de lo medido
 // (redondeando hacia abajo) para tolerar cambios menores de filtros sin ser frágiles.
 // Comportamiento determinista (PRNG propio): una regresión real baja el contador.
@@ -435,16 +453,16 @@ static const Scenario kScenarios[] = {
 static int run_synth(bool calibrate) {
     const int seeds = 2;
     int fails = 0;
-    printf("%-26s %6s %6s %6s %6s %7s %6s\n", "escenario", "env", "ok", "match", "falsos", "crcerr", "umbral");
+    printf("%-26s %6s %6s %6s %6s %7s %6s %6s\n", "escenario", "env", "ok", "match", "falsos", "crcerr", "v2", "umbral");
     for (const Scenario &sc : kScenarios) {
-        Result t{0, 0, 0, 0, 0};
+        Result t{0, 0, 0, 0, 0, 0};
         for (int s = 1; s <= seeds; s++) {
             Result r = run_scenario(sc, (uint64_t)s * 1000 + 7);
-            t.sent += r.sent; t.ok += r.ok; t.matched += r.matched; t.falsepos += r.falsepos; t.crc_err += r.crc_err;
+            t.sent += r.sent; t.ok += r.ok; t.matched += r.matched; t.falsepos += r.falsepos; t.crc_err += r.crc_err; t.v2_matched += r.v2_matched;
         }
         bool pass = t.matched >= sc.min_ok && t.falsepos <= sc.max_false;
-        if (calibrate) printf("%-26s %6d %6d %6d %6d %7d   sugerido %d\n", sc.name, t.sent, t.ok, t.matched, t.falsepos, t.crc_err, (int)floor(t.matched * 0.9));
-        else printf("%-26s %6d %6d %6d %6d %7d %6d  %s\n", sc.name, t.sent, t.ok, t.matched, t.falsepos, t.crc_err, sc.min_ok, pass ? "OK" : "FALLO");
+        if (calibrate) printf("%-26s %6d %6d %6d %6d %7d %6d   sugerido %d\n", sc.name, t.sent, t.ok, t.matched, t.falsepos, t.crc_err, t.v2_matched, (int)floor(t.matched * 0.9));
+        else printf("%-26s %6d %6d %6d %6d %7d %6d %6d  %s\n", sc.name, t.sent, t.ok, t.matched, t.falsepos, t.crc_err, t.v2_matched, sc.min_ok, pass ? "OK" : "FALLO");
         if (!pass && !calibrate) fails++;
     }
     printf("%s (%d escenarios fallidos)\n", fails ? "FALLO" : "TODO OK", fails);

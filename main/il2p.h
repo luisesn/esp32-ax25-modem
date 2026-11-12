@@ -29,7 +29,8 @@ void il2p_init(bool enabled, ax25_raw_callback_t cb);
 bool il2p_is_enabled(void);
 
 /* Feed one NRZI-decoded bit from each modem.
- * modem_id: 0 = v1 (AFSK_adc_isr), 1 = v2 (afsk_v2_process).
+ * modem_id: 1 = demodulador v3 (afsk_v3_process), el único que alimenta IL2P
+ * desde v1.18.0 (0 era el RX v1, eliminado).
  * No-op when il2p is disabled. */
 void il2p_rx_bit(uint8_t modem_id, uint8_t nrzi_bit);
 

@@ -515,7 +515,7 @@ static void try_auto_ack(const uint8_t *buf, size_t len)
 static const char *TAG = "ax25rx";
 
 // Ventana de deduplicación RX. Con rx.active_modem = "best" los dos módems
-// (v1 y v2 en LibAPRS.cpp) demodulan el mismo audio y entregan la MISMA trama
+// (v2 y v3 en LibAPRS.cpp) demodulan el mismo audio y entregan la MISMA trama
 // por separado a este hook, separadas por unos pocos ms (observado: 10 ms).
 // Sin filtro, cada trama recibida provoca dos inyecciones en lwIP (ax25ip),
 // dos ACK automáticos y dos digipeticiones: en un ping por RF eso se ve como

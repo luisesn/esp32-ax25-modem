@@ -1,11 +1,27 @@
-# Regresión del demodulador RX v2 en host
+# Regresión de los demoduladores RX v3 y v2 en host
 
 `demod_regress` compila el `AFSK.cpp` **real** de producción (vía `#include` en
 `harness.cpp`, con stubs de ESP-IDF en `stubs/`) y le alimenta audio: sintético o
 capturado. No modifica nada de `main/`. Replica la cadena de `receive_audio_task`
 (5 muestras de 12 bit a 48 kHz → FIR `fir5` → AGC/DC `adc_to_s8_v2` → squelch →
-`afsk_v2_process` → `rxFifo`) y un decodificador de bytes equivalente a
-`aprs_poll_v2` (flags, escapes, CRC-CCITT).
+`afsk_rx_process` → `afsk_v3_process` + `afsk_v2_process` → `rxFifo` de cada uno) y un
+decodificador de bytes equivalente a `poll_modem` (flags, escapes, CRC-CCITT).
+
+Los umbrales (`min_ok`, `--expect`) se aplican al **v3**, el demodulador principal. El
+v2 (detector anterior) se alimenta con el mismo audio y sale en una columna informativa
+(`v2` en `synth`/`calibrate`, `[v2: N tramas, CRC err: M]` en los WAV).
+
+Comparación medida en v1.18.0 (tramas idénticas a las enviadas, de 40):
+
+| Escenario | v3 | v2 |
+|---|---|---|
+| snr12 / snr9 / snr7 | 40 / 39 / 20 | 36 / 0 / 0 |
+| reloj −0,5 % | 40 | 21 |
+| reloj ±1 % (4 escenarios) | 40 | 4–10 |
+| reloj ±2 % | 40 | 0 |
+| tonos −100 Hz | 40 | 36 |
+| resto (limpio, niveles, DC, huecos) | 40 | 39–40 |
+| corpus real (5 WAV) | 39 tramas, 15 CRC err | 39 tramas, 619 CRC err |
 
 ## Uso
 

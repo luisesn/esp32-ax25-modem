@@ -267,6 +267,8 @@ TEST(other_sections_types)
     expect_err("{\"remote_cmd\":{\"enabled\":\"x\"}}", "remote_cmd.enabled");
     expect_err("{\"rx\":{\"squelch_threshold\":\"5\"}}", "rx.squelch_threshold debe ser un número");
     expect_err("{\"rx\":{\"dual_modem_enabled\":\"true\"}}", "rx.dual_modem_enabled debe ser true o false");
+    expect_err("{\"rx\":{\"active_modem\":\"original\"}}", "rx.active_modem debe ser v2, v3 o best");
+    expect_err("{\"rx\":{\"active_modem\":3}}", "rx.active_modem debe ser una cadena");
     expect_err("{\"repeater\":{\"cw_id\":1}}", "repeater.cw_id");
     expect_err("{\"squelch_sf\":{\"hfne_threshold\":\"x\"}}", "squelch_sf.hfne_threshold");
 }
