@@ -7,6 +7,11 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 ---
 
+## 2026-11-12 — Correlador mark/space en el demodulador v2 (v1.17.0)
+- `afsk_v2_process` sustituye paso banda + retardo-y-multiplica + paso bajo por un correlador en cuadratura (energía a 1200 y 2200 Hz sobre 10 muestras, enteros). `AFSK_V2_CORRELATOR 0` en `AFSK.h` vuelve al detector anterior.
+- Banco de host (100 tramas de 180 B, ruido blanco): SNR 9 dB 69→100, 7 dB 5→95, 6 dB 0→84, 5 dB 0→45. `demod_synth`: snr9 3→39 de 40; escenarios nuevos snr7 (20/40) y snr5 (informativo). Corpus real igual (39). Tolera desequilibrio de tonos de ±6 dB en el corpus real sin perder tramas.
+- Pendiente: probar en el aire; medir CPU de `receive_audio_task` (40 MAC por muestra, se espera despreciable).
+
 ## 2026-11-11 — DPLL proporcional en el demodulador v2 (v1.16.0)
 - `afsk_v2_process`: la fase del reloj de bit pasa a resolución 1/32 de muestra y en cada transición se corrige una fracción de su error (0,7; 0,5 en los 4 primeros flags), como Dire Wolf, en vez de ±1/64 de bit fijo. Cierra B25 en deriva de reloj: en `test/demod` los escenarios de ±1 % pasan de 3–6 a 36 de 40 tramas y ±2 % de 0 a 36–38. El corpus real sigue igual (39 tramas CRC OK, estaba saturado). `currentPhase` pasa a `int16_t`.
 - Pendiente: probar en el aire (sin HW). SNR ≤9 dB sigue siendo límite (B25 parcial).
@@ -38,7 +43,7 @@ Convención: ⬜ pendiente · 🟨 en curso · ✅ resuelto en código · ⚠️
 
 - Nuevo `test/` (CMake sin ESP-IDF, ASan/UBSan, `ctest`): unit de kiss, RS/IL2P, dedup, config_validate, digipeater, heard y regresión del demodulador v2 (audio sintético + corpus WAV).
 - ✅ B23 `kiss.c`: FEND tras FESC cierra la trama. ✅ B24 `digipeater.c`: alias `WIDEn-N` acepta `WIDEn-1..N`. v1.11.1 (compila, 41 % libre).
-- ✅ B25 (deriva de reloj resuelta en v1.16.0 con DPLL proporcional; SNR ≤9 dB sigue siendo límite): el demodulador v2 perdía tramas con deriva ≥0,5 % y con SNR ≤9 dB (medido en host; falta validar con capturas reales).
+- ✅ B25 (deriva de reloj resuelta en v1.16.0 con DPLL proporcional; ruido mejorado en v1.17.0 con el correlador): el demodulador v2 perdía tramas con deriva ≥0,5 % y con SNR ≤9 dB (medido en host; falta validar con capturas reales).
 
 ---
 

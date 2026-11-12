@@ -23,8 +23,8 @@ El modo `synth` tarda ~30 s con ASan/UBSan. Los escenarios están en `scenarios.
 (tramas enviadas, longitud, nivel, SNR, deriva de reloj, desplazamiento de tonos,
 preámbulo, ruido/basura entre tramas...). El resultado es determinista (PRNG propio);
 `min_ok` es la suma de tramas **idénticas a las enviadas** sobre 2 semillas, con ~10 %
-de margen respecto a lo medido (recalibrado en v1.16.0 con el DPLL proporcional). Si cambias el demodulador a propósito, ejecuta
-`calibrate` y actualiza `scenarios.inc`. Escenarios con umbral 0 (SNR 9 dB)
+de margen respecto a lo medido (recalibrado en v1.17.0 con el correlador mark/space). Si cambias el demodulador a propósito, ejecuta
+`calibrate` y actualiza `scenarios.inc`. Escenarios con umbral 0 (SNR 5 dB)
 son informativos: documentan un límite actual, no una exigencia.
 
 ## Capturar audio real
